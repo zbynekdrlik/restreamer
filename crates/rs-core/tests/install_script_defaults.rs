@@ -300,20 +300,60 @@ fn install_script_never_references_the_deleted_nbg1_bucket() {
     }
 }
 
+/// True if a `-LocalPort <port>` flag on this line names EXACTLY `port`. Reads
+/// the `skeleton` (string interiors blanked), so a port inside a string literal
+/// cannot count; matches the flag case-insensitively and its value after either
+/// a space or a `:`, quoted or not; and stops at the first non-digit so a longer
+/// number (`89101`) is NOT a false match for `8910`.
+fn has_local_port(skeleton: &str, port: u16) -> bool {
+    const FLAG: &str = "-localport";
+    let lower = skeleton.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(FLAG) {
+        let after = &skeleton[from + at + FLAG.len()..];
+        let value = after
+            .trim_start_matches(|c: char| c == ':' || c.is_whitespace())
+            .trim_start_matches(['"', '\'']);
+        let digits: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.parse::<u32>() == Ok(u32::from(port)) {
+            return true;
+        }
+        from += at + FLAG.len();
+    }
+    false
+}
+
 /// True if an EXECUTABLE `New-NetFirewallRule` statement opens inbound TCP on
-/// `port` with an Allow action. `code_lines` has already stripped comments, so a
-/// rule that only appears in a comment (documented but never run) cannot satisfy
-/// this — the rule must be live script code.
+/// `port` with an Allow action. Matches on `skeleton`, not `code`, so a rule that
+/// only appears inside a comment (stripped by `code_lines`) or inside a string
+/// literal (blanked in the skeleton) cannot satisfy it — it must be live code.
 fn declares_inbound_tcp_allow_rule(lines: &[CodeLine], port: u16) -> bool {
-    let port_flag = format!("-LocalPort {port}");
     lines.iter().any(|l| {
-        let c = &l.code;
-        c.contains("New-NetFirewallRule")
-            && c.contains(&port_flag)
-            && c.contains("-Protocol TCP")
-            && c.contains("-Direction Inbound")
-            && c.contains("-Action Allow")
+        let sk = &l.skeleton;
+        sk.contains("New-NetFirewallRule")
+            && sk.contains("-Protocol TCP")
+            && sk.contains("-Direction Inbound")
+            && sk.contains("-Action Allow")
+            && has_local_port(sk, port)
     })
+}
+
+/// The `-DisplayName "value"` of a firewall statement, read from `code` (the
+/// value lives inside a string literal, which `skeleton` blanks). `None` if the
+/// line has no `-DisplayName` or an unterminated literal.
+fn firewall_display_name(code: &str) -> Option<String> {
+    let idx = code.find("-DisplayName")?;
+    let rest = code[idx + "-DisplayName".len()..].trim_start();
+    let mut chars = rest.chars();
+    let quote = chars.next().filter(|&c| c == '"' || c == '\'')?;
+    let mut name = String::new();
+    for c in chars {
+        if c == quote {
+            return Some(name);
+        }
+        name.push(c);
+    }
+    None
 }
 
 /// #108: a fresh install must open the LAN-facing ports itself. Windows' default
@@ -337,30 +377,39 @@ fn install_script_opens_firewall_for_dashboard_and_rtmp_ports() {
 }
 
 /// The firewall rules must be idempotent — re-running the installer (redeploys
-/// are routine) must not stack duplicate rules. The proven pattern (mirrored
-/// from the CI deploy block) is a `Remove-NetFirewallRule` before each
-/// `New-NetFirewallRule` for the same DisplayName.
+/// are routine) must not stack duplicate rules. The proven pattern is a
+/// `Remove-NetFirewallRule` for the SAME DisplayName BEFORE each
+/// `New-NetFirewallRule` — this asserts that pairing per-name-and-order, not a
+/// mere count parity (which a stray Remove or a wrong-name Remove could satisfy).
 #[test]
 fn install_script_firewall_rules_are_idempotent() {
     let lines = code_lines(&install_script());
-    let news = lines
+
+    let new_rules: Vec<(usize, String)> = lines
         .iter()
-        .filter(|l| l.code.contains("New-NetFirewallRule"))
-        .count();
-    let removes = lines
-        .iter()
-        .filter(|l| l.code.contains("Remove-NetFirewallRule"))
-        .count();
+        .enumerate()
+        .filter(|(_, l)| l.skeleton.contains("New-NetFirewallRule"))
+        .filter_map(|(i, l)| firewall_display_name(&l.code).map(|name| (i, name)))
+        .collect();
+
     assert!(
-        news >= 2,
-        "expected at least 2 New-NetFirewallRule statements (8910 + 1234), found {news}"
+        new_rules.len() >= 2,
+        "expected at least 2 named New-NetFirewallRule statements (8910 + 1234), \
+         found {}",
+        new_rules.len()
     );
-    assert!(
-        removes >= news,
-        "each New-NetFirewallRule must be preceded by a Remove-NetFirewallRule for the same \
-         DisplayName so re-running install.ps1 does not stack duplicate rules \
-         (found {removes} Remove vs {news} New)"
-    );
+
+    for (new_idx, name) in &new_rules {
+        let removed_before = lines[..*new_idx].iter().any(|l| {
+            l.skeleton.contains("Remove-NetFirewallRule")
+                && firewall_display_name(&l.code).as_deref() == Some(name.as_str())
+        });
+        assert!(
+            removed_before,
+            "New-NetFirewallRule \"{name}\" must be preceded by a Remove-NetFirewallRule \
+             for the SAME DisplayName so re-running install.ps1 does not stack duplicates"
+        );
+    }
 }
 
 fn install_script() -> String {
