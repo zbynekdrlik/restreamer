@@ -12,34 +12,68 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rtmp::session::server_session::ServerSession;
 use streamhub::StreamsHub;
 use streamhub::define::{
-    BroadcastEvent, FrameData, NotifyInfo, StreamHubEvent, SubDataType, SubscribeType,
-    SubscriberInfo,
+    BroadcastEvent, FrameData, NotifyInfo, StreamHubEvent, StreamHubEventSender, SubDataType,
+    SubscribeType, SubscriberInfo,
 };
 use streamhub::utils::{RandomDigitCount, Uuid};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
-// Loopback port reservation (issue #148)
+// Loopback port reservation + shared xiu accept loop (issue #148)
 // ---------------------------------------------------------------------------
 
-/// Discover an available loopback ephemeral port.
+/// Reserve a loopback ephemeral port by binding `127.0.0.1:0` and returning the
+/// listener HELD, together with the port it owns.
 ///
-/// NOTE (#148): this is the OLD pick-then-release form kept temporarily so the
-/// `port_reservation` regression test can demonstrate the TOCTOU window. It
-/// binds `127.0.0.1:0`, reads the assigned port, DROPS the listener, and
-/// returns the bare port — so the port is FREE the instant this returns and a
-/// concurrent `bind(0)` (e.g. the TLS bridge listener in
-/// `spawn_recording_xiu_server_tls`) can steal it before the server rebinds.
-pub async fn reserved_loopback_listener() -> u16 {
+/// The returned listener owns the port continuously — there is NO
+/// pick-then-release-then-rebind window a concurrent `bind(0)` could steal
+/// (#148). Callers move the listener straight into [`run_xiu_accept_loop`]: the
+/// socket that reserves the port is the socket that accepts, so two servers can
+/// never be handed the same live port and no stray client can reach a port
+/// whose intended server failed to bind. This removed the `spawn_recording_xiu_server_tls`
+/// self cross-wire (the plain server's freed port being handed to the test's
+/// own TLS bridge listener → `InvalidContentType`).
+pub async fn reserved_loopback_listener() -> (TcpListener, u16) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback ephemeral listener");
     let port = listener.local_addr().expect("local_addr").port();
-    drop(listener); // BUG (#148): release the port -> steal window
-    port
+    (listener, port)
+}
+
+/// Accept RTMP connections on a HELD listener and drive each connection with
+/// xiu's `ServerSession`.
+///
+/// This replaces `rtmp::rtmp::RtmpServer::run()` — which binds by address
+/// string and cannot adopt an existing socket — so the harness can keep the
+/// reserved listener from the moment of port discovery (no close→rebind TOCTOU,
+/// #148). It mirrors xiu's own accept loop exactly: one `ServerSession::new(
+/// stream, sender, gop_num, None)` spawned per accepted connection. Returns
+/// (ending the server task) when `accept()` errors, matching xiu's behaviour.
+async fn run_xiu_accept_loop(
+    listener: TcpListener,
+    event_sender: StreamHubEventSender,
+    gop_num: usize,
+) {
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::debug!("xiu test accept loop stopped: {e}");
+                break;
+            }
+        };
+        let mut session = ServerSession::new(stream, event_sender.clone(), gop_num, None);
+        tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                log::debug!("xiu test session ended: {e}");
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -75,24 +109,16 @@ pub struct RecordedTag {
 /// `live/test`) and a `JoinHandle` that keeps the server alive for the
 /// duration of the test.
 ///
-/// Port-discovery strategy: bind a `TcpListener` to get an ephemeral port,
-/// capture the address, then drop the listener so xiu can bind to the same
-/// address.  There is a small TOCTOU window between the drop and xiu's
-/// `TcpListener::bind`; on a loopback interface this is negligible.  If it
-/// ever bites (see issue #148), set `RTMP_TEST_PORT` to a fixed port number
-/// as an escape hatch.
+/// Port-discovery strategy (#148): reserve the ephemeral port with a HELD
+/// listener ([`reserved_loopback_listener`]) and hand that exact socket to the
+/// accept loop ([`run_xiu_accept_loop`], over xiu's `ServerSession`). The
+/// socket that reserves the port is the socket that accepts, so there is no
+/// close→rebind window and the port cannot be stolen by a concurrent `bind(0)`.
 pub async fn spawn_xiu_server() -> (String, tokio::task::JoinHandle<()>) {
-    // Discover an available ephemeral port.
-    let addr = {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind 127.0.0.1:0");
-        let a = listener.local_addr().expect("local_addr");
-        drop(listener); // release so xiu can bind
-        a
-    };
+    // Reserve the ephemeral port with a held listener (no TOCTOU window).
+    let (listener, port) = reserved_loopback_listener().await;
 
-    // Build the StreamsHub and xiu RtmpServer.
+    // Build the StreamsHub.
     //
     // set_rtmp_push_enabled(true) is required so that the hub emits
     // BroadcastEvent::Publish when the client connects - without this the
@@ -102,23 +128,15 @@ pub async fn spawn_xiu_server() -> (String, tokio::task::JoinHandle<()>) {
     hub.set_rtmp_push_enabled(true);
     let event_sender = hub.get_hub_event_sender();
 
-    let address = addr.to_string();
-
     let handle = tokio::spawn(async move {
-        let mut rtmp_server = rtmp::rtmp::RtmpServer::new(address, event_sender, 0, None);
-
-        // Run hub and server concurrently; either finishing ends the task.
+        // Run hub and accept loop concurrently; either finishing ends the task.
         tokio::select! {
             _ = hub.run() => {}
-            result = rtmp_server.run() => {
-                if let Err(e) = result {
-                    log::debug!("xiu test server stopped: {e}");
-                }
-            }
+            _ = run_xiu_accept_loop(listener, event_sender, 0) => {}
         }
     });
 
-    let url = format!("rtmp://{}/live/test", addr);
+    let url = format!("rtmp://127.0.0.1:{port}/live/test");
     (url, handle)
 }
 
@@ -126,47 +144,31 @@ pub async fn spawn_xiu_server() -> (String, tokio::task::JoinHandle<()>) {
 // Recording server helper
 // ---------------------------------------------------------------------------
 
-/// Spin up a real xiu RTMP server and register a streamhub subscriber that
-/// captures every audio/video frame the publisher sends.
+/// Core recording-server harness: adopt a HELD listener, run a real xiu RTMP
+/// server (via [`run_xiu_accept_loop`]) over it, and register a streamhub
+/// subscriber that captures every audio/video frame the publisher sends.
 ///
-/// The function blocks until the subscriber is fully registered with the hub
-/// (i.e., the caller receives a frame receiver from the hub).  This guarantees
-/// that when the caller invokes `push_flv_bytes`, the subscriber is already in
-/// place and no media frames are lost to a subscriber-registration race.
+/// Taking an already-bound `listener` is what removes the #148 TOCTOU: the
+/// port is reserved by the exact socket that accepts, so there is no
+/// pick-then-release window. `spawn_recording_xiu_server` (fresh ephemeral
+/// port) and `spawn_recording_xiu_server_at` (caller-supplied addr) are thin
+/// wrappers over this core.
 ///
-/// Design:
-/// 1. Spawn the xiu `RtmpServer` + hub in a background task.
-/// 2. Obtain a `BroadcastEvent` receiver from the hub BEFORE `hub.run()`.
-/// 3. Obtain a dedicated `event_sender` for the subscriber.
-/// 4. In a second background task:
-///    - Wait for `BroadcastEvent::Publish` (signals the publisher's publish
-///      command was accepted by xiu).
-///    - Send a `StreamHubEvent::Subscribe` and receive the frame channel.
-///    - Signal readiness back to the caller via a `oneshot`.
-///    - Drain `FrameData` frames into `recorded` until the channel closes.
-/// 5. Return to the caller only after the `oneshot` fires (subscriber ready).
+/// The subscriber task blocks the returned `sub_ready_rx` until it holds a
+/// frame receiver, so no media frames are lost to a subscriber-registration
+/// race.
 ///
 /// Returns:
-/// - `url`          -- `rtmp://127.0.0.1:<port>/live/test` for the pusher
 /// - `recorded`     -- shared accumulator; filled by the subscriber task
 /// - `_server`      -- `JoinHandle` keeping the server + hub alive
 /// - `sub_ready_rx` -- fires when the subscriber has obtained its frame receiver
-pub async fn spawn_recording_xiu_server() -> (
-    String,
+pub async fn spawn_recording_xiu_server_on(
+    listener: TcpListener,
+) -> (
     Arc<Mutex<Vec<RecordedTag>>>,
     tokio::task::JoinHandle<()>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
-    // Discover an available ephemeral port (same TOCTOU caveat as spawn_xiu_server).
-    let addr = {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind 127.0.0.1:0");
-        let a = listener.local_addr().expect("local_addr");
-        drop(listener);
-        a
-    };
-
     let recorded: Arc<Mutex<Vec<RecordedTag>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Build hub with rtmp_push_enabled so BroadcastEvent::Publish fires when
@@ -174,7 +176,8 @@ pub async fn spawn_recording_xiu_server() -> (
     let mut hub = StreamsHub::new(None);
     hub.set_rtmp_push_enabled(true);
 
-    // Dedicated event sender for the subscriber task (obtained before hub.run()).
+    // Dedicated event senders (obtained before hub.run()): one for the accept
+    // loop's ServerSessions, one for the subscriber task.
     let event_sender_for_server = hub.get_hub_event_sender();
     let event_sender_for_sub = hub.get_hub_event_sender();
 
@@ -185,9 +188,6 @@ pub async fn spawn_recording_xiu_server() -> (
     // Oneshot used to signal that the subscriber has obtained its frame receiver
     // and is ready to accept media.  The caller awaits this before pushing data.
     let (sub_ready_tx, sub_ready_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let address = addr.to_string();
-    let url = format!("rtmp://{}/live/test", addr);
 
     let recorded_for_sub = Arc::clone(&recorded);
 
@@ -292,18 +292,12 @@ pub async fn spawn_recording_xiu_server() -> (
         eprintln!("[recorder] frame channel closed; drain complete");
     });
 
-    // Server task: runs xiu RtmpServer and hub concurrently.
+    // Server task: runs the accept loop (over the HELD listener) and hub
+    // concurrently; either finishing ends the task.
     let handle = tokio::spawn(async move {
-        let mut rtmp_server =
-            rtmp::rtmp::RtmpServer::new(address, event_sender_for_server, 0, None);
-
         tokio::select! {
             _ = hub.run() => {}
-            result = rtmp_server.run() => {
-                if let Err(e) = result {
-                    log::debug!("xiu recording test server stopped: {e}");
-                }
-            }
+            _ = run_xiu_accept_loop(listener, event_sender_for_server, 0) => {}
         }
     });
 
@@ -313,6 +307,25 @@ pub async fn spawn_recording_xiu_server() -> (
     // We do NOT wait for sub_ready_rx here -- that wait is done in the test
     // body AFTER push_flv_bytes initiates the publish handshake.
 
+    (recorded, handle, sub_ready_rx)
+}
+
+/// Spin up a recording xiu RTMP server on a fresh ephemeral loopback port.
+///
+/// Reserves the port with a HELD listener (no TOCTOU window, #148) and delegates
+/// to [`spawn_recording_xiu_server_on`].
+///
+/// Returns `(url, recorded, _server, sub_ready_rx)` where `url` is
+/// `rtmp://127.0.0.1:<port>/live/test` for the pusher.
+pub async fn spawn_recording_xiu_server() -> (
+    String,
+    Arc<Mutex<Vec<RecordedTag>>>,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (listener, port) = reserved_loopback_listener().await;
+    let url = format!("rtmp://127.0.0.1:{port}/live/test");
+    let (recorded, handle, sub_ready_rx) = spawn_recording_xiu_server_on(listener).await;
     (url, recorded, handle, sub_ready_rx)
 }
 
@@ -320,14 +333,16 @@ pub async fn spawn_recording_xiu_server() -> (
 // Recording server bound to a specific addr
 // ---------------------------------------------------------------------------
 
-/// Identical to `spawn_recording_xiu_server` but binds xiu to `addr` instead
-/// of discovering a fresh ephemeral port.  Used by the reconnect test to spin
-/// up a replacement server on the exact same port after the first server is
-/// killed.
+/// Like `spawn_recording_xiu_server` but binds the server to `addr` instead of
+/// discovering a fresh ephemeral port.  Used by the reconnect test to spin up a
+/// replacement server on the exact same port after the first server is killed.
 ///
-/// The caller is responsible for ensuring the port is free before calling this
-/// function (e.g. by aborting the previous server task and waiting briefly so
-/// the OS releases the TCP listener).
+/// The listener is bound HERE and held (loud failure on bind error) before the
+/// server task starts — the caller is responsible for ensuring the port is free
+/// before calling (e.g. by aborting the previous server task and waiting briefly
+/// so the OS releases the TCP listener). To spin the FIRST server up race-free,
+/// reserve the port with [`reserved_loopback_listener`] and pass the held
+/// listener to [`spawn_recording_xiu_server_on`] instead.
 pub async fn spawn_recording_xiu_server_at(
     addr: std::net::SocketAddr,
 ) -> (
@@ -335,126 +350,10 @@ pub async fn spawn_recording_xiu_server_at(
     tokio::task::JoinHandle<()>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
-    let recorded: Arc<Mutex<Vec<RecordedTag>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let mut hub = StreamsHub::new(None);
-    hub.set_rtmp_push_enabled(true);
-
-    let event_sender_for_server = hub.get_hub_event_sender();
-    let event_sender_for_sub = hub.get_hub_event_sender();
-    let mut broadcast_rx = hub.get_client_event_consumer();
-
-    let (sub_ready_tx, sub_ready_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let address = addr.to_string();
-    let recorded_for_sub = Arc::clone(&recorded);
-
-    tokio::spawn(async move {
-        let identifier = loop {
-            match tokio::time::timeout(Duration::from_secs(10), broadcast_rx.recv()).await {
-                Ok(Ok(BroadcastEvent::Publish { identifier })) => {
-                    eprintln!(
-                        "[recorder-at] BroadcastEvent::Publish received for {:?}",
-                        identifier
-                    );
-                    break identifier;
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) => {
-                    eprintln!("[recorder-at] broadcast channel closed before Publish");
-                    return;
-                }
-                Err(_) => {
-                    eprintln!("[recorder-at] timed out waiting for BroadcastEvent::Publish");
-                    return;
-                }
-            }
-        };
-
-        let mut frame_rx = loop {
-            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-            let sub_info = SubscriberInfo {
-                id: Uuid::new(RandomDigitCount::Six),
-                sub_type: SubscribeType::RtmpPull,
-                sub_data_type: SubDataType::Frame,
-                notify_info: NotifyInfo {
-                    request_url: String::new(),
-                    remote_addr: String::from("test-recorder-at"),
-                },
-            };
-
-            if event_sender_for_sub
-                .send(StreamHubEvent::Subscribe {
-                    identifier: identifier.clone(),
-                    info: sub_info,
-                    result_sender: result_tx,
-                })
-                .is_err()
-            {
-                eprintln!("[recorder-at] hub event channel closed; cannot subscribe");
-                return;
-            }
-
-            match tokio::time::timeout(Duration::from_millis(500), result_rx).await {
-                Ok(Ok(Ok((data_receiver, _stat)))) => {
-                    if let Some(rx) = data_receiver.frame_receiver {
-                        eprintln!("[recorder-at] subscribed; frame receiver ready");
-                        break rx;
-                    }
-                    eprintln!("[recorder-at] no frame_receiver; retrying...");
-                }
-                Ok(Ok(Err(e))) => {
-                    eprintln!("[recorder-at] subscribe error: {e:?}; retrying...");
-                }
-                _ => {
-                    eprintln!("[recorder-at] subscribe timeout; retrying...");
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-
-        let _ = sub_ready_tx.send(());
-
-        while let Some(frame) = frame_rx.recv().await {
-            match frame {
-                FrameData::Audio { timestamp, data } => {
-                    eprintln!("[recorder-at] audio frame ts={}", timestamp);
-                    recorded_for_sub.lock().await.push(RecordedTag {
-                        tag_type: 8,
-                        timestamp_ms: timestamp,
-                        body: data.to_vec(),
-                    });
-                }
-                FrameData::Video { timestamp, data } => {
-                    eprintln!("[recorder-at] video frame ts={}", timestamp);
-                    recorded_for_sub.lock().await.push(RecordedTag {
-                        tag_type: 9,
-                        timestamp_ms: timestamp,
-                        body: data.to_vec(),
-                    });
-                }
-                _ => {}
-            }
-        }
-        eprintln!("[recorder-at] frame channel closed; drain complete");
-    });
-
-    let handle = tokio::spawn(async move {
-        let mut rtmp_server =
-            rtmp::rtmp::RtmpServer::new(address, event_sender_for_server, 0, None);
-
-        tokio::select! {
-            _ = hub.run() => {}
-            result = rtmp_server.run() => {
-                if let Err(e) = result {
-                    log::debug!("xiu recording-at test server stopped: {e}");
-                }
-            }
-        }
-    });
-
-    (recorded, handle, sub_ready_rx)
+    let listener = TcpListener::bind(addr)
+        .await
+        .expect("bind recording-at listener");
+    spawn_recording_xiu_server_on(listener).await
 }
 
 // ---------------------------------------------------------------------------

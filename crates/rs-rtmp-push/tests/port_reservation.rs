@@ -21,16 +21,23 @@ mod common;
 
 #[tokio::test]
 async fn reserved_loopback_listener_holds_its_port_no_toctou() {
-    let port = common::reserved_loopback_listener().await;
+    let (listener, port) = common::reserved_loopback_listener().await;
 
     // The reserved port must be OWNED the instant reservation returns: a second
     // bind on it MUST fail (EADDRINUSE). With the old drop-then-rebind
-    // discovery the port is free on return, so this bind SUCCEEDS — proving the
-    // steal window a concurrent bind(0) exploits (#148 InvalidContentType
-    // cross-wire).
+    // discovery the port was free on return, letting a concurrent bind(0) (the
+    // TLS bridge listener) steal it (#148 InvalidContentType cross-wire). The
+    // held listener closes that window.
     let steal = std::net::TcpListener::bind(("127.0.0.1", port));
     assert!(
         steal.is_err(),
         "reserved port {port} was free on return — TOCTOU steal window present (#148)"
+    );
+
+    // Sanity: once the reservation is released, the port is free again.
+    drop(listener);
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "port {port} should be free after the reserved listener is dropped"
     );
 }

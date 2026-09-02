@@ -11,8 +11,8 @@ mod common;
 use common::*;
 
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
+use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn handshake_completes_with_local_xiu_server() {
@@ -154,20 +154,17 @@ async fn media_payload_byte_identical_to_source() {
 /// immediate rebind possible, but we rely on the sleep for portability.
 #[tokio::test]
 async fn monotonic_ts_across_reconnect() {
-    // --- Step 1: discover ephemeral port ------------------------------------
-    let addr = {
-        let probe = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind probe listener");
-        let a = probe.local_addr().expect("probe local_addr");
-        drop(probe);
-        a
-    };
+    // --- Step 1: reserve an ephemeral port with a HELD listener -------------
+    // (#148) Server A adopts this exact socket, so there is no
+    // pick-then-release window between discovery and A's bind. Server B
+    // deliberately rebinds the SAME port after A is killed (below).
+    let (listener_a, port) = reserved_loopback_listener().await;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
     let url = format!("rtmp://{}/live/rec", addr);
 
-    // --- Step 2: spin up server A and the pusher ----------------------------
-    let (recorded_a, server_a, sub_ready_a) = spawn_recording_xiu_server_at(addr).await;
+    // --- Step 2: spin up server A (on the reserved listener) and the pusher --
+    let (recorded_a, server_a, sub_ready_a) = spawn_recording_xiu_server_on(listener_a).await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
