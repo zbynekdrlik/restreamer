@@ -3,6 +3,7 @@ paths:
   - "crates/rs-cloud/**"
   - "crates/rs-api/src/delivery*.rs"
   - "crates/rs-api/src/delivery_handlers.rs"
+  - "src-tauri/tauri.conf.json"
 ---
 
 # Hetzner delivery VPS — billing truth, sizing, and the orphan gap
@@ -56,3 +57,39 @@ servers with this box's `client_uuid` is the orphan signature.
 deprecated `cx23`. No CPU/RAM measurement exists anywhere; the only measured numbers are disk
 (~1.8 GB worst case vs the 160 GB a cpx32 ships with) and the 1 Gbit NIC, which is identical across
 the cpx line. Do not treat the current tier as validated.
+
+## How the VPS gets its rs-delivery binary (the acquisition chain, #245/#246)
+
+`start_delivery` (`delivery.rs`) → `delivery_binary::ensure_bucket_binary` HEADs the versioned,
+immutable key `rs-delivery-{version}` in the CLIENT's OWN S3 bucket. **Present → no network** (cloud-init
+`curl`s it from that bucket). **Absent** (typically the client's first event after a version upgrade)
+→ upload the bytes to that key, then cloud-init pulls them. Bytes come, in order:
+
+1. **Bundled binary shipped in the Windows install** (#246, the zero-GitHub path): a Tauri
+   `bundle.resources` sidecar `rs-delivery-linux` (+ `rs-delivery-linux.sha256`) placed next to the
+   exe. rs-api finds it via `current_exe()` (`find_bundled_binary`), sha256-verifies it against the
+   sidecar, uploads it. No `github.com`.
+2. **GitHub release fallback** (`upload_release_binary`): downloads
+   `.../releases/download/restreamer-v{version}/rs-delivery-{version}-linux-amd64` (+ `.sha256`),
+   verifies, uploads. Taken when no bundle is present (dev builds, older installs) OR the bundled
+   file is unusable (unreadable/empty/sha-mismatch → falls back instead of aborting).
+
+**CI never exercises the bundled/absent path:** `ci.yml build-delivery` `aws s3 cp`s the versioned
+key into stream.lan's shared `restreamer-chunks-fsn1` bucket on every push, so stream.lan always
+takes the "key present" branch. The GitHub dependency only ever bit a REAL client (own bucket, not
+pre-primed) on its first post-upgrade event — that is exactly what #246 removed.
+
+## Tauri `bundle.resources` HARD-FAILS the build (and `cargo check`) on a missing file
+
+A file declared in `bundle.resources` (`src-tauri/tauri.conf.json`) MUST exist at build time, or the
+`tauri-build` build script aborts with `resource path '<name>' doesn't exist` — and that build script
+runs on **`cargo check` too**, not just `cargo tauri build`. Consequences:
+
+- Both `build-tauri` jobs (ci.yml + release.yml) MUST stage the file (copy the `build-delivery`
+  artifact to `src-tauri/rs-delivery-linux` + its `.sha256`) BEFORE `cargo tauri build`. This is a
+  strong guard: a broken wiring fails the build LOUD, never ships an installer silently missing the
+  binary.
+- To `cargo check` src-tauri on dev2 you must stage two placeholders first (`truncate -s 0
+  rs-delivery-linux; : > rs-delivery-linux.sha256`) — see the `dev2-build-verify` skill.
+- The one silent-failure point is DROPPING the `bundle.resources` declaration itself (Tauri then just
+  won't bundle it, no error) — guarded by the `test-integrity` `jq` self-check in ci.yml.
