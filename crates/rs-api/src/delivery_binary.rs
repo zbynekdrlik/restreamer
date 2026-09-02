@@ -69,6 +69,36 @@ pub fn binary_url(config: &rs_core::config::Config, client_version: &str) -> Str
     )
 }
 
+/// Where the versioned rs-delivery binary bytes come from when the client
+/// bucket does not yet hold the versioned key. The bundled path (a Linux
+/// binary shipped inside the Windows install) needs no external network — the
+/// zero-GitHub goal of #246; GitHub is the fallback.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BinarySource {
+    /// The Linux binary bundled inside this install (a local file next to the
+    /// running exe).
+    Bundled(std::path::PathBuf),
+    /// Fallback: download the matching asset from the GitHub release.
+    GitHubRelease(String),
+}
+
+/// Public GitHub release URL of the `rs-delivery-{version}-linux-amd64` asset.
+fn github_release_url(client_version: &str) -> String {
+    format!("{RELEASE_BASE}{client_version}/rs-delivery-{client_version}-linux-amd64")
+}
+
+/// Resolve where the versioned binary bytes come from when the S3 key is
+/// absent. Prefers the bundled sidecar shipped with the install; falls back to
+/// the GitHub release when no bundle is available (dev builds, older installs).
+pub fn resolve_binary_source(
+    _bundled: Option<std::path::PathBuf>,
+    client_version: &str,
+) -> BinarySource {
+    // NOTE: current behavior — reaches GitHub even when a bundled binary is
+    // present. Fixed in the GREEN commit (#246).
+    BinarySource::GitHubRelease(github_release_url(client_version))
+}
+
 /// Post-boot gate: does the VPS-reported version match the client's?
 ///
 /// `None` (old binary with no `version` field in `/api/health`) is a mismatch
@@ -441,6 +471,33 @@ mod tests {
             binary_url(&cfg, "0.22.8"),
             "http://localhost:9000/test-bucket/rs-delivery-0.22.8"
         );
+    }
+
+    #[test]
+    fn resolve_binary_source_prefers_bundled_over_github() {
+        // #246: when the install ships a bundled Linux binary, the versioned
+        // key upload must come from that local file — NOT github.com. This is
+        // the zero-external-dependency guarantee the ticket is about.
+        let p = std::path::PathBuf::from("/opt/restreamer/rs-delivery-linux");
+        assert_eq!(
+            resolve_binary_source(Some(p.clone()), "0.29.25"),
+            BinarySource::Bundled(p),
+        );
+    }
+
+    #[test]
+    fn resolve_binary_source_github_when_no_bundle() {
+        // No bundle available (dev build / older install) → GitHub fallback.
+        match resolve_binary_source(None, "0.29.25") {
+            BinarySource::GitHubRelease(url) => {
+                assert!(url.contains("github.com"), "url was {url}");
+                assert!(
+                    url.ends_with("rs-delivery-0.29.25-linux-amd64"),
+                    "url was {url}"
+                );
+            }
+            other => panic!("expected GitHubRelease, got {other:?}"),
+        }
     }
 
     #[test]
