@@ -820,4 +820,62 @@ mod tests {
         assert_eq!(logs.entries.len(), 1);
         assert!(logs.entries[0].message.contains("ffmpeg died"));
     }
+
+    /// #346 — the delivery VPS binary was reported as serving an unauthenticated
+    /// HTTP API on a public IP. It does not: every control/read route is behind
+    /// `require_auth` (a bearer token minted per instance by `DeliveryOrchestrator`,
+    /// shipped in a 0600 cloud-init env file, fail-closed when unset). This test
+    /// ENUMERATES those routes and pins that a request with NO bearer token is
+    /// refused with 401 — so a future addition cannot silently land a control or
+    /// read route outside the gate. (A token IS set on `test_state`; the point is
+    /// that the absence of the *header* is what is rejected.)
+    #[tokio::test]
+    async fn every_protected_route_requires_auth() {
+        let protected: &[(&str, &str)] = &[
+            ("POST", "/api/init"),
+            ("GET", "/api/status"),
+            ("POST", "/api/stop"),
+            ("POST", "/api/endpoints/add"),
+            ("POST", "/api/endpoints/remove"),
+            ("POST", "/api/endpoints/update_start"),
+            ("GET", "/api/logs"),
+        ];
+        let mut reachable = Vec::new();
+        for (method, path) in protected {
+            let app = router(test_state().await);
+            let req = Request::builder()
+                .method(*method)
+                .uri(*path)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            if resp.status() != StatusCode::UNAUTHORIZED {
+                reachable.push(format!("{method} {path} -> {}", resp.status()));
+            }
+        }
+        assert!(
+            reachable.is_empty(),
+            "#346: these delivery routes answered without a bearer token: {reachable:#?}"
+        );
+    }
+
+    /// #346 — the two deliberately-public routes must stay reachable with no
+    /// token: the host skew probe hits `/clock` and the liveness check hits
+    /// `/api/health` before `/api/init` sets the token. Neither can control or
+    /// read delivery state, so they carry no severity. Pinning this stops a
+    /// well-meaning "gate everything" change from breaking the orchestrator's
+    /// readiness poll.
+    #[tokio::test]
+    async fn public_routes_need_no_auth() {
+        for path in ["/api/health", "/clock"] {
+            let app = router(test_state().await);
+            let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "#346: {path} must stay public"
+            );
+        }
+    }
 }
