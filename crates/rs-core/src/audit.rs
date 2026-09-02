@@ -232,6 +232,11 @@ pub enum Action {
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
     /// per 30 s per endpoint by the surrounding caller.
     YoutubeIssueChanged,
+    /// Host-side (#166): FB Graph ingest-health probe observed the mapped
+    /// `health` value change for an FB endpoint. Detail JSON:
+    /// `{from: Option<String>, to: Option<String>}`. Emitted only on transition
+    /// (parity with `YoutubeIssueChanged`), bounded by the surrounding TTL cache.
+    FacebookStatusChanged,
     /// Operator successfully completed an OAuth 2.0 Device Code Flow grant
     /// for a YouTube channel. Detail JSON: `{label, channel_id, scopes}`.
     OAuthGranted,

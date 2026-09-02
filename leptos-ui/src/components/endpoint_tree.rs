@@ -226,6 +226,35 @@ pub fn EndpointTree() -> impl IntoView {
                                         }
                                     })
                                 }}
+                                {move || {
+                                    ep_data.get().facebook_health.map(|h| {
+                                        let data_health = h.health.clone();
+                                        let bitrate = h.video_bitrate_kbps.map(|b| format!("{b} kbps")).unwrap_or_default();
+                                        let tooltip = format!(
+                                            "FB status: {}\nHealth: {}\n{}{}{}{}{}",
+                                            h.status,
+                                            h.health,
+                                            h.resolution.clone().unwrap_or_default(),
+                                            if h.resolution.is_some() && h.frame_rate.is_some() { " @ " } else { "" },
+                                            h.frame_rate.clone().map(|f| format!("{f}fps")).unwrap_or_default(),
+                                            if !bitrate.is_empty() { format!("\n{bitrate}") } else { String::new() },
+                                            h.error.clone().map(|e| format!("\nerror: {e}")).unwrap_or_default(),
+                                        );
+                                        view! {
+                                            <div
+                                                class="fb-health-badge"
+                                                data-testid="fb-health-badge"
+                                                data-health=data_health
+                                            >
+                                                <span class="fb-health-dot"></span>
+                                                <span class="fb-health-text">{h.health.clone()}</span>
+                                                <div class="fb-health-tooltip" data-testid="fb-health-tooltip">
+                                                    {tooltip}
+                                                </div>
+                                            </div>
+                                        }
+                                    })
+                                }}
                                 <span class="endpoint-metrics">
                                     {move || {
                                         let ep = ep_data.get();

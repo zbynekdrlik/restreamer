@@ -78,6 +78,9 @@ fn secret_laden_config() -> Config {
     c.notifications.discord_webhook_url = format!("https://discord.test/api/webhooks/{FAKE}");
     c.notifications.discord_channel_id = "1234567890".to_string();
     c.obs.ws_password = format!("{FAKE}-obs-ws");
+    c.facebook.enabled = true;
+    c.facebook.page_id = "163104934022649".to_string();
+    c.facebook.page_access_token = format!("{FAKE}-fb-page");
     c
 }
 

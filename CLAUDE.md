@@ -28,6 +28,7 @@ auto-load on their `paths:` — you do not invoke those.
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
+- per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure
 

@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     pub youtube: YouTubeOAuthConfig,
     #[serde(default)]
+    pub facebook: FacebookConfig,
+    #[serde(default)]
     pub inpoint: InpointConfig,
     #[serde(default)]
     pub api: ApiConfig,
@@ -124,6 +126,48 @@ pub struct YouTubeOAuthConfig {
     pub client_secret: String,
     #[serde(default)]
     pub device_flow: DeviceFlowConfig,
+}
+
+/// Facebook Live ingestion-monitoring config (#166). Ships DARK — disabled and
+/// empty by default; the FB Graph health probe runs only once the operator sets
+/// `enabled` and a never-expiring Page Access Token, mirroring how
+/// `NotificationsConfig` ships dark. `page_access_token` is masked by the
+/// deny-by-default config redactor (`token` marker). Also settable via
+/// `RESTREAMER_FB_ENABLED` / `RESTREAMER_FB_PAGE_ID` /
+/// `RESTREAMER_FB_PAGE_ACCESS_TOKEN`.
+///
+/// NOTE: `DeliveryOrchestrator` clones `Config` at construction, so toggling
+/// these via `PATCH /api/v1/config` takes effect only after a process restart
+/// (same as every other orchestrator-read config field).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FacebookConfig {
+    /// Master switch. When false (default) no FB Graph probe runs.
+    #[serde(default)]
+    pub enabled: bool,
+    /// FB Page numeric id whose currently-receiving `live_video` is polled.
+    #[serde(default)]
+    pub page_id: String,
+    /// Never-expiring Page Access Token. Empty disables the probe.
+    #[serde(default)]
+    pub page_access_token: String,
+    /// Graph API version, e.g. `v21.0` (matches the CI FB gate).
+    #[serde(default = "default_fb_api_version")]
+    pub api_version: String,
+}
+
+impl Default for FacebookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            page_id: String::new(),
+            page_access_token: String::new(),
+            api_version: default_fb_api_version(),
+        }
+    }
+}
+
+fn default_fb_api_version() -> String {
+    "v21.0".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -529,6 +573,17 @@ impl Config {
         if let Ok(v) = std::env::var("RESTREAMER_OBS_WS_PASSWORD") {
             self.obs.ws_password = v;
         }
+        // FB ingest monitoring (#166) — lets CI / prod drive it via env/secrets
+        // (parity with RESTREAMER_HETZNER_API_TOKEN) without editing config.json.
+        if let Ok(v) = std::env::var("RESTREAMER_FB_ENABLED") {
+            self.facebook.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_FB_PAGE_ID") {
+            self.facebook.page_id = v;
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_FB_PAGE_ACCESS_TOKEN") {
+            self.facebook.page_access_token = v;
+        }
     }
 
     /// Build the S3 prefix for an event's chunks: `{client_uuid}/{event_name}`.
@@ -596,6 +651,7 @@ impl Config {
             },
             hetzner: HetznerConfig::default(),
             youtube: YouTubeOAuthConfig::default(),
+            facebook: FacebookConfig::default(),
             inpoint: InpointConfig::default(),
             api: ApiConfig {
                 port: 0, // random port for tests
@@ -625,6 +681,7 @@ impl Default for Config {
             },
             hetzner: HetznerConfig::default(),
             youtube: YouTubeOAuthConfig::default(),
+            facebook: FacebookConfig::default(),
             inpoint: InpointConfig::default(),
             api: ApiConfig::default(),
             delivery: DeliveryConfig::default(),

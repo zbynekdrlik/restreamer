@@ -11,6 +11,7 @@ pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
 pub mod delivery_binary;
 pub mod delivery_endpoints;
+pub mod delivery_fb_health;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
 pub mod delivery_live_edge;
@@ -363,6 +364,7 @@ async fn delivery_broadcast_loop(
                             delivery_mode: None,
                             rescue_eta_secs: None,
                             youtube_health: None,
+                            facebook_health: None,
                             // Configured but not yet live => Pending (gray).
                             lifecycle: rs_core::models::EndpointLifecycle::Pending,
                         })
@@ -566,6 +568,7 @@ mod max_non_fast_tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: rs_core::models::EndpointLifecycle::Live,
         }
     }

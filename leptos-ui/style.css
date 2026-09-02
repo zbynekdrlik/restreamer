@@ -770,6 +770,39 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 }
 .yt-health-badge:hover .yt-health-tooltip { display: block; }
 
+/* Facebook ingest health badge (#166) — parity with the YT health badge. */
+.fb-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  cursor: help;
+  position: relative;
+}
+.fb-health-badge[data-health="good"] { background: #1b5e20; color: #fff; }
+.fb-health-badge[data-health="bad"]  { background: #b71c1c; color: #fff; }
+.fb-health-badge[data-health="noData"],
+.fb-health-badge[data-health="unknown"] { background: #424242; color: #ccc; }
+.fb-health-badge .fb-health-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+}
+.fb-health-badge .fb-health-text { font-weight: 600; }
+.fb-health-badge .fb-health-tooltip {
+  display: none;
+  position: absolute; top: 100%; left: 0; z-index: 10;
+  white-space: pre;
+  padding: 6px 8px;
+  background: #111; color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  margin-top: 4px;
+  font-size: 0.85em;
+}
+.fb-health-badge:hover .fb-health-tooltip { display: block; }
+
 .oauth-section { padding: var(--spacing-md); border-top: 1px solid var(--border); }
 .oauth-channels-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
 .oauth-channels-table th, .oauth-channels-table td {

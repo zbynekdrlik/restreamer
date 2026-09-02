@@ -12,6 +12,7 @@ members = [
     "crates/rs-cloud",
     "crates/rs-delivery",
     "crates/rs-youtube",
+    "crates/rs-facebook",
 ]
 # src-tauri is excluded from default workspace builds because it requires
 # the frontend to be built first (Tauri generate_context! needs dist/).
@@ -101,6 +102,7 @@ rs-ffmpeg = { path = "crates/rs-ffmpeg" }
 rs-cloud = { path = "crates/rs-cloud" }
 rs-delivery = { path = "crates/rs-delivery" }
 rs-youtube = { path = "crates/rs-youtube" }
+rs-facebook = { path = "crates/rs-facebook" }
 rs-rtmp-push = { path = "crates/rs-rtmp-push" }
 
 [profile.release]

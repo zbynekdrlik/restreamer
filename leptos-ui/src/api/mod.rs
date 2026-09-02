@@ -788,6 +788,8 @@ pub struct CachedDeliveryEndpoint {
     #[serde(default)]
     pub youtube_health: Option<crate::store::YoutubeHealth>,
     #[serde(default)]
+    pub facebook_health: Option<crate::store::FacebookHealth>,
+    #[serde(default)]
     pub lifecycle: crate::store::EndpointLifecycle,
 }
 
