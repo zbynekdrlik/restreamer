@@ -149,6 +149,11 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
+    // #236: consecutive reconnects that sent zero bytes before the peer
+    // closed the connection -- the dead-target classifier (expired FB
+    // broadcast, etc.) in `handle_rust_push`. Reset to 0 by ANY connect
+    // that sends real media, whether it later succeeds or dies mid-stream.
+    let mut consecutive_zero_byte_deaths: u32 = 0;
     // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
     let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
     // Phase 1 (#176): per-consumer rate limiter + clocks for DiskCachePushSample.
@@ -553,6 +558,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     &service_type_str,
                     &mut consecutive_push_errors,
                     &mut consecutive_write_failures,
+                    &mut consecutive_zero_byte_deaths,
                     &stats,
                     &audit_ring,
                     &mut rust_telemetry,

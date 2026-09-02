@@ -69,6 +69,17 @@ impl RtmpPushTelemetry {
         self.chunks_pushed = self.chunks_pushed.saturating_add(1);
     }
 
+    /// Total bytes sent on THIS connect (since the telemetry was last reset
+    /// by constructing a fresh value on reconnect). #236: the dead-target
+    /// classifier in `endpoint_consumer_helpers::handle_rust_push` reads
+    /// this BEFORE the post-error telemetry reset to tell "this session
+    /// never sent any media before the peer closed it" (dead target, e.g.
+    /// an expired FB broadcast) apart from "media was flowing, then the
+    /// peer dropped it" (transient outage -- unchanged fast-recovery path).
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
     pub fn snapshot(&self, close_buf: &[u8]) -> serde_json::Value {
         let now = self.now();
         let time_since_connect_ms =
@@ -177,5 +188,21 @@ mod tests {
         let v = t.snapshot(&buf);
         let hex = v["upstream_close_first_bytes_hex"].as_str().unwrap();
         assert_eq!(hex.len(), 128); // 64 bytes * 2 hex chars
+    }
+
+    // #236: bytes_sent() accessor -- the dead-target classifier in
+    // endpoint_consumer_helpers::handle_rust_push reads this directly.
+    #[test]
+    fn bytes_sent_is_zero_on_a_fresh_connect() {
+        let t = RtmpPushTelemetry::new_for_test_at(0);
+        assert_eq!(t.bytes_sent(), 0);
+    }
+
+    #[test]
+    fn bytes_sent_accumulates_across_multiple_sends() {
+        let mut t = RtmpPushTelemetry::new_for_test_at(0);
+        t.note_send("Video", 100);
+        t.note_send("Audio", 50);
+        assert_eq!(t.bytes_sent(), 150);
     }
 }
