@@ -19,6 +19,7 @@ auto-load on their `paths:` — you do not invoke those.
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
+- per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure
 
