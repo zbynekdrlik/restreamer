@@ -63,6 +63,28 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`
   runs 0 of those. Use `cargo test --bin rs-delivery`.
+- **Never verify `rs-inpoint` with an ISOLATED `-p rs-inpoint` (`--lib` /
+  `--all-targets`) — it fails to compile with `tokio::time::pause … gated behind
+  the "test-util" feature`.** tokio's `full` feature does NOT include
+  `test-util`, and `rs-inpoint`'s `media_receiver` unit tests call
+  `tokio::time::pause()`. It only compiles because `cargo test/clippy
+  --workspace` unifies `test-util` in from ANOTHER workspace crate; a `-p
+  rs-inpoint` build drops that crate from the graph, so the feature vanishes and
+  the LIB-test target won't build. CI runs `--workspace`, so this is a
+  local-isolation artifact, NOT a real error. Verify rs-inpoint with
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` and
+  `cargo test --workspace <filter>`. (The rs-inpoint INTEGRATION test targets —
+  e.g. `--test rtmp_server_e2e` — DO build in isolation, because integration
+  tests compile the lib WITHOUT its `#[cfg(test)]` modules.)
+- **Eliminating a port-bind TOCTOU in a test that starts an xiu RTMP server:**
+  xiu binds internally by address string and cannot adopt a socket, BUT
+  `rtmp::session::server_session::ServerSession` is `pub` — so
+  `rs_inpoint::rtmp_server::RtmpServer` runs its OWN accept loop over it and
+  exposes `run_on_listener(listener, …)` (#148). A test reserves `127.0.0.1:0`,
+  keeps the `std::net::TcpListener` bound, `set_nonblocking(true)` +
+  `tokio::net::TcpListener::from_std`, and hands that exact listener over — no
+  pick→drop→rebind window. Prefer this over `#[serial]`/mutex+retry, which only
+  narrow the window.
 - **`ld terminated with signal 7 [Bus error]` or `No space left on device`
   during a `cargo test --workspace` link = dev2 DISK is FULL, not a code bug.**
   The workspace test links MANY large test binaries (rs-service e2e, rs-api lib
