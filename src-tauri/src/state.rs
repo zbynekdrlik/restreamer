@@ -36,6 +36,10 @@ pub struct AppState {
     /// embedded `rs_api::AppState` reads in its `get_status` handler.
     /// #234.
     rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+    /// Shared orphan-VPS count. Same Arc the runtime orphan reaper writes and
+    /// the embedded `rs_api::AppState` reads in `get_status`, so the tray IPC
+    /// surfaces the orphan banner identically to the LAN dashboard. #352.
+    vps_orphan_count: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AppState {
@@ -49,6 +53,7 @@ impl AppState {
         inpoint_state: InpointState,
         disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
         rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+        vps_orphan_count: Arc<std::sync::atomic::AtomicU8>,
     ) -> Self {
         Self {
             pool,
@@ -59,6 +64,7 @@ impl AppState {
             inpoint_state,
             disk_pressure_level,
             rtmp_stable_since,
+            vps_orphan_count,
         }
     }
 
@@ -87,6 +93,14 @@ impl AppState {
     /// baked into `config.json` at install/upgrade time.
     pub fn s3_region_standard(&self) -> bool {
         self.config.s3_region_is_standard()
+    }
+
+    /// Number of orphaned delivery VPS still billing. Mirrors
+    /// `/api/v1/status.vps_orphan_count` so the tray webview renders the same
+    /// orphan banner as the LAN dashboard (#352).
+    pub fn vps_orphan_count(&self) -> u8 {
+        self.vps_orphan_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Seconds since the RTMP publisher has been continuously stable.

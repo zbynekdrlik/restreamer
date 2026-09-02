@@ -45,6 +45,12 @@ pub struct ServiceCore {
     /// `provided_disk_pressure_level` — shared with Tauri AppState so the
     /// IPC `get_status` exposes the same `rtmp_stable_secs` (#234).
     provided_rtmp_stable_since: Option<Arc<Mutex<Option<Instant>>>>,
+    /// Externally provided orphan-VPS-count atomic. When set, the Tauri GUI
+    /// shares this Arc so its IPC `get_status` reads the SAME count the runtime
+    /// orphan reaper writes — the tray tray-app is the production deployment, so
+    /// without this the orphan banner would never appear on stream.lan (#352,
+    /// mirror of `provided_disk_pressure_level`).
+    provided_vps_orphan_count: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl ServiceCore {
@@ -75,6 +81,7 @@ impl ServiceCore {
             provided_pool: None,
             provided_disk_pressure_level: None,
             provided_rtmp_stable_since: None,
+            provided_vps_orphan_count: None,
         }
     }
 
@@ -105,6 +112,14 @@ impl ServiceCore {
     /// embedded `AppState` (#234, mirror of `with_disk_pressure_level`).
     pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
         self.provided_rtmp_stable_since = Some(arc);
+        self
+    }
+
+    /// Share an externally created `vps_orphan_count` atomic with the embedded
+    /// `AppState` so the Tauri tray IPC `get_status` surfaces the orphan banner,
+    /// same as the HTTP path (#352, mirror of `with_disk_pressure_level`).
+    pub fn with_vps_orphan_count(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
+        self.provided_vps_orphan_count = Some(arc);
         self
     }
 
@@ -240,6 +255,12 @@ impl ServiceCore {
         if let Some(arc) = self.provided_rtmp_stable_since.take() {
             api_state = api_state.with_rtmp_stable_since(arc);
         }
+        // #352: same for the orphan-VPS count, so the reaper writes and the tray
+        // IPC reads the SAME atomic (the boot_orphan_count clone below is taken
+        // AFTER this, so it too shares the Tauri-provided Arc).
+        if let Some(arc) = self.provided_vps_orphan_count.take() {
+            api_state = api_state.with_vps_orphan_count(arc);
+        }
 
         // Capture the disk-critical Arc before `api_state` is moved into
         // `rs_api::serve` below. The disk-pressure monitor (spawned later)
@@ -325,6 +346,10 @@ impl ServiceCore {
         // moved into `serve`, so boot reconciliation (below) can re-establish
         // delivery management after a crash. `serve` consumes `api_state`.
         let boot_delivery_orch = api_state.delivery_orchestrator.clone();
+        // #352: the SAME orphan-count Arc the `get_status` handler reads, cloned
+        // before `api_state` is moved into `serve`, so the runtime orphan reaper
+        // (below) publishes into the exact atomic the dashboard banner polls.
+        let boot_orphan_count = std::sync::Arc::clone(&api_state.vps_orphan_count);
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
@@ -355,6 +380,41 @@ impl ServiceCore {
             if let Err(e) = orch.reconcile_delivery_on_boot(ws_tx.clone()).await {
                 tracing::warn!("reconcile_delivery_on_boot failed: {e}");
             }
+
+            // #352: money-leak reconciliation. Every OTHER teardown path is keyed
+            // on a delivery_instances DB row; when that row is lost (DB
+            // reset/reinstall, a crash in the create window, a forced kill
+            // mid-stop) the Hetzner VPS bills forever, invisible to the app. Run
+            // one sweep now (catch an orphan left by the previous run
+            // immediately) and then on a periodic timer, treating Hetzner as the
+            // source of truth for what is billing. Only servers carrying THIS
+            // install's client_uuid are ever touched (#137).
+            let orphan_orch = std::sync::Arc::clone(orch);
+            let orphan_count = std::sync::Arc::clone(&boot_orphan_count);
+            let orphan_interval_secs = self.config.delivery.orphan_sweep_interval_secs.max(60);
+            let mut orphan_shutdown_rx = shutdown.subscribe();
+            tokio::spawn(async move {
+                // Boot sweep.
+                orphan_orch.reconcile_orphan_vps(&orphan_count).await;
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(orphan_interval_secs));
+                // A slow sweep (many deletes / Hetzner latency) must NOT be chased
+                // by a back-to-back catch-up tick — space the NEXT one a full
+                // interval AFTER this one finishes.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {
+                            orphan_orch.reconcile_orphan_vps(&orphan_count).await;
+                        }
+                        _ = orphan_shutdown_rx.recv() => {
+                            tracing::info!("orphan reaper: shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
         }
 
         // Chunk directory

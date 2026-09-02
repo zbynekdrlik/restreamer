@@ -350,16 +350,47 @@ impl Default for ApiConfig {
 pub struct DeliveryConfig {
     #[serde(default = "default_delivery_delay_secs")]
     pub delivery_delay_secs: u64,
+    /// #352 orphan reaper: how often the runtime re-lists Hetzner and reconciles
+    /// against the DB (seconds). Default 30 min. The runtime clamps this to a
+    /// floor of 60s so a mis-set tiny value cannot hammer the Hetzner API.
+    #[serde(default = "default_orphan_sweep_interval_secs")]
+    pub orphan_sweep_interval_secs: u64,
+    /// #352 orphan reaper: a rowless labelled server younger than this (seconds)
+    /// is treated as an in-flight create and left alone, so the create-window
+    /// reverse gap never nukes a VPS mid-create. Default 30 min.
+    #[serde(default = "default_orphan_detect_grace_secs")]
+    pub orphan_detect_grace_secs: u64,
+    /// #352 orphan reaper: a detected orphan older than this (seconds) is
+    /// auto-deleted. `0` disables auto-delete (detect + surface only). Default
+    /// 3 h — safe because a genuinely-delivering VPS always has a live DB row and
+    /// is therefore never classified as an orphan regardless of age.
+    #[serde(default = "default_orphan_delete_grace_secs")]
+    pub orphan_delete_grace_secs: u64,
 }
 
 fn default_delivery_delay_secs() -> u64 {
     120
 }
 
+fn default_orphan_sweep_interval_secs() -> u64 {
+    1800
+}
+
+fn default_orphan_detect_grace_secs() -> u64 {
+    1800
+}
+
+fn default_orphan_delete_grace_secs() -> u64 {
+    10800
+}
+
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
             delivery_delay_secs: default_delivery_delay_secs(),
+            orphan_sweep_interval_secs: default_orphan_sweep_interval_secs(),
+            orphan_detect_grace_secs: default_orphan_detect_grace_secs(),
+            orphan_delete_grace_secs: default_orphan_delete_grace_secs(),
         }
     }
 }

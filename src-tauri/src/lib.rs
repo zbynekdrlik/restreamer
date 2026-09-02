@@ -219,6 +219,11 @@ pub fn run() {
                 let rtmp_stable_since = std::sync::Arc::new(
                     tokio::sync::Mutex::new(None),
                 );
+                // #352: shared orphan-VPS count so the tray IPC surfaces the
+                // orphan banner (the tray app is the production deployment).
+                let vps_orphan_count = std::sync::Arc::new(
+                    std::sync::atomic::AtomicU8::new(0),
+                );
 
                 let app_state = AppState::new(
                     pool,
@@ -229,6 +234,7 @@ pub fn run() {
                     inpoint_state_clone,
                     Arc::clone(&disk_pressure_level),
                     Arc::clone(&rtmp_stable_since),
+                    Arc::clone(&vps_orphan_count),
                 );
 
                 // Store state in Tauri
@@ -246,7 +252,8 @@ pub fn run() {
                 )
                 .with_pool(pool_for_service)
                 .with_disk_pressure_level(disk_pressure_level)
-                .with_rtmp_stable_since(rtmp_stable_since);
+                .with_rtmp_stable_since(rtmp_stable_since)
+                .with_vps_orphan_count(vps_orphan_count);
 
                 if let Err(e) = core
                     .run_with_signal(async {

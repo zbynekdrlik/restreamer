@@ -65,6 +65,13 @@ pub enum Action {
     VpsReady,
     VpsDeleted,
     VpsUnreachable,
+    /// Host-side (#352): the runtime orphan reaper found a Hetzner VPS labelled
+    /// for THIS install (`app=restreamer,client_uuid=<this>`) with no live
+    /// `delivery_instances` row — a server that is billing but invisible to the
+    /// app (DB row lost to a reset/reinstall, a crash in the create window, or a
+    /// forced kill mid-stop). Severity::Warn. Detail JSON:
+    /// `{hetzner_id, name, ipv4, age_secs, auto_deleted}`.
+    VpsOrphanDetected,
     DeliveryInitSent,
     DeliveryInitResponse,
     EndpointStarted,
