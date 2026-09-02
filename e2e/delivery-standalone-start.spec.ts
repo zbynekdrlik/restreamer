@@ -84,7 +84,9 @@ test.describe("standalone POST /delivery/start", () => {
     expect(startBody).toMatchObject({
       instance_id: expect.any(Number),
       hetzner_id: expect.any(Number),
-      status: "running",
+      // Fresh new-VPS start returns "creating"; "running" only on the
+      // already-active branch (delivery_handlers.rs / delivery.rs).
+      status: expect.stringMatching(/^(creating|running)$/),
     });
 
     // --- Dashboard header flips to STREAMING (WS-driven, no manual reload) ---

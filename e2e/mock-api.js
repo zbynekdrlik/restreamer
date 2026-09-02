@@ -689,13 +689,16 @@ app.post("/api/v1/delivery/start", (req, res) => {
     instance_id: 1,
   });
 
-  // Mirror DeliveryStartResponse.
+  // Mirror DeliveryStartResponse. The real StartDeliveryResult for a fresh
+  // new-VPS start returns status "creating" (delivery.rs) — "running" is only
+  // the already-active early-return branch. The eventual running/warmup state
+  // is carried by the DeliveryStatus broadcast above (the monitor's push).
   res.json({
     instance_id: 1,
     hetzner_id: 12345,
     name: `rs-delivery-evt${eventId}`,
     server_type: "cx22",
-    status: "running",
+    status: "creating",
   });
 });
 
@@ -746,7 +749,8 @@ app.post("/api/v1/delivery/stop", (req, res) => {
     event_id: eventId,
   });
 
-  res.json({ status: "ok" });
+  // Mirror the real delivery_stop: an empty 200 (no JSON body).
+  res.status(200).send();
 });
 
 // S3 usage + per-event clear stubs for the new Settings tab UI. Both
@@ -1024,6 +1028,16 @@ app.post("/api/v1/__reset", (_req, res) => {
   oauthRows = [];
   lastDestroyByEvent = {};
   changeKeyOps = [];
+  // #136: the standalone /delivery/start sets cachedDelivery to a running +
+  // warmup state no scenario default produces; clear it so it can't leak into
+  // the next spec's pre-WS instant load if a test fails before /delivery/stop.
+  cachedDelivery = {
+    instance_name: "",
+    status: "none",
+    server_ip: null,
+    endpoint_count: 0,
+    endpoints: [],
+  };
   res.json({ reset: true });
 });
 
