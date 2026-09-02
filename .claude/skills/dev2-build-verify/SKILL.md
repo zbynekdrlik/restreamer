@@ -277,3 +277,37 @@ ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e
 `--repeat-each=5` is the sanctioned way to prove a FLAKE fix (a keyed `<For>`
 re-render fix, a refresh-race). If even the detached-launch ssh keeps dropping,
 retry it a few times spaced ~20s — it's intermittent, not a code problem.
+
+## Frontend E2E on a LANE-PRIVATE PORT needs a WASM REBUILD (the API port is baked in)
+
+When several worktree lanes verify frontend E2E on dev2 at once, port 8910 is a
+machine-global collision, so a lane must run its mock on a private port. But the
+port lives in FOUR places, and sed'ing only the e2e harness is a trap that looks
+like a code bug (#136):
+
+1. `e2e/mock-api.js` (`const PORT`), `e2e/tauri-mock.js` (`MOCK_API`),
+   `e2e/playwright-frontend.config.ts` (`baseURL`), and every spec's own
+   hardcoded `http://127.0.0.1:8910` (`request.post(".../__reset")` etc — MANY
+   specs, not just yours). sed all of them:
+   `sed -i "s/8910/<port>/g" e2e/*.js e2e/*.ts`.
+2. **The WASM bakes the HTTP API base at BUILD time** —
+   `leptos-ui/src/api/mod.rs`'s `compute_api_base()` returns the hardcoded
+   `http://127.0.0.1:8910/api/v1` **whenever `window.__TAURI__` is present**, and
+   every frontend spec injects `tauri-mock.js` → `__TAURI__` is always set. So the
+   WASM's HTTP calls ignore `baseURL` and hit 8910. sed
+   `leptos-ui/src/api/mod.rs` + `leptos-ui/src/ws.rs` (`127.0.0.1:8910` → your
+   port) BEFORE `trunk build --release`, or every HTTP call fails with
+   `net::ERR_CONNECTION_REFUSED` while the WS (which uses `location.host`,
+   port-agnostic) connects fine — a confusing split-brain where WS works but all
+   HTTP 404s/refuses. All these seds are verification-only in the dev2 lane
+   checkout — NEVER commit them (the committed files stay on 8910 for CI).
+
+**`cp -al` + rsync-WITHOUT-`--delete` leaves STALE SOURCE files (not just stale
+binaries).** The warm `~/restreamer-buildcheck` baseline can predate a module
+refactor (e.g. `src/api.rs` → `src/api/mod.rs`); a hardlinked `cp -al` lane
+carries the OLD `api.rs`, and a no-`--delete` rsync adds `api/mod.rs` without
+removing `api.rs` → `error[E0761]: file for module 'api' found at both ...`. Fix:
+rsync **WITH** `--delete` but `--exclude 'dist/'` (protects the trunk output from
+the "cannot delete non-empty directory" abort the no-`--delete` rule was avoiding)
+plus `--exclude 'target/' 'node_modules/' '.git/'`; that purges stale source AND
+keeps dist/target warm. Re-`trunk build` after (dev1 never builds dist).
