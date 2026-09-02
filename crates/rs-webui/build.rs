@@ -15,8 +15,9 @@
 use std::path::Path;
 
 fn main() {
-    // Same relative path as the `#[folder = "$CARGO_MANIFEST_DIR/../../dist"]`
-    // in `src/lib.rs`: crates/rs-webui -> repo root -> dist.
+    // Same location as the `#[folder = "../../dist"]` in `src/lib.rs`
+    // (rust-embed resolves it relative to CARGO_MANIFEST_DIR):
+    // crates/rs-webui -> repo root -> dist.
     let manifest = env!("CARGO_MANIFEST_DIR");
     let dist = Path::new(manifest).join("..").join("..").join("dist");
     if !dist.is_dir() {

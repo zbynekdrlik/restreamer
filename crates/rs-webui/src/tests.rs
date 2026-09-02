@@ -9,7 +9,7 @@ use rust_embed::RustEmbed;
 
 /// Fixture asset set standing in for a real trunk build.
 #[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/tests/fixtures"]
+#[folder = "tests/fixtures"]
 struct TestAssets;
 
 const HASHED_JS: &str = "leptos-ui-0123456789abcdef.js";
@@ -71,7 +71,7 @@ async fn index_is_no_cache() {
 async fn empty_asset_set_returns_404() {
     // No fixtures embedded → honest 404 (the non-trunk workspace-build state).
     #[derive(RustEmbed)]
-    #[folder = "$CARGO_MANIFEST_DIR/tests/empty"]
+    #[folder = "tests/empty"]
     struct EmptyAssets;
     let resp = serve::<EmptyAssets>("/");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -21,7 +21,9 @@ use rust_embed::RustEmbed;
 /// The real frontend assets, embedded from the trunk output at repo-root
 /// `dist/`. Empty in a non-trunk workspace build (see `build.rs`).
 #[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/../../dist"]
+// Relative to CARGO_MANIFEST_DIR (crates/rs-webui) → repo-root `dist/`. A bare
+// relative path avoids rust-embed's `interpolate-folder-path` feature.
+#[folder = "../../dist"]
 struct FrontendAssets;
 
 /// SPA entry point served for `/` and every client-side route.
