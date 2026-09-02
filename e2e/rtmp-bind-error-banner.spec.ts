@@ -55,6 +55,35 @@ test("rtmp bind failure raises the red banner naming the port + holder, clean co
   expect(real).toEqual([]);
 });
 
+test("RtmpBindFailed WebSocket event raises the banner instantly (no poll wait)", async ({
+  page,
+  request,
+}) => {
+  await page.addInitScript(tauriMockScript);
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
+  // Default scenario => the /status poll reports NO bind error, so the banner
+  // can only appear from the WebSocket event — proving the ws.rs arm wires it.
+  await page.goto("/");
+  await expect(page.locator(".event-selector")).toBeVisible({ timeout: 10000 });
+
+  const banner = page.locator('[data-testid="rtmp-bind-error-banner"]');
+  await expect(banner).toHaveCount(0);
+
+  await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    data: {
+      type: "RtmpBindFailed",
+      data: {
+        port: 1234,
+        error:
+          "Port 1234 is already in use by another process. RTMP streaming will not work until the conflict is resolved.",
+      },
+    },
+  });
+
+  await expect(banner).toBeVisible({ timeout: 5000 });
+  await expect(banner).toContainText("1234");
+});
+
 test("no rtmp-bind-error banner when the listener is healthy", async ({
   page,
   request,

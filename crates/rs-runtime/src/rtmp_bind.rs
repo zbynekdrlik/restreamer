@@ -12,23 +12,38 @@
 
 use std::net::TcpListener;
 
+use rs_core::audit::{Action, AuditRow, Severity, Source};
 use rs_core::models::{InpointState, WsEvent};
 use tokio::sync::broadcast;
-use tracing::error;
+use tracing::{error, info};
 
 /// Probe whether `bind:port` can be bound for the RTMP listener, recording the
 /// outcome on the shared `InpointState` (#106).
 ///
 /// Returns `true` when the port is free (safe to start xiu) and `false` when it
-/// cannot be bound. On failure it records a human-readable error on
-/// `inpoint_state` (which `/api/v1/status` surfaces) and emits
-/// `WsEvent::RtmpBindFailed` so live dashboards update immediately; on success
-/// it clears any previously-recorded error so the banner auto-clears.
+/// cannot be bound.
+///
+/// EDGE-TRIGGERED: the runtime calls this at the top of every inpoint-loop
+/// iteration (once per bind-backoff tick), so it must not flood on a persistent
+/// conflict. It acts only on a STATE TRANSITION:
+/// - first failure of a streak (`bind_error()` was `None`) → run diagnostics,
+///   record the error on `inpoint_state` (surfaced on `/api/v1/status`), emit
+///   `WsEvent::RtmpBindFailed` for live dashboards, `error!`-log once, and write
+///   a durable `RtmpBindFailed` audit row;
+/// - recovery (`bind_error()` was `Some`, port now free) → clear the error (the
+///   banner auto-clears), `info!`-log, and write an `RtmpBindRecovered` audit
+///   row;
+/// - steady state (unchanged) → nothing but the bind probe + return value.
 ///
 /// The probe binds then immediately DROPS the listener, releasing the port so
-/// the xiu server can bind it. The tiny TOCTOU window between drop and xiu's
-/// bind is acceptable for a diagnostic surface: a process that wins the race is
-/// re-surfaced by the next loop iteration's probe.
+/// the xiu server can bind it. If a process wins the tiny TOCTOU window between
+/// drop and xiu's own bind, xiu's bind error is now propagated (not swallowed —
+/// #106, `rtmp_server.rs`), so `run_inpoint_loop` restarts and the NEXT probe
+/// surfaces the conflict — no permanent silent death.
+///
+/// This runs synchronously (blocking `TcpListener::bind` + blocking diagnostics
+/// child processes); the runtime wraps the call in `spawn_blocking` so it never
+/// stalls an async worker.
 pub fn probe_and_record_bind(
     bind: &str,
     port: u16,
@@ -39,19 +54,64 @@ pub fn probe_and_record_bind(
         Ok(listener) => {
             // Release the port for the real xiu server.
             drop(listener);
-            inpoint_state.clear_bind_error();
+            // Recovery edge only: clear + audit when we were previously failing.
+            if inpoint_state.bind_error().is_some() {
+                inpoint_state.clear_bind_error();
+                info!("RTMP port {port} is free again — listener will bind");
+                if let Some(tx) = inpoint_state.audit_tx() {
+                    rs_core::audit::record(
+                        tx,
+                        AuditRow {
+                            severity: Severity::Info,
+                            source: Source::Inpoint,
+                            event_id: None,
+                            instance_id: None,
+                            endpoint: None,
+                            action: Action::RtmpBindRecovered,
+                            detail: serde_json::json!({ "port": port }),
+                            ts_override: None,
+                        },
+                    );
+                }
+            }
             true
         }
         Err(e) => {
-            let holder = if e.kind() == std::io::ErrorKind::AddrInUse {
-                identify_port_holder(port)
-            } else {
-                None
-            };
-            let msg = format_bind_error(port, &e, holder.as_deref());
-            error!("RTMP listener bind probe failed on {bind}:{port}: {msg}");
-            inpoint_state.set_bind_error(msg.clone());
-            let _ = ws_tx.send(WsEvent::RtmpBindFailed { port, error: msg });
+            // First-failure edge only: diagnose + record + broadcast + audit
+            // once. On a persistent conflict subsequent ticks are silent.
+            if inpoint_state.bind_error().is_none() {
+                let holder = if e.kind() == std::io::ErrorKind::AddrInUse {
+                    identify_port_holder(port)
+                } else {
+                    None
+                };
+                let msg = format_bind_error(port, &e, holder.as_deref());
+                error!("RTMP listener bind probe failed on {bind}:{port}: {msg}");
+                inpoint_state.set_bind_error(msg.clone());
+                let _ = ws_tx.send(WsEvent::RtmpBindFailed {
+                    port,
+                    error: msg.clone(),
+                });
+                if let Some(tx) = inpoint_state.audit_tx() {
+                    rs_core::audit::record(
+                        tx,
+                        AuditRow {
+                            severity: Severity::Warn,
+                            source: Source::Inpoint,
+                            event_id: None,
+                            instance_id: None,
+                            endpoint: None,
+                            action: Action::RtmpBindFailed,
+                            detail: serde_json::json!({
+                                "port": port,
+                                "holder": holder,
+                                "error": msg,
+                            }),
+                            ts_override: None,
+                        },
+                    );
+                }
+            }
             false
         }
     }
@@ -97,10 +157,12 @@ pub fn identify_port_holder(port: u16) -> Option<String> {
 fn identify_port_holder_windows(port: u16) -> Option<String> {
     use std::process::Command;
 
-    let out = Command::new("netstat")
-        .args(["-ano", "-p", "TCP"])
-        .output()
-        .ok()?;
+    // No `-p TCP`: that lists IPv4 rows only, so a process listening on the
+    // dual-stack `[::]:<port>` (which DOES block `0.0.0.0:<port>` on Windows)
+    // would be missed. Plain `-ano` lists every protocol; the LISTENING +
+    // `:<port>` filter below selects the right TCP row and UDP has no LISTENING
+    // state so it never matches (#106 review).
+    let out = Command::new("netstat").args(["-ano"]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let needle = format!(":{port}");
     // Find a LISTENING row whose local address ends with :<port>.
@@ -167,9 +229,12 @@ fn identify_port_holder_unix(port: u16) -> Option<String> {
                 None => name.to_string(),
             });
         }
+        // Matched the port but no `users:` field (ss without privileges) —
+        // log before bailing so this case is not silent.
+        tracing::info!("port :{port} held but holder not identifiable (ss needs privileges)");
         return None;
     }
-    // No `ss` match (or `-p` needs privileges) — leave the holder unnamed.
+    // No `ss` match at all — leave the holder unnamed.
     tracing::info!("no port-holder identified for :{port} (ss unavailable or no match)");
     None
 }

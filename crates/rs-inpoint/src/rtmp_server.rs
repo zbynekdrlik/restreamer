@@ -71,32 +71,50 @@ impl RtmpServer {
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::select! {
+        // #106: capture the run outcome instead of swallowing it. A xiu bind
+        // failure (e.g. a process grabbed the port in the TOCTOU window between
+        // the runtime's pre-bind probe and this bind) used to be logged and
+        // then dropped as `Ok(())`, which the orchestrator read as a clean stop
+        // and gave up permanently — the exact silent-death this hardening
+        // exists to kill. Propagate it so `run_inpoint_loop` restarts + the
+        // next pre-bind probe surfaces the conflict on the dashboard.
+        let run_result: Result<(), crate::InpointError> = tokio::select! {
             // Run the StreamsHub event loop
             _ = hub.run() => {
                 info!("StreamsHub stopped");
+                Ok(())
             }
             // Run the xiu RTMP server
             result = rtmp_server.run() => {
                 match result {
-                    Ok(()) => info!("RTMP server stopped"),
-                    Err(e) => error!("RTMP server error: {e}"),
+                    Ok(()) => {
+                        info!("RTMP server stopped");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("RTMP server error: {e}");
+                        Err(crate::InpointError::Protocol(format!(
+                            "rtmp server exited with error: {e}"
+                        )))
+                    }
                 }
             }
             // Run the media receiver
             _ = media_receiver.run() => {
                 info!("Media receiver stopped");
+                Ok(())
             }
             // Handle shutdown signal
             _ = shutdown_rx.recv() => {
                 info!("RTMP server shutting down");
+                Ok(())
             }
-        }
+        };
 
         // Flush remaining data
         flv_chunk_sink.flush().await;
 
-        Ok(())
+        run_result
     }
 }
 
@@ -119,5 +137,32 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    /// #106: a bind failure must PROPAGATE (Err), never be swallowed into
+    /// Ok(()). The old code logged the xiu bind error and returned Ok, which
+    /// the orchestrator read as a clean stop and gave up permanently — the
+    /// silent-ingest death this hardening exists to kill.
+    #[tokio::test]
+    async fn run_returns_err_when_port_is_occupied() {
+        // Hog a real port so xiu cannot bind it.
+        let hog = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = hog.local_addr().unwrap().port();
+
+        let server = RtmpServer::new("127.0.0.1", port);
+        let flv_sink = Arc::new(FlvChunkSink::new_null());
+        let inpoint_state = InpointState::new();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.run(flv_sink, inpoint_state),
+        )
+        .await
+        .expect("run() must return promptly on a bind failure, not hang");
+
+        assert!(
+            result.is_err(),
+            "a bind conflict must propagate as Err, not be swallowed into Ok"
+        );
     }
 }

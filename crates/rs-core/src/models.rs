@@ -556,23 +556,33 @@ impl InpointState {
     /// operator-facing string (names the port and, if detected, the holding
     /// process). A poisoned lock is tolerated (best-effort diagnostic surface).
     pub fn set_bind_error(&self, msg: String) {
-        if let Ok(mut g) = self.rtmp_bind_error.lock() {
-            *g = Some(msg);
-        }
+        // Recover a poisoned lock (into_inner) rather than no-op'ing: a stuck
+        // banner (or a hidden real conflict) is worse than a torn write on a
+        // plain Option<String> cell (#106 review).
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = Some(msg);
     }
 
     /// Clear the RTMP listener bind error (#106). Called when the pre-bind
     /// probe succeeds so the dashboard banner clears automatically.
     pub fn clear_bind_error(&self) {
-        if let Ok(mut g) = self.rtmp_bind_error.lock() {
-            *g = None;
-        }
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = None;
     }
 
     /// Current RTMP listener bind error, if any (#106). Read by the API
     /// `/status` handler. `None` = the listener is bound / the port is free.
     pub fn bind_error(&self) -> Option<String> {
-        self.rtmp_bind_error.lock().ok().and_then(|g| g.clone())
+        self.rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

@@ -602,9 +602,13 @@ impl ServiceCore {
 
 /// Run the RTMP inpoint server with restart support.
 ///
-/// Auto-restarts on crash with exponential backoff (2s, 4s, 8s, 16s, max 30s).
-/// Crash counter resets when a publisher connects. Gives up after 10 consecutive
-/// crashes without any successful connection.
+/// Each iteration first PROBES the RTMP port (#106): if it cannot bind, the
+/// failure is recorded on `inpoint_state` (red dashboard banner + `/status`),
+/// broadcast, audited once, and retried on a 2s→30s bind backoff — the app
+/// keeps serving and the banner auto-clears when the port frees. Once bindable,
+/// it runs xiu and auto-restarts on crash with exponential backoff (2s, 4s, 8s,
+/// 16s, max 30s). Crash counter resets when a publisher connects. Gives up after
+/// 10 consecutive crashes without any successful connection.
 #[allow(clippy::too_many_arguments)]
 async fn run_inpoint_loop(
     bind: String,
@@ -627,26 +631,45 @@ async fn run_inpoint_loop(
         // the failure is recorded on `inpoint_state` (surfaced on `/status` +
         // a red banner) and broadcast, and we retry on a capped backoff instead
         // of giving up — the API + dashboard keep serving, and the banner
-        // auto-clears the moment the port frees.
-        if !crate::rtmp_bind::probe_and_record_bind(&bind, port, &inpoint_state, &ws_tx) {
+        // auto-clears the moment the port frees. The probe binds a socket and,
+        // on failure, may spawn blocking diagnostics child processes
+        // (netstat/tasklist/ss), so it runs on the blocking pool to avoid
+        // stalling an async worker.
+        let bindable = {
+            let probe_bind = bind.clone();
+            let probe_state = inpoint_state.clone();
+            let probe_ws = ws_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::rtmp_bind::probe_and_record_bind(&probe_bind, port, &probe_state, &probe_ws)
+            })
+            .await
+            .unwrap_or(false)
+        };
+        if !bindable {
             let backoff = bind_backoff_secs.min(MAX_BIND_BACKOFF_SECS);
             warn!(
                 port,
                 backoff_secs = backoff,
                 "RTMP port unavailable, retrying bind in {backoff}s"
             );
-            let bind_wait = tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => true,
+            let (bind_wait, was_restart) = tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => (true, false),
                 _ = shutdown_rx.recv() => {
                     info!("Inpoint shutting down while waiting for RTMP port");
-                    false
+                    (false, false)
                 }
-                msg = restart_rx.recv() => msg.is_some(),
+                msg = restart_rx.recv() => (msg.is_some(), msg.is_some()),
             };
             if !bind_wait {
                 break;
             }
-            bind_backoff_secs = (bind_backoff_secs * 2).min(MAX_BIND_BACKOFF_SECS);
+            if was_restart {
+                // A restart request re-probes immediately without consuming a
+                // doubling step — start the next conflict backoff fresh at 2s.
+                bind_backoff_secs = 2;
+            } else {
+                bind_backoff_secs = (bind_backoff_secs * 2).min(MAX_BIND_BACKOFF_SECS);
+            }
             continue;
         }
         // Port is free — reset the bind backoff for the next conflict.
