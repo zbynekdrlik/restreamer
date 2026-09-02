@@ -641,4 +641,62 @@ mod tests {
         // current_skew_ms is 0 until a baseline exists.
         assert_eq!(t.current_skew_ms(), 0);
     }
+
+    /// Issue #359 — a CONTINUOUS cross-track drift (audio xiu-ts and video
+    /// wall-clock advancing at slightly DIFFERENT RATES on our path) must NOT
+    /// death-loop the push. On the pre-fix guard every `AvSkewExceeded`
+    /// reconnect calls `reset_tracks()`, re-zeroes the baseline, and the SAME
+    /// drift re-accumulates past `MAX_AV_SKEW_MS` and trips again — forever
+    /// (7 kills / run in the #359 evidence, skew alternating sign
+    /// +7308/-8088/+8622/-10128 and GROWING). A reconnect cannot fix a rate
+    /// drift. The guard must CONVERGE: after detecting the non-converging
+    /// chain it stops thrashing (bounded trips), while a genuine STEP desync
+    /// still trips (proved separately).
+    ///
+    /// This models the exact failure signature: a ~50 ms/s drift that crosses
+    /// the 4000 ms threshold in ~80 s (past the 60 s trip floor), then FLIPS
+    /// SIGN on each simulated reconnect (the alternating-sign signature). Over
+    /// 1200 s the pre-fix guard trips ~14 times; the fix bounds it.
+    ///
+    /// RED (pre-fix): ~14 trips → the `<= 3` assert fails.
+    /// GREEN (post-fix): the non-convergence hold caps it at 2.
+    #[test]
+    fn continuous_drift_does_not_death_loop() {
+        let mut tracker = SkewTracker::default();
+        let chunk_ms: u64 = 2_000;
+        let drift_per_chunk: i64 = 100; // 50 ms/s
+        let mut now: u64 = 0;
+        let mut base: i64 = 0; // shared-epoch base for this connection
+        let mut i: i64 = 0; // chunk index within the current connection
+        let mut sign: i64 = 1; // audio-behind (+) then flips on each reconnect
+        let mut trips: u32 = 0;
+
+        for _ in 0..600 {
+            now += chunk_ms;
+            let video_start = base + i * chunk_ms as i64;
+            // audio lags (sign +1) or leads (sign -1) by i*drift, growing each
+            // chunk — a continuous rate drift a reconnect cannot fix.
+            let audio_start = video_start - sign * i * drift_per_chunk;
+            let d = feed_chunk(&mut tracker, video_start as u32, audio_start as u32, now);
+            if d == SkewDecision::TripRecovery {
+                trips += 1;
+                // Simulate the pusher's reconnect: reset_tracks re-anchors from
+                // a fresh common epoch. Input PTS keep running (the chunker is
+                // continuous across OUR reconnect); flip the drift sign to
+                // reproduce the alternating-sign signature.
+                tracker.reset_tracks();
+                base = video_start + chunk_ms as i64;
+                sign = -sign;
+                i = 0;
+            } else {
+                i += 1;
+            }
+        }
+
+        assert!(
+            trips <= 3,
+            "a continuous cross-clock drift must converge to a bounded number of \
+             recovery trips, not death-loop; got {trips} trips over 1200 s"
+        );
+    }
 }
