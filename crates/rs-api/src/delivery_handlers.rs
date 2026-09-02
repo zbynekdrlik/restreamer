@@ -38,6 +38,33 @@ pub struct DeliveryStartResponse {
 /// delivery boots against an empty/flapping ingest.
 pub const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
 
+/// Build the go-live "no rescue video configured" audit row (#260).
+///
+/// Extracted as a pure function so the `Warn`/`Operator`/`Action`/detail
+/// contract is unit-testable without spinning up a live Hetzner orchestrator.
+/// Emitted once per `delivery_start` when the event's rescue video is missing
+/// — an outage would then play the embedded generic default clip instead of a
+/// branded Slovak one (the silent 2026-06-19 event 9316 case).
+fn no_rescue_video_audit_row(
+    event_id: i64,
+    instance_id: i64,
+    event_name: &str,
+) -> rs_core::audit::AuditRow {
+    rs_core::audit::AuditRow {
+        severity: rs_core::audit::Severity::Warn,
+        source: rs_core::audit::Source::Operator,
+        event_id: Some(event_id),
+        instance_id: Some(instance_id),
+        endpoint: None,
+        action: rs_core::audit::Action::NoRescueVideoConfigured,
+        detail: serde_json::json!({
+            "event_id": event_id,
+            "event_name": event_name,
+        }),
+        ts_override: None,
+    }
+}
+
 pub async fn delivery_start(
     State(state): State<AppState>,
     Json(req): Json<DeliveryStartRequest>,
@@ -210,6 +237,24 @@ pub async fn delivery_start(
                 Json(serde_json::json!({"error": "event_not_found"})),
             )
         })?;
+
+    // #260: warn — durably, in the audit log — when delivery is starting for an
+    // event that has NO custom rescue video. An outage would then fall back to
+    // the embedded generic default clip (`resolve_rescue_source` → `Countdown`)
+    // instead of a branded Slovak clip, and until now nothing told the operator
+    // (the silent 2026-06-19 event 9316 case). The dashboard `NoRescueVideoBanner`
+    // is the live surface; this row is the durable post-mortem record.
+    if event.rescue_video_missing() {
+        tracing::warn!(
+            event_id,
+            event_name = %event.name,
+            "Delivery started with no rescue video configured — an outage will play the generic default clip"
+        );
+        rs_core::audit::record(
+            &state.audit_tx,
+            no_rescue_video_audit_row(event_id, result.instance_id, &event.name),
+        );
+    }
 
     // Spawn background task to poll Hetzner and init rs-delivery
     let (instance_id, event_name) = (result.instance_id, event.name.clone());
@@ -687,4 +732,24 @@ pub async fn delivery_logs(
         restart_log,
         captured_log,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #260: the go-live "no rescue video" audit row must carry the exact
+    // severity / source / action / detail the operator post-mortem relies on.
+    #[test]
+    fn no_rescue_video_audit_row_contract() {
+        let row = no_rescue_video_audit_row(42, 7, "9316");
+        assert_eq!(row.severity, rs_core::audit::Severity::Warn);
+        assert_eq!(row.source, rs_core::audit::Source::Operator);
+        assert_eq!(row.action, rs_core::audit::Action::NoRescueVideoConfigured);
+        assert_eq!(row.event_id, Some(42));
+        assert_eq!(row.instance_id, Some(7));
+        assert_eq!(row.endpoint, None);
+        assert_eq!(row.detail["event_id"].as_i64(), Some(42));
+        assert_eq!(row.detail["event_name"].as_str(), Some("9316"));
+    }
 }

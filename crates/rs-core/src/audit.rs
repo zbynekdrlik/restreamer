@@ -286,6 +286,15 @@ pub enum Action {
     /// {elapsed_secs, threshold_secs}. Routed to the operator's Discord as a
     /// standalone heads-up (NOT an outage episode) — see `notify::classify`.
     LongStreamWarning,
+    /// Host-side (#260): delivery was started for an event whose
+    /// `rescue_video_url` is NULL/empty, so a delivery outage would fall back
+    /// to the embedded generic default rescue clip
+    /// (`resolve_rescue_source` → `Countdown`) instead of a branded Slovak
+    /// clip. Warn severity, `Source::Operator`, emitted once at go-live so a
+    /// post-mortem shows the event went live on the generic default (the
+    /// silent 2026-06-19 event 9316 case). Detail JSON: {event_id, event_name}.
+    /// Pairs with the dashboard `NoRescueVideoBanner`.
+    NoRescueVideoConfigured,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,6 +482,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Action::RescueActivated).unwrap(),
             r#""rescue_activated""#
+        );
+        // #260: the audit panel renders the raw action string (audit_panel.rs),
+        // so lock the serialization for the no-rescue-video warning too.
+        assert_eq!(
+            serde_json::to_string(&Action::NoRescueVideoConfigured).unwrap(),
+            r#""no_rescue_video_configured""#
         );
     }
 

@@ -11,6 +11,7 @@ use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
 use super::mbps_graph::MbpsGraph;
 use super::long_stream_banner::LongStreamBanner;
+use super::no_rescue_video_banner::NoRescueVideoBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
@@ -41,6 +42,7 @@ pub fn OperatorDashboard() -> impl IntoView {
             <RtmpBindErrorBanner />
             <IngestSkewBanner />
             <LongStreamBanner />
+            <NoRescueVideoBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
             <VpsOrphanBanner />
