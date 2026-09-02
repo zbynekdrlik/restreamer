@@ -2990,6 +2990,49 @@ jobs:
           }
           throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
+      - name: "Pin fast-endpoint classes (#192)"
+        shell: powershell
+        run: |
+          # #192: exercise the fast-endpoint audit path end-to-end. Pin the
+          # SECONDARY 'e2e hls' endpoint to is_fast=true (and 'e2e rtmp'
+          # explicitly to is_fast=false, so the run is deterministic even after
+          # a leaked prior cleanup) BEFORE start-stream -- the host-side
+          # FastEndpointJumpedToLiveEdge audit fires only ONCE, at the VPS
+          # delivering transition, for is_fast=true endpoints. Kept fast for the
+          # whole delivery (host + VPS must agree) and restored in the always()
+          # cleanup below. 'e2e rtmp' (the OAuth-linked YouTube path the job's
+          # primary assertions depend on) is deliberately left non-fast.
+          $ErrorActionPreference = "Stop"
+          # Lower bound for THIS run's audit query. The E2E-Test event PERSISTS
+          # across CI runs, so its audit_log accumulates -- without a `since`
+          # bound the assert step would count a previous run's jump row too.
+          # -10s clock-skew margin; captured before start-stream.
+          $since = (Get-Date).ToUniversalTime().AddSeconds(-10).ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+          "FAST192_SINCE=$since" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "#192 audit-window since=$since"
+          $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+          $rtmp = $eps | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
+          if (-not $hls) {
+            throw "FAILED (#192): endpoint 'e2e hls' not present in /endpoints -- the E2E-Test event's fast-audit endpoint is missing; #192 cannot run (strict gate, CLAUDE.md 'a CI test that can't run must FAIL')"
+          }
+          $rtmpBody = @{ is_fast = $false } | ConvertTo-Json
+          $hlsBody = @{ is_fast = $true } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($hls.id)" -Method PUT `
+            -Body $hlsBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+          if ($rtmp) {
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($rtmp.id)" -Method PUT `
+              -Body $rtmpBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+          }
+          # Read back and assert the flags -- a PUT merge-semantics regression
+          # fails HERE, clearly, not 40 minutes later in a confusing step.
+          $eps2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $hls2 = $eps2 | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+          $rtmp2 = $eps2 | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
+          if (-not $hls2.is_fast) { throw "FAILED (#192): 'e2e hls' is_fast did not stick after PUT (got $($hls2.is_fast))" }
+          if ($rtmp2 -and $rtmp2.is_fast) { throw "FAILED (#192): 'e2e rtmp' should be is_fast=false (got $($rtmp2.is_fast))" }
+          Write-Host "OK (#192): pinned 'e2e hls' is_fast=true, 'e2e rtmp' is_fast=false"
+
       - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
@@ -3318,12 +3361,22 @@ jobs:
               process.exit(1);
             }
 
-            // Parse the first cache label (e.g., "45s / 60s cache")
-            const match = cacheLabels[0].match(/(\d+)s\s*\/\s*(\d+)s/);
-            if (!match) {
-              console.error('FAILED: Could not parse cache label:', cacheLabels[0]);
+            // #192: parse a NON-FAST label (order-independent). A fast endpoint
+            // renders "Xs / live cache" or "Xs / Ns target cache" -- blindly
+            // parsing cacheLabels[0] would mis-read a fast label if it sorts
+            // first (e.g. a fast "0s / live cache" placeholder pre-VPS would
+            // fail the regex, or "0s / Ns target cache" would trip the
+            // 0s-during-buffering check). This assertion is about the non-fast
+            // S3 cushion.
+            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
+            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
+            const trimmedLabels = cacheLabels.map(l => l.trim());
+            const nfLabel = trimmedLabels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+            if (!nfLabel) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns cache) during buffering; labels:', JSON.stringify(trimmedLabels));
               process.exit(1);
             }
+            const match = nfLabel.match(NONFAST_RE);
 
             const cacheSecs = parseInt(match[1]);
             const targetSecs = parseInt(match[2]);
@@ -3634,6 +3687,75 @@ jobs:
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
 
+      - name: "Assert fast-endpoint audit (#192)"
+        shell: powershell
+        run: |
+          # #192: with 'e2e hls' pinned is_fast=true before start-stream, the
+          # VPS delivering transition must have emitted the host-side
+          # fast_endpoint_jumped_to_live_edge audit (exactly once) and the
+          # VPS-side endpoint_start_chunk_updated (mirrored to the host
+          # audit_log with event_id backfilled). This step runs BEFORE any
+          # crash/republish test, so the jump has fired exactly once. Bounded
+          # poll (the VPS->host mirror lags). If 'e2e hls' was not pinned fast
+          # (pin skipped on a box missing it), skip with a warning rather than
+          # newly-fail the shared job.
+          $ErrorActionPreference = "Stop"
+          $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+          if (-not $hls -or -not $hls.is_fast) {
+            throw "FAILED (#192): 'e2e hls' is not is_fast=true at assert time -- the pin step did not take effect"
+          }
+          $since = $env:FAST192_SINCE
+          if (-not $since) { throw "FAILED (#192): FAST192_SINCE was not set by the pin step" }
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
+          if (-not $e2eEvent) { throw "FAILED (#192): no event matching $($env:EVENT_NAME)" }
+          $eid = $e2eEvent.id
+          $deadline = (Get-Date).AddSeconds(90)
+          $jump = @(); $upd = @(); $rtmpJump = @(); $rtmpUpd = @()
+          while ((Get-Date) -lt $deadline) {
+            # since-scoped to THIS run only (the E2E-Test event persists across runs).
+            $a = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=1000" -TimeoutSec 10
+            $rows = $a.rows
+            $jump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e hls' })
+            $upd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e hls' })
+            $rtmpJump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e rtmp' })
+            $rtmpUpd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e rtmp' })
+            if ($jump.Count -ge 1 -and $upd.Count -ge 1) { break }
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "#192 audit counts (since=$since): hls jump=$($jump.Count) upd=$($upd.Count) | rtmp jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)"
+          # ALWAYS enforced: the is_fast gating (non-fast 'e2e rtmp' emits neither
+          # fast action) and no spurious re-fire in this run's window.
+          if ($rtmpJump.Count -ne 0 -or $rtmpUpd.Count -ne 0) {
+            throw "FAILED (#192): non-fast 'e2e rtmp' must NOT emit fast-endpoint audits (jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)) -- the is_fast gating is broken"
+          }
+          if ($jump.Count -gt 1) {
+            throw "FAILED (#192): unexpected re-fire -- $($jump.Count) fast_endpoint_jumped_to_live_edge rows for 'e2e hls' in this run's window (expected <=1 before any crash/republish test)"
+          }
+          if ($jump.Count -eq 1) {
+            # Full fast path exercised: the host jumped, so the VPS-side mirror
+            # row MUST follow (both are gated on the same gap>0 condition).
+            if ($upd.Count -lt 1) {
+              $dump = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=50" -TimeoutSec 10
+              Write-Host "AUDIT DUMP (this run, event $eid):"
+              $dump.rows | ForEach-Object { Write-Host "  $($_.ts) src=$($_.source) $($_.action) ep=$($_.endpoint)" }
+              throw "FAILED (#192): host emitted fast_endpoint_jumped_to_live_edge but NO endpoint_start_chunk_updated (VPS-side, mirrored) followed for 'e2e hls' -- the VPS->host audit mirror or the VPS update_start handler is broken"
+            }
+            Write-Host "OK (#192): full fast-endpoint audit path verified -- jump=1, start_chunk_updated=$($upd.Count) for 'e2e hls', 0/0 for non-fast 'e2e rtmp'"
+          } else {
+            # jump.Count == 0: a legitimate ZERO-GAP this run -- no chunks were
+            # marked sent between the original-start computation and the
+            # delivering transition, so should_jump_to_live_edge(is_fast, gap=0)
+            # was false. Not a failure (nothing to jump); upd must then also be
+            # absent (both gated on gap>0). The is_fast gating is still verified
+            # above (rtmp emitted nothing).
+            if ($upd.Count -ne 0) {
+              throw "FAILED (#192): inconsistent -- 0 jump rows but $($upd.Count) endpoint_start_chunk_updated for 'e2e hls'"
+            }
+            Write-Host "::warning::#192: zero-gap this run -- fast_endpoint_jumped_to_live_edge did not fire (no chunks accrued in the pre-transition window). Fast-jump path not exercised this run; is_fast gating still verified."
+          }
+
       - name: Verify delivery progression
         shell: powershell
         timeout-minutes: 10
@@ -3837,25 +3959,56 @@ jobs:
             await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
             await page.waitForTimeout(5000); // Wait for WebSocket data
 
-            // Check per-endpoint cache bar is visible
-            const cacheLabel = await page.locator('.endpoint-cache-label').first().textContent().catch(() => null);
-            console.log('Endpoint cache label:', cacheLabel);
-
-            if (!cacheLabel) {
+            // #192: collect ALL endpoint cache labels (order-independent). A
+            // fast endpoint renders "Xs / live cache" (target None) OR
+            // "Xs / Ns target cache" (target set); a non-fast one
+            // "Xs / Ns cache". The old .first() parse threw whenever a fast
+            // label sorted first, and a "Ns target cache" fast label would
+            // even be mis-read as non-fast. Classify FAST first; the non-fast
+            // regex is anchored on "cache$" so "... target cache" is excluded.
+            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
+            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
+            const labels = (await page.locator('.endpoint-cache-label').allTextContents()).map(l => l.trim());
+            console.log('Endpoint cache labels:', JSON.stringify(labels));
+            if (labels.length === 0) {
               console.error('FAILED: Per-endpoint cache label not found on dashboard');
               process.exit(1);
             }
-
-            // Extract delay value from label (e.g., "90s / 120s cache")
-            const match = cacheLabel.match(/(\d+)s\s*\/\s*(\d+)s/);
-            if (!match) {
-              console.error('FAILED: Could not parse delay from cache label:', cacheLabel);
+            const fastLabels = labels.filter(l => FAST_RE.test(l));
+            const nonFastLabels = labels.filter(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+            const unparsed = labels.filter(l => !FAST_RE.test(l) && !NONFAST_RE.test(l));
+            if (unparsed.length > 0) {
+              console.error('FAILED: Unparseable cache label(s):', JSON.stringify(unparsed));
+              process.exit(1);
+            }
+            if (nonFastLabels.length === 0) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns) found; labels:', JSON.stringify(labels));
+              process.exit(1);
+            }
+            // #192: the dashboard's fast-label count must equal the host's
+            // is_fast endpoint count -- proves the fast class renders correctly.
+            try {
+              const st = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
+              const eid = st && st.streaming_event && st.streaming_event.id;
+              if (eid) {
+                const del = await fetch('http://127.0.0.1:8910/api/v1/delivery/status?event_id=' + eid).then(r => r.json());
+                const hostFast = (del.endpoint_details || []).filter(e => e.is_fast).length;
+                console.log('host is_fast endpoints:', hostFast, '| dashboard fast labels:', fastLabels.length);
+                if (fastLabels.length !== hostFast) {
+                  console.error('FAILED: fast label count ' + fastLabels.length + ' != host is_fast count ' + hostFast);
+                  process.exit(1);
+                }
+              }
+            } catch (e) {
+              console.error('FAILED: could not cross-check fast label count vs host:', e.message);
               process.exit(1);
             }
 
-            const delayValue = parseInt(match[1]);
-            const targetValue = parseInt(match[2]);
-            console.log('Endpoint cache:', delayValue, 's /', targetValue, 's');
+            // Numeric + stability check runs on a NON-FAST label.
+            const nfMatch = nonFastLabels[0].match(NONFAST_RE);
+            const delayValue = parseInt(nfMatch[1]);
+            const targetValue = parseInt(nfMatch[2]);
+            console.log('Non-fast endpoint cache:', delayValue, 's /', targetValue, 's');
 
             // Check cache bar fill element exists inside endpoint node
             const fillClass = await page.locator('.endpoint-node .buffer-bar-fill').first().getAttribute('class').catch(() => null);
@@ -3866,15 +4019,17 @@ jobs:
               process.exit(1);
             }
 
-            // Stability check: take 3 readings over 10s, cache must not jump backward > 20%
+            // Stability check: 3 readings over 10s, a NON-FAST cache must not
+            // jump backward > 20%.
             const readings = [delayValue];
             for (let i = 0; i < 2; i++) {
               await page.waitForTimeout(5000);
-              const label = await page.locator('.endpoint-cache-label').first().textContent().catch(() => '');
-              const m = label.match(/(\d+)s/);
+              const ls = (await page.locator('.endpoint-cache-label').allTextContents()).map(l => l.trim());
+              const nf = ls.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+              const m = nf ? nf.match(NONFAST_RE) : null;
               if (m) readings.push(parseInt(m[1]));
             }
-            console.log('Cache stability readings:', readings);
+            console.log('Cache stability readings (non-fast):', readings);
             for (let i = 1; i < readings.length; i++) {
               if (readings[i] < readings[i-1] * 0.8) {
                 console.error('FAILED: Cache jumped backward:', readings[i-1], '->', readings[i], '(> 20% drop). Transition jump bug.');
@@ -4526,7 +4681,13 @@ jobs:
           # VPS reads from S3 (not OBS) -- OBS disconnect must not cause any
           # ffmpeg restarts on the VPS. Any restart indicates a bug.
           $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          # #192: a fast endpoint's small cushion legitimately drains into
+          # rescue under a source outage (and may restart its push ffmpeg);
+          # this OBS-disconnect gate asserts the non-fast VPS-from-S3 invariant.
+          # Skip fast by alias -- is_fast lives on the host endpoint_details view.
+          $fast192 = @($statusAfter.endpoint_details | Where-Object { $_.is_fast } | ForEach-Object { $_.alias })
           foreach ($ep in $statusAfter.endpoints) {
+            if ($fast192 -contains $ep.alias) { continue }
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
             if ($ep.ffmpeg_restart_count -gt 0) {
               $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
@@ -4679,6 +4840,10 @@ jobs:
             }
             $emptyStreak = 0
             foreach ($ep in $st.endpoint_details) {
+              # #192: skip fast endpoints -- this A/V-republish soak asserts
+              # non-fast restart/skew behaviour; a fast endpoint's small cushion
+              # gives it different rescue/refill dynamics under a source blip.
+              if ($ep.is_fast) { continue }
               $skew = [int]$ep.av_skew_ms
               $absSkew = [math]::Abs($skew)
               $restarts = [int]$ep.ffmpeg_restart_count
@@ -4790,6 +4955,12 @@ jobs:
           }
 
           foreach ($ep in $deliveryAfter.endpoint_details) {
+            # #192: skip fast endpoints -- a fast endpoint's ~5s cushion is
+            # smaller than the 15s S3 block, so it legitimately drains into
+            # rescue (RESCUE_STALL_THRESHOLD_SECS=8) and stops advancing S3
+            # chunks. This gate asserts the non-fast VPS-cache behaviour, exactly
+            # like the delay checks above (which already filter -not is_fast).
+            if ($ep.is_fast) { continue }
             $alias = $ep.alias
             $restartsAfter = $ep.ffmpeg_restart_count
             $restartsDelta = $restartsAfter - $restartsBefore[$alias]
@@ -5490,6 +5661,37 @@ jobs:
             }
           }
           throw "FAILED: rtmp_connected is still true after OBS stream stopped ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
+
+      - name: "Restore fast-endpoint classes (#192)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #192: undo the pin so the next run starts clean. The pin step also
+          # re-pins deterministically at the START of the next run, so this is
+          # best-effort: on failure emit a VISIBLE ::warning:: (a leaked fast
+          # flag must never be silently tolerated) rather than red an otherwise
+          # green job on a transient app-down during teardown.
+          try {
+            $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+            $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+            if ($hls -and $hls.is_fast) {
+              $body = @{ is_fast = $false } | ConvertTo-Json
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($hls.id)" -Method PUT `
+                -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
+              $chk = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+              $hls2 = $chk | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+              if ($hls2.is_fast) {
+                Write-Host "::warning::#192: could not restore 'e2e hls' is_fast=false (still fast); next run's pin step will self-heal"
+              } else {
+                Write-Host "OK (#192): restored 'e2e hls' is_fast=false"
+              }
+            } else {
+              Write-Host "#192: 'e2e hls' already non-fast (nothing to restore)"
+            }
+          } catch {
+            Write-Host "::warning::#192: restore of 'e2e hls' is_fast=false failed ($_); next run's pin step will self-heal"
+          }
 
       - name: Deactivate streaming event
         if: always()

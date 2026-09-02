@@ -6,7 +6,9 @@ export default defineConfig({
   // `start-delivery-rtmp-gate` was removed — the RTMP-stable gate is
   // verified by backend unit tests (`rs-api/src/router_tests.rs`) and
   // the E2E version keeps hitting parallel-worker shared-state races.
-  testMatch: /(frontend|audit-panel|change-key|zero-endpoint-banner|remove-last-endpoint-modal|endpoint-history-sparkline|cache-drift-panel|delete-cleanup-button|rust-pusher|oauth-authorize|outage-ui|disk-pressure-banner|templates-default-rescue|version-label|s3-region-banner|ingest-skew-banner|vps-orphan-banner|mbps-graph|long-stream-banner|rtmp-bind-error-banner|alert-glow|delivery-standalone-start)\.spec\.ts$/,
+  // `frame-analysis.unit` is a PURE-logic spec (no browser/page fixture, no
+  // mock server) that locks the #249 green-video picture-check thresholds.
+  testMatch: /(frontend|audit-panel|change-key|zero-endpoint-banner|remove-last-endpoint-modal|endpoint-history-sparkline|cache-drift-panel|delete-cleanup-button|rust-pusher|oauth-authorize|outage-ui|disk-pressure-banner|templates-default-rescue|version-label|s3-region-banner|ingest-skew-banner|vps-orphan-banner|mbps-graph|long-stream-banner|rtmp-bind-error-banner|alert-glow|delivery-standalone-start|frame-analysis\.unit)\.spec\.ts$/,
   timeout: 30000,
   retries: 0,
   // Single worker — the new post-mortem specs (audit-panel,

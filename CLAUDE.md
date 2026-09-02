@@ -26,6 +26,8 @@ auto-load on their `paths:` — you do not invoke those.
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
 - A/V-skew guard (ingest diag #354 vs push actuator #257/#359, STEP-vs-DRIFT, DriftHold) → `.claude/rules/av-skew-guard.md` (auto)
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
+- E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
+- YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
 
 ## Project Structure
 
