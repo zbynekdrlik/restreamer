@@ -26,8 +26,8 @@ use crate::models::StreamingEvent;
 /// `"YYYY-MM-DD HH:MM:SS"` in UTC with no zone suffix; an RFC 3339 value is
 /// also accepted defensively (a future writer). Returns `None` for an
 /// unparseable timestamp OR a `created_at` in the future relative to `now`
-/// (clock skew / a just-inserted row) — callers treat `None` as
-/// "not long-running", never as an error.
+/// (clock skew — a just-inserted row yields `0`, not `None`) — callers treat
+/// `None` as "not long-running", never as an error.
 pub fn elapsed_secs(created_at: &str, now: DateTime<Utc>) -> Option<u64> {
     let created = parse_utc(created_at)?;
     let secs = (now - created).num_seconds();
@@ -187,5 +187,81 @@ mod tests {
         let mut w = LongStreamWarner::new();
         assert!(!w.observe(1_000_000, 0), "threshold 0 disables the warning");
         assert!(!w.has_fired());
+    }
+
+    // --- is_long_running (the banner-flag helper both get_status paths call) ---
+
+    fn evt(id: i64, delivering: bool) -> StreamingEvent {
+        StreamingEvent {
+            id,
+            name: "e".to_string(),
+            received_bytes: 0,
+            receiving_activated: true,
+            delivering_activated: delivering,
+            cache_delay_secs: None,
+            created_from: None,
+            rescue_video_url: None,
+        }
+    }
+
+    async fn setup_pool() -> sqlx::SqlitePool {
+        let pool = crate::db::create_memory_pool().await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn is_long_running_covers_every_branch() {
+        let pool = setup_pool().await;
+        let now = at("2026-01-01 03:00:00");
+
+        // No event -> false.
+        assert!(!is_long_running(&pool, None, 9000, now).await);
+
+        let event_id = crate::db::create_streaming_event(&pool, "evt")
+            .await
+            .unwrap();
+
+        // Delivering NOT activated -> false, even with an old instance present.
+        let inst = crate::db::create_delivery_instance(
+            &pool,
+            1,
+            "d",
+            "1.2.3.4",
+            "cx23",
+            Some(event_id),
+            "tok",
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE delivery_instances SET created_at = '2026-01-01 00:00:00' WHERE id = ?1",
+        )
+        .bind(inst)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(!is_long_running(&pool, Some(&evt(event_id, false)), 9000, now).await);
+
+        // Delivering + instance created 3h (10800s) ago, threshold 9000 -> true.
+        assert!(is_long_running(&pool, Some(&evt(event_id, true)), 9000, now).await);
+
+        // Threshold 0 disables it even when long-running.
+        assert!(!is_long_running(&pool, Some(&evt(event_id, true)), 0, now).await);
+
+        // Not yet over the threshold (only 1h elapsed at this `now`) -> false.
+        let early = at("2026-01-01 01:00:00");
+        assert!(!is_long_running(&pool, Some(&evt(event_id, true)), 9000, early).await);
+    }
+
+    #[tokio::test]
+    async fn is_long_running_false_when_no_instance() {
+        let pool = setup_pool().await;
+        let event_id = crate::db::create_streaming_event(&pool, "evt")
+            .await
+            .unwrap();
+        // Delivering flag on, but no delivery instance row exists yet.
+        let now = at("2026-01-01 03:00:00");
+        assert!(!is_long_running(&pool, Some(&evt(event_id, true)), 9000, now).await);
     }
 }

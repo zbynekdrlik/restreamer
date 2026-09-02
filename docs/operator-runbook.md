@@ -26,4 +26,5 @@ Procedures for running live events with restreamer. Keep this file short — one
 ## After the Event
 
 - Stop the active event from the dashboard (don't just stop OBS — the receive/deliver flags should clear cleanly).
+- **Long-stream warning (#84):** if a delivery runs past `delivery.long_stream_warn_secs` (default 9000s = 2.5h; `0` disables) an amber "Stream beží už veľmi dlho" banner appears on the dashboard and a one-time Discord heads-up fires — a reminder to stop a stream that may have been left on after the event. The banner clears automatically once delivery stops. Changing the threshold in `config.json` takes effect on the next Restreamer restart.
 - If anything was off, file a GitHub issue with: timestamp, symptom, dashboard screenshot, and which restreamer version you were running (visible in the dashboard footer).

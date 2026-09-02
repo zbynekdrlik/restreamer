@@ -76,21 +76,18 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     .as_str()
     .to_string();
 
-    // #278: read the LIVE config (config_live) so a runtime config patch is reflected.
-    let s3_region_standard = state
+    // #278 + #84: read the LIVE config (config_live) once so a runtime config
+    // patch is reflected in both the S3-region flag and the long-stream
+    // threshold.
+    let (s3_region_standard, long_stream_warn_secs) = state
         .config_live
         .read()
-        .map(|c| c.s3_region_is_standard())
-        .unwrap_or(true);
+        .map(|c| (c.s3_region_is_standard(), c.delivery.long_stream_warn_secs))
+        .unwrap_or((true, 0));
 
     // #84: warn when the current delivery has been running longer than the
     // operator threshold. Computed live (auto-clears when delivery stops)
     // through the shared rs-core helper so the Tauri IPC path matches exactly.
-    let long_stream_warn_secs = state
-        .config_live
-        .read()
-        .map(|c| c.delivery.long_stream_warn_secs)
-        .unwrap_or(0);
     let long_stream_warning = rs_core::long_stream::is_long_running_now(
         &state.pool,
         event.as_ref(),

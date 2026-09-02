@@ -19,10 +19,8 @@ pub fn LongStreamBanner() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore in context");
     let warning = store.long_stream_warning;
 
-    let show = Memo::new(move |_| warning.get());
-
     view! {
-        <Show when=move || show.get()>
+        <Show when=move || warning.get()>
             <div class="banner banner--warn" role="alert" data-testid="long-stream-banner">
                 {"\u{23F1}\u{FE0F} Stream beží už veľmi dlho — over, či ho netreba ukončiť (možno zostal omylom zapnutý)."}
             </div>

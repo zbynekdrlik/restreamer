@@ -55,10 +55,17 @@ test("a long-running delivery shows the amber long-stream banner, clean console"
   expect(real).toEqual([]);
 });
 
-test("no long-stream banner under the default scenario", async ({
+test("no long-stream banner under the default scenario, clean console", async ({
   page,
   request,
 }) => {
+  const consoleMessages: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    }
+  });
+
   await page.addInitScript(tauriMockScript);
   await request.post("http://127.0.0.1:8910/api/v1/__reset");
   // Default scenario => long_stream_warning=false.
@@ -69,4 +76,9 @@ test("no long-stream banner under the default scenario", async ({
   await expect(
     page.locator('[data-testid="long-stream-banner"]'),
   ).toHaveCount(0);
+
+  const real = consoleMessages.filter(
+    (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),
+  );
+  expect(real).toEqual([]);
 });

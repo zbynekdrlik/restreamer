@@ -315,6 +315,17 @@ fn build_alert(action: Action, row: &AuditRow) -> DiscordAlert {
     if let Some(ep) = &row.endpoint {
         content.push_str(&format!(" (endpoint: {ep})"));
     }
+    // #84: enrich the long-stream heads-up with the concrete runtime + limit
+    // the operator would otherwise only see in the audit detail.
+    if action == Action::LongStreamWarning {
+        if let Some(elapsed) = row.detail.get("elapsed_secs").and_then(|v| v.as_u64()) {
+            content.push_str(&format!(" (beží ~{:.1} h", elapsed as f64 / 3600.0));
+            if let Some(thr) = row.detail.get("threshold_secs").and_then(|v| v.as_u64()) {
+                content.push_str(&format!(", limit {:.1} h", thr as f64 / 3600.0));
+            }
+            content.push(')');
+        }
+    }
     DiscordAlert { content }
 }
 
@@ -935,5 +946,47 @@ mod tests {
         let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
         let v: Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["content"], "TEST výpadok");
+    }
+
+    // #84: the long-stream warning is a STANDALONE heads-up — it must fire an
+    // alert but never enter outage-episode state, so it can neither be cleared
+    // by a later recovery nor blocked by an outage's dedup.
+    #[test]
+    fn long_stream_warning_is_standalone_not_an_outage() {
+        assert!(matches!(
+            classify(Action::LongStreamWarning),
+            Some(Signal::Standalone(_))
+        ));
+
+        let mut n = notifier();
+        // Fires the heads-up...
+        assert!(n.observe(&row(Action::LongStreamWarning), None).is_some());
+        // ...but does NOT flip the notifier into an outage episode.
+        assert!(!n.in_outage, "standalone warning must not set in_outage");
+        assert!(
+            n.alerted.is_empty(),
+            "standalone warning must not touch outage dedup set"
+        );
+
+        // A subsequent recovery therefore emits NO spurious 'recovered'.
+        assert!(
+            n.observe(&row(Action::RescueRecovered), None).is_none(),
+            "no episode was active, so recovery must be silent"
+        );
+
+        // The emitter owns dedup (once per delivery), so the notifier itself
+        // does NOT suppress a second standalone warning.
+        assert!(n.observe(&row(Action::LongStreamWarning), None).is_some());
+    }
+
+    // #311: a CI test event's long-stream warning must never reach the
+    // operator alert channel (same E2E-name suppression as outage onsets).
+    #[test]
+    fn long_stream_warning_suppressed_for_e2e_event() {
+        let mut n = notifier();
+        assert!(
+            n.observe(&row(Action::LongStreamWarning), Some("E2E-Test"))
+                .is_none()
+        );
     }
 }
