@@ -22,6 +22,27 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
+// Loopback port reservation (issue #148)
+// ---------------------------------------------------------------------------
+
+/// Discover an available loopback ephemeral port.
+///
+/// NOTE (#148): this is the OLD pick-then-release form kept temporarily so the
+/// `port_reservation` regression test can demonstrate the TOCTOU window. It
+/// binds `127.0.0.1:0`, reads the assigned port, DROPS the listener, and
+/// returns the bare port — so the port is FREE the instant this returns and a
+/// concurrent `bind(0)` (e.g. the TLS bridge listener in
+/// `spawn_recording_xiu_server_tls`) can steal it before the server rebinds.
+pub async fn reserved_loopback_listener() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback ephemeral listener");
+    let port = listener.local_addr().expect("local_addr").port();
+    drop(listener); // BUG (#148): release the port -> steal window
+    port
+}
+
+// ---------------------------------------------------------------------------
 // RecordedTag
 // ---------------------------------------------------------------------------
 
