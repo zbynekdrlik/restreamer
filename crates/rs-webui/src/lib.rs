@@ -91,7 +91,7 @@ pub fn cache_control_for(path: &str) -> &'static str {
 fn is_hashed_asset(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = match file.rsplit_once('.') {
-        Some((stem, ext)) if matches!(ext, "js" | "wasm" | "css") => stem,
+        Some((stem, "js" | "wasm" | "css")) => stem,
         _ => return false,
     };
     stem.split(['-', '_', '.'])
