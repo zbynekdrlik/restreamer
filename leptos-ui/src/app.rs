@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
-use crate::components::{Header, OperatorDashboard, SettingsView, UploadsView};
+use crate::components::{AlertGlow, Header, OperatorDashboard, SettingsView, UploadsView};
 use crate::store::DashboardStore;
 use crate::ws;
 
@@ -19,6 +19,9 @@ pub fn App() -> impl IntoView {
 
     view! {
         <Router>
+            // App-level unified "any issue" red edge-glow overlay (#73).
+            // Fixed + click-through, so its position in the tree is irrelevant.
+            <AlertGlow />
             <div class="app">
                 <Header />
                 <main class="content">

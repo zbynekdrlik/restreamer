@@ -656,6 +656,25 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 /* DiskPressureBanner WARN (80%): amber, calm (no pulse) -- delivery still healthy. */
 .banner--warn { background: #3d3211; color: #ffe9b0; border: 1px solid #d9a441; }
 
+/* #73 -- unified app-level "any issue" red edge glow. A fixed, full-viewport,
+   click-through (pointer-events:none) overlay that pulses an inset red halo
+   around the screen border whenever ANY existing red/attention condition is
+   active. Purely a peripheral ambient cue -- the banners carry the actual
+   alert text -- so it sits above modals (z-index 1100) without obscuring
+   their centred content. Reuses the banner--critical red (#e85c47). */
+.alert-glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1100;
+    border-radius: 2px;
+    animation: alertGlowPulse 1.5s ease-in-out infinite;
+}
+@keyframes alertGlowPulse {
+    0%, 100% { box-shadow: inset 0 0 34px 6px rgba(232,92,71,0.45); }
+    50%      { box-shadow: inset 0 0 64px 14px rgba(232,92,71,0.95); }
+}
+
 /* --- EndpointRemoveConfirmModal --- */
 .modal__backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .endpoint-remove-modal { background: #1a1a1a; border: 1px solid #444; border-radius: 6px; padding: 20px; max-width: 500px; color: #eee; }
