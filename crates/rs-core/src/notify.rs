@@ -453,6 +453,42 @@ mod tests {
         );
     }
 
+    /// #367: an absolute A/V invariant violation (any stage: ingest chunker
+    /// or VPS pusher) must reach the operator's Discord like the #354 ingest
+    /// skew, and its Restored edge closes the episode and re-arms.
+    #[test]
+    fn av_invariant_violation_alerts_then_restored_rearms() {
+        assert!(matches!(
+            classify(Action::AvInvariantViolated),
+            Some(Signal::Onset(_))
+        ));
+        assert!(matches!(
+            classify(Action::AvInvariantRestored),
+            Some(Signal::Recovery(_))
+        ));
+        assert!(!slovak_text(Action::AvInvariantViolated).is_empty());
+        assert!(!slovak_text(Action::AvInvariantRestored).is_empty());
+
+        let mut n = notifier();
+        let alert = n
+            .observe(&row_ep(Action::AvInvariantViolated, "YT NLW 4k"), None)
+            .expect("first AvInvariantViolated must alert");
+        assert!(
+            alert.content.contains("YT NLW 4k"),
+            "a push-side violation names its endpoint: {}",
+            alert.content
+        );
+        assert!(
+            n.observe(&row(Action::AvInvariantViolated), None).is_none(),
+            "deduped within the episode"
+        );
+        assert!(n.observe(&row(Action::AvInvariantRestored), None).is_some());
+        assert!(
+            n.observe(&row(Action::AvInvariantViolated), None).is_some(),
+            "a new violation after Restored alerts again"
+        );
+    }
+
     #[test]
     fn first_onset_alerts_then_dedups_within_episode() {
         let mut n = notifier();

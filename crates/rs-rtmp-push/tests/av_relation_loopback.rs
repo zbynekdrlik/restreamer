@@ -121,6 +121,13 @@ async fn reanchor_keeps_wire_av_relation_equal_to_content_relation() {
         pusher.regression_reanchor_count() >= 1,
         "the backward content jump must have re-anchored"
     );
+    // Design test 5 (push, silent side): the shared transform keeps the
+    // absolute invariant through the re-anchor.
+    assert_eq!(
+        pusher.av_invariant_violation_count(),
+        0,
+        "the wire A/V invariant guard must stay silent across a re-anchor"
+    );
 }
 
 /// Reconnect path: the RTMP session drops and the pusher reconnects. The
@@ -190,5 +197,10 @@ async fn reconnect_keeps_wire_av_relation_equal_to_content_relation() {
         pusher.reconnect_count(),
         1,
         "exactly one reconnect expected"
+    );
+    assert_eq!(
+        pusher.av_invariant_violation_count(),
+        0,
+        "the wire A/V invariant guard must stay silent across a reconnect"
     );
 }

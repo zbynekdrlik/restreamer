@@ -735,4 +735,33 @@ mod tests {
         ];
         assert_eq!(media_pin_suffix(&tags), vec![None, None]);
     }
+
+    // --- #367 push-side absolute A/V invariant guard ---
+
+    /// Design test 5 (push): a constructed violation (the wire relation 0
+    /// while the content relation is +700 ms, the per-track-origin bug) is
+    /// reported ONCE through the pusher's chunk-end evaluation and queued for
+    /// the consumer to audit.
+    #[test]
+    fn pusher_reports_a_constructed_wire_invariant_violation_once() {
+        use crate::av_invariant::{AvInvariantEvent, AvInvariantViolation};
+        let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+        p.av_guard.observe_video(1_000, 5_000);
+        p.av_guard.observe_audio(1_700, 5_000);
+        p.evaluate_av_invariant();
+        p.evaluate_av_invariant(); // still violated: no second event
+        assert_eq!(
+            p.take_av_invariant_events(),
+            vec![AvInvariantEvent::Violated(AvInvariantViolation {
+                a_rel_ms: 3_300,
+                v_rel_ms: 4_000,
+                delta_ms: -700,
+            })]
+        );
+        assert!(
+            p.take_av_invariant_events().is_empty(),
+            "taking the events drains the queue"
+        );
+        assert_eq!(p.av_invariant_violation_count(), 1);
+    }
 }

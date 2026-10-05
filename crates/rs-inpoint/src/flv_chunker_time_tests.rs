@@ -272,3 +272,118 @@ async fn backward_source_jump_audio_first_reanchors_both_tracks() {
         "the new publisher's first keyframe (source 100) must become the shared session origin"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Design test 5 (ingest): the ABSOLUTE A/V invariant guard at the chunker.
+// ---------------------------------------------------------------------------
+
+/// All audit rows emitted so far.
+fn drain_audit(
+    rx: &mut tokio::sync::mpsc::Receiver<rs_core::audit::AuditRow>,
+) -> Vec<rs_core::audit::AuditRow> {
+    let mut rows = Vec::new();
+    while let Ok(row) = rx.try_recv() {
+        rows.push(row);
+    }
+    rows
+}
+
+fn with_audit(
+    sink: FlvChunkSink,
+) -> (
+    FlvChunkSink,
+    rs_core::models::InpointState,
+    tokio::sync::mpsc::Receiver<rs_core::audit::AuditRow>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let state = rs_core::models::InpointState::new().with_audit_tx(tx);
+    (sink.with_ingest_state(state.clone(), 2_000), state, rx)
+}
+
+/// The fixed chunker never trips the guard on the Thursday burst: one source
+/// transform for both tracks keeps the invariant by construction.
+#[tokio::test]
+async fn gop_cache_burst_never_trips_the_av_invariant_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let (sink, state, mut audit) = with_audit(new_sink(dir.path(), &clock));
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let frames = av_frames(10_000, 13_000, |src| {
+        if src <= 11_400 {
+            T0
+        } else {
+            T0 + i64::from(src - 11_400)
+        }
+    });
+    feed(&sink, &clock, &frames).await;
+    drain_chunks(&sink, &mut rx).await;
+
+    let violations: Vec<_> = drain_audit(&mut audit)
+        .into_iter()
+        .filter(|r| r.action == rs_core::audit::Action::AvInvariantViolated)
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "the burst must not violate the A/V invariant, got {violations:?}"
+    );
+    assert!(
+        !state.ingest_skew_active(),
+        "no ingest banner on a healthy burst"
+    );
+}
+
+/// A constructed violation (a stage that moved audio 700 ms vs video) is
+/// LOUD at the next chunk flush: AvInvariantViolated audit row (stage
+/// ingest, a_rel/v_rel/delta) plus the #354 ingest banner. A session
+/// re-anchor closes the episode with AvInvariantRestored.
+#[tokio::test]
+async fn constructed_ingest_violation_raises_banner_audit_and_restores_on_reanchor() {
+    use rs_core::audit::{Action, Severity, Source};
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let (sink, state, mut audit) = with_audit(new_sink(dir.path(), &clock));
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let frames = av_frames(0, 400, |src| T0 + i64::from(src));
+    feed(&sink, &clock, &frames).await;
+    // Construct the violation: the latest audio tag left the stage 700 ms
+    // later than the shared transform would have put it.
+    sink.inner
+        .lock()
+        .await
+        .av_invariant
+        .observe_audio(400, 1_100);
+    sink.flush().await;
+    let _ = drain_chunks(&sink, &mut rx).await;
+
+    let rows = drain_audit(&mut audit);
+    let row = rows
+        .iter()
+        .find(|r| r.action == Action::AvInvariantViolated)
+        .expect("a constructed violation must emit AvInvariantViolated");
+    assert_eq!(row.severity, Severity::Warn);
+    assert_eq!(row.source, Source::Inpoint);
+    assert_eq!(row.detail["stage"], "ingest");
+    assert_eq!(row.detail["a_rel_ms"], 700);
+    assert_eq!(row.detail["v_rel_ms"], 0);
+    assert_eq!(row.detail["delta_ms"], 700);
+    assert!(
+        state.ingest_skew_active(),
+        "the violation must raise the #354 ingest banner"
+    );
+    assert_eq!(state.ingest_skew_ms(), 700);
+
+    sink.start_new_session().await;
+    let rows = drain_audit(&mut audit);
+    assert!(
+        rows.iter().any(|r| r.action == Action::AvInvariantRestored),
+        "a session re-anchor must close the episode with AvInvariantRestored, got {rows:?}"
+    );
+    assert!(
+        !state.ingest_skew_active(),
+        "the banner clears on re-anchor"
+    );
+}

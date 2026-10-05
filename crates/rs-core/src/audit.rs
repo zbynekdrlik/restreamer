@@ -604,4 +604,19 @@ mod tests {
         assert_eq!(s, "\"delivery_log_lost\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
+
+    #[test]
+    fn action_av_invariant_serdes() {
+        // #367: the VPS emits these into its audit ring and the host mirror
+        // (`delivery_audit_mirror`) STRICT-parses the action string, so both
+        // must round-trip exactly or a push-side violation never lands in
+        // `audit_log` (and never reaches Discord).
+        for (a, s) in [
+            (Action::AvInvariantViolated, "\"av_invariant_violated\""),
+            (Action::AvInvariantRestored, "\"av_invariant_restored\""),
+        ] {
+            assert_eq!(serde_json::to_string(&a).unwrap(), s);
+            assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);
+        }
+    }
 }

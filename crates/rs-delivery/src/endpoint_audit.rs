@@ -479,4 +479,50 @@ mod tests {
         emit_endpoint_dead_target(&None, "test-alias", "DEAD_TARGET: x", 5, 30_000);
         // If we get here without panic the test passes.
     }
+
+    // --- emit_av_invariant_event (#367 push-side absolute A/V guard) ---
+
+    #[test]
+    fn emit_av_invariant_violation_appends_warn_row_with_relation_detail() {
+        use rs_rtmp_push::{AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantViolation};
+        let ring = AuditRing::new(64);
+        emit_av_invariant_event(
+            &Some(Arc::clone(&ring)),
+            "YT NLW 4k",
+            &AvInvariantEvent::Violated(AvInvariantViolation {
+                a_rel_ms: 3_300,
+                v_rel_ms: 4_000,
+                delta_ms: -700,
+            }),
+        );
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Severity::Warn);
+        assert_eq!(rows[0].source, Source::Vps);
+        assert_eq!(rows[0].action, Action::AvInvariantViolated);
+        assert_eq!(rows[0].endpoint.as_deref(), Some("YT NLW 4k"));
+        let d = &rows[0].detail;
+        assert_eq!(d["stage"], "push");
+        assert_eq!(d["a_rel_ms"], 3_300);
+        assert_eq!(d["v_rel_ms"], 4_000);
+        assert_eq!(d["delta_ms"], -700);
+        assert_eq!(d["tolerance_ms"], AV_INVARIANT_TOLERANCE_MS);
+    }
+
+    #[test]
+    fn emit_av_invariant_restored_appends_info_row() {
+        use rs_rtmp_push::AvInvariantEvent;
+        let ring = AuditRing::new(64);
+        emit_av_invariant_event(
+            &Some(Arc::clone(&ring)),
+            "YT NLW 4k",
+            &AvInvariantEvent::Restored { delta_ms: 3 },
+        );
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Severity::Info);
+        assert_eq!(rows[0].action, Action::AvInvariantRestored);
+        assert_eq!(rows[0].detail["stage"], "push");
+        assert_eq!(rows[0].detail["delta_ms"], 3);
+    }
 }
