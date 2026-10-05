@@ -2003,6 +2003,7 @@ jobs:
 
           $failures = @()
           $analysed = 0
+          $skipped = 0
           foreach ($snap in $snaps) {
             # Native stderr under EAP=Stop is a terminating error in PS 5.1:
             # probe with Continue and judge by the exit code.
@@ -2013,6 +2014,7 @@ jobs:
             $ErrorActionPreference = $prevEap
             if ($probeExit -ne 0) {
               Write-Host "WARNING: ffprobe exited $probeExit on $($snap.Name), skipping it: $json"
+              $skipped++
               continue
             }
             $pk = ($json | ConvertFrom-Json).packets
@@ -2020,6 +2022,7 @@ jobs:
             $vMax = ($pk | Where-Object { $_.codec_type -eq 'video' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
             if ($null -eq $aMax -or $null -eq $vMax) {
               Write-Host "WARNING: $($snap.Name) lacks an audio or a video packet, skipping it"
+              $skipped++
               continue
             }
             $analysed++
@@ -2028,6 +2031,9 @@ jobs:
             if ([math]::Abs($deltaMs) -gt 100) { $failures += "$($snap.Name): $deltaMs ms" }
           }
           if ($analysed -lt 3) { throw "FAILED: only $analysed analysable post-republish chunks, need >= 3" }
+          # One unanalysable snapshot (a chunk caught at the end of the window)
+          # is tolerated; more means the chunks themselves are broken.
+          if ($skipped -gt 1) { throw "FAILED: $skipped post-republish chunks could not be analysed (ffprobe error or a missing track), at most 1 is tolerated" }
           if ($failures.Count -gt 0) {
             throw "FAILED: chunk A/V relation drifted from the source relation after a late-join republish (#367): $($failures -join '; ')"
           }
