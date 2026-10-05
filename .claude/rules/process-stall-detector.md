@@ -69,6 +69,24 @@ On 2026-10-01 a 35.7 s freeze left only a hole in `restreamer.log`.
   300 ms stall). `tick_late_threshold` stays at 2 s, so CI scheduler jitter
   (Windows timer resolution is ~15 ms) can never flip `runtime_starved` into
   `whole_process`.
+- **300 ms is only for tests that PROVOKE a stall** (a 1.5 s block). A test
+  that asserts NO stall uses the 2 s `QUIET_THRESHOLD`. On a loaded box the
+  OS starves a responsive process for 300 ms+, and the detector is right to
+  report it. With 300 ms on dev2 under build load,
+  `responsive_runtime_reports_no_stall` failed 3 of 187 runs and
+  `detector_exits_quietly_when_the_runtime_shuts_down` failed once (#367).
+  These tests stay able to catch a real bug in two different ways:
+  - The responsive test watches for longer than the threshold (a const
+    assert pins that), so a probe that is never answered still trips it.
+  - The shutdown test runs for only 200 ms. What catches a broken exit there
+    is its 10 s wait for the detector to exit.
+- **Block the runtime only once the first probe EXISTS.** The detector spawns
+  it a moment after `detector_started` is on disk. Under load that took
+  250 ms, so the block began first, and the stall measured 1250 ms for a
+  1500 ms block (1 run in 200). Wait for `rt.metrics().num_alive_tasks() > 0`
+  (a stable tokio API). The stall then covers the whole block. The test
+  measures the block with `Instant`, the same clock the detector uses, and
+  asserts that the stall is at least that long, with no slack.
 - **A `current_thread` runtime is NOT driven between `block_on` calls.** Time
   spent outside `block_on`, or a `std::thread::sleep` inside one, starves it.
   That is the cheapest real "blocked runtime" stimulus.
