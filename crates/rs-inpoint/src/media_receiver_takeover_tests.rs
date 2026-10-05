@@ -591,3 +591,56 @@ async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
     );
     drop((b_reply, a_reply, frames_a));
 }
+
+/// Fifth review (#367): two stream keys DO reach stream.lan's inpoint (OBS
+/// `live/obs-e2e-test`, the CI ffmpeg `live/ci-e2e-test`). When a takeover
+/// of B is ACCEPTED and B's session later ends, the stalled stream A it
+/// superseded must be looked at again: A's publisher can still be registered
+/// and resume without a new Publish.
+#[tokio::test(start_paused = true)]
+async fn the_end_of_an_accepted_takeover_reprobes_the_superseded_stream() {
+    let _wd = watchdog("the_end_of_an_accepted_takeover_reprobes_the_superseded_stream");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the live stream is subscribed")
+        .unwrap();
+    let frames_a = accept(reply);
+    frames_a.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+
+    // A stalls: B is taken over, and B is live.
+    let (probed, b_reply) = tokio::time::timeout(FRAME_TIMEOUT + within, requests.recv())
+        .await
+        .expect("the deferred stream is probed at the stall")
+        .unwrap();
+    assert_eq!(probed, other);
+    let frames_b = accept(b_reply);
+    frames_b.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(state.is_connected(), "B's session started");
+
+    // B ends: the superseded A is probed once.
+    drop(frames_b);
+    let (again, _a_reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the end of B must re-probe the stream B superseded")
+        .unwrap();
+    assert_eq!(again, live);
+    drop(frames_a);
+}
