@@ -215,6 +215,8 @@ async fn init_endpoints(
         started,
         "Initialized endpoints"
     );
+    drop(endpoints);
+    reconcile_test_file_sink(&state).await;
 
     Ok(Json(InitResponse {
         status: "ok".to_string(),
@@ -265,6 +267,11 @@ struct StatusResponse {
     /// the live-read convenience field. Issue #353.
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_sample: Option<crate::resource_sample::ResourceSample>,
+    /// #192: the TEST_FILE loopback RTMP sink's bound address + accept /
+    /// publish / tag / byte counters. `None` while no TEST_FILE endpoint is
+    /// configured (the sink is not running).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_file_sink: Option<crate::test_file_sink::SinkStatus>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -361,6 +368,11 @@ async fn endpoint_status(
             rescue_eta_secs: stats.rescue_eta_secs,
         });
     }
+    // Release the endpoint map BEFORE touching the sink slot: the reconcile
+    // path takes slot -> endpoints, so holding endpoints -> slot here could
+    // deadlock behind a queued writer (tokio's RwLock is fair).
+    drop(endpoints);
+    let test_file_sink = state.test_file_sink.status().await;
 
     let (recent_audit, next_audit_cursor) = state.audit_ring.since(q.since.unwrap_or(0));
 
@@ -381,7 +393,25 @@ async fn endpoint_status(
         next_audit_cursor,
         s3_fetch_profile,
         resource_sample,
+        test_file_sink,
     })
+}
+
+/// #192: start or stop the TEST_FILE loopback sink so it runs exactly while
+/// the endpoint set holds a TEST_FILE endpoint. Call AFTER every endpoint-set
+/// change, with the endpoint lock already RELEASED: the slot lock is taken
+/// first and the endpoint map is read under it, so concurrent reconciles
+/// serialize and always converge on the latest set.
+pub(crate) async fn reconcile_test_file_sink(state: &AppState) {
+    state
+        .test_file_sink
+        .reconcile(async {
+            let endpoints = state.endpoints.read().await;
+            crate::test_file_sink::wants_test_file_sink(
+                endpoints.values().map(|h| h.config().service_type.as_str()),
+            )
+        })
+        .await;
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +448,8 @@ async fn stop_endpoints(
             format!("Stopped all {count} endpoints")
         }
     };
+    drop(endpoints);
+    reconcile_test_file_sink(&state).await;
 
     Json(StopResponse {
         status: "ok".to_string(),
@@ -480,6 +512,8 @@ async fn add_endpoint(
 
     let alias = req.endpoint.alias.clone();
     endpoints.insert(alias.clone(), handle);
+    drop(endpoints);
+    reconcile_test_file_sink(&state).await;
 
     tracing::info!(alias = %alias, start_chunk_id = start_id, "Added endpoint mid-stream");
 
@@ -508,21 +542,22 @@ async fn remove_endpoint(
 ) -> Result<Json<RemoveEndpointResponse>, StatusCode> {
     let mut endpoints = state.endpoints.write().await;
 
-    if let Some(handle) = endpoints.remove(&req.alias) {
-        handle.stop().await;
-        tracing::info!(alias = %req.alias, "Removed endpoint mid-stream");
-        Ok(Json(RemoveEndpointResponse {
-            status: "ok".to_string(),
-            alias: req.alias,
-            removed: true,
-        }))
-    } else {
-        Ok(Json(RemoveEndpointResponse {
-            status: "ok".to_string(),
-            alias: req.alias,
-            removed: false,
-        }))
-    }
+    let removed = match endpoints.remove(&req.alias) {
+        Some(handle) => {
+            handle.stop().await;
+            tracing::info!(alias = %req.alias, "Removed endpoint mid-stream");
+            true
+        }
+        None => false,
+    };
+    drop(endpoints);
+    reconcile_test_file_sink(&state).await;
+
+    Ok(Json(RemoveEndpointResponse {
+        status: "ok".to_string(),
+        alias: req.alias,
+        removed,
+    }))
 }
 
 // --- Live-edge start recompute ---
@@ -580,7 +615,7 @@ pub async fn update_start_handler(
         None => {
             #[cfg(test)]
             {
-                EndpointHandle::stub_for_test(req.new_start_chunk_id)
+                EndpointHandle::stub_with_config_for_test(cfg, req.new_start_chunk_id)
             }
             #[cfg(not(test))]
             {
@@ -599,6 +634,9 @@ pub async fn update_start_handler(
         .write()
         .await
         .insert(req.alias.clone(), new_handle);
+    // #192: the alias was briefly absent from the map above; a reconcile that
+    // ran in that window may have stopped the TEST_FILE sink. Re-converge.
+    reconcile_test_file_sink(&state).await;
 
     state.audit_ring.push(
         rs_core::audit::Severity::Info,

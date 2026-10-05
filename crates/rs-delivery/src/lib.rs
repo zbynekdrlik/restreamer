@@ -19,3 +19,7 @@ pub mod ffmpeg_reason;
 // `fast_keepalive` references the embedded default rescue blob; expose the
 // const-only module in the library target too so the helper compiles there.
 pub mod rescue_default;
+// TEST_FILE loopback RTMP sink (#192). Self-contained (xiu + tokio only), so
+// the `tests/test_file_sink_e2e.rs` integration binary can drive it on the
+// real 127.0.0.1:1935 in its OWN process.
+pub mod test_file_sink;
