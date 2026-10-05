@@ -222,6 +222,9 @@ also fails when Restreamer is not resumed on every exit path. There are three:
   lives outside the runner's process tree, because a force-cancel skips both
   `finally` and `always()` steps. After 75 s it resumes Restreamer, and kills
   a frozen publisher 1, but only while their `$env:TEMP` markers still exist.
+  Every action it takes goes into `latejoin-367-deadman.log`, which the next
+  run prints as a warning. The gate also fails if the dead-man has died
+  before the resume.
 
 The markers hold PID + start time, so a reused PID is never touched. Never
 call the API while Restreamer is suspended.

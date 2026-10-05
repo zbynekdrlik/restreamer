@@ -1269,7 +1269,7 @@ jobs:
           fi
           # The dead-man must be created through WMI (outside the runner's
           # process tree) and armed BEFORE Restreamer is suspended.
-          ARM=$(grep -nE '^\s*Start-DeadMan\s*$' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          ARM=$(grep -nE '^\s*\$deadManPid = Start-DeadMan\s*$' <<<"$GATE" | head -1 | cut -d: -f1 || true)
           SUSPEND=$(grep -nF 'NtSuspendProcess($rsHandle)' <<<"$GATE" | head -1 | cut -d: -f1 || true)
           if ! grep -qF 'Invoke-CimMethod -ClassName Win32_Process -MethodName Create' <<<"$GATE" || [ -z "$ARM" ] || [ -z "$SUSPEND" ] || [ "$ARM" -ge "$SUSPEND" ]; then
             echo "ERROR: the late-join gate must arm its WMI-created dead-man (Start-DeadMan) before NtSuspendProcess(\$rsHandle) (#367)."
@@ -2319,6 +2319,12 @@ jobs:
           # always() step after this one and the dead-man act on what is left.
           $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
           $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
+          $deadManLog = Join-Path $env:TEMP "latejoin-367-deadman.log"
+          if (Test-Path $deadManLog) {
+            Write-Host "::warning::The late-join gate's dead-man acted after an earlier run was killed mid-freeze:"
+            Get-Content $deadManLog | ForEach-Object { Write-Host "  $_" }
+            Remove-Item $deadManLog -Force
+          }
           # MUST equal STALL_LOG_MARKER in crates/rs-inpoint/src/media_receiver.rs
           # (checked by test-integrity "Verify the late-join gate's log markers
           # and resume safety (#367)").
@@ -2400,11 +2406,13 @@ jobs:
           # The gate deletes each marker once it resumed / killed the process
           # itself, so on a normal run it does nothing. A marker's PID only
           # counts while the process name and start time still match.
+          # When it acts, it appends one line to $deadManLog, which the next
+          # run of this step prints. It removes the suspend marker only after
+          # a successful resume, so the always() step can still retry.
           function Start-DeadMan {
             $script = @'
           $ErrorActionPreference = 'Continue'
           Start-Sleep -Seconds 75
-          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LateJoin367DeadMan { [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle); }'
           function Get-Marked([string]$path, [string]$name) {
             $m = @(Get-Content $path -ErrorAction SilentlyContinue)
             if ($m.Count -lt 2) { return }
@@ -2412,18 +2420,30 @@ jobs:
             if ($p -and $p.ProcessName -eq $name -and [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$m[1]) -lt 10000000) { $p }
           }
           $rs = Get-Marked '__RS_MARKER__' 'Restreamer'
-          if ($rs) { [void][LateJoin367DeadMan]::NtResumeProcess($rs.Handle) }
-          Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue
+          if ($rs) {
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LateJoin367DeadMan { [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle); }'
+            $rc = [LateJoin367DeadMan]::NtResumeProcess($rs.Handle)
+            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: NtResumeProcess(Restreamer PID $($rs.Id)) returned $rc"
+            if ($rc -eq 0) { Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue }
+          } else {
+            Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue
+          }
           $p1 = Get-Marked '__P1_MARKER__' 'ffmpeg'
-          if ($p1) { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue }
+          if ($p1) {
+            Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue
+            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: killed frozen publisher 1 (PID $($p1.Id))"
+          }
           Remove-Item '__P1_MARKER__' -Force -ErrorAction SilentlyContinue
           '@
-            $script = $script.Replace('__RS_MARKER__', $suspendMarker.Replace("'", "''")).Replace('__P1_MARKER__', $p1Marker.Replace("'", "''"))
+            foreach ($kv in @(@('__RS_MARKER__', $suspendMarker), @('__P1_MARKER__', $p1Marker), @('__LOG__', $deadManLog))) {
+              $script = $script.Replace($kv[0], $kv[1].Replace("'", "''"))
+            }
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
             $cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
             $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
             if ($r.ReturnValue -ne 0) { throw "FAILED: could not start the dead-man process (Win32_Process.Create returned $($r.ReturnValue))" }
             Write-Host "Dead-man process PID $($r.ProcessId) armed (75 s)"
+            return [int]$r.ProcessId
           }
 
           $rs = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
@@ -2444,7 +2464,7 @@ jobs:
             # socket for 0.8 s, then freeze Restreamer. Each marker is written
             # BEFORE its suspend call, so no exit path leaves an unmarked
             # suspended process.
-            Start-DeadMan
+            $deadManPid = Start-DeadMan
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
             if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(publisher 1) returned $rc" }
@@ -2467,6 +2487,12 @@ jobs:
             if ($gapMs -ge 1500) {
               throw "FAILED: repro setup too slow: $gapMs ms between freezing publisher 1 and Restreamer (xiu drops a publisher idle >= 2 s, so the stall path is not guaranteed)"
             }
+            # The dead-man must still be asleep (proves WMI really started it
+            # and its encoded script runs): a dead safety net fails the gate.
+            $dm = Get-Process -Id $deadManPid -ErrorAction SilentlyContinue
+            if (-not $dm -or $dm.ProcessName -ne 'powershell') {
+              throw "FAILED: the dead-man process (PID $deadManPid) is gone before its 75 s -- the force-cancel safety net is broken"
+            }
 
             # The repro must really have stalled the inpoint, or the gate proves
             # nothing (a receiver without the #367 fix passes a run without a
@@ -2487,7 +2513,8 @@ jobs:
 
             # Kill publisher 1 and publish fresh within ~3 s: the reconnect
             # lands while the receiver is in its re-subscribe retry ladder.
-            Stop-Process -Id $p1.Id -Force
+            if (-not $p1.HasExited) { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $p1.WaitForExit(5000)) { throw "FAILED: publisher 1 (PID $($p1.Id)) did not exit after Stop-Process" }
             Remove-Item $p1Marker -Force -ErrorAction SilentlyContinue
             $p2LaunchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $p2 = Start-Publisher 60
@@ -2684,7 +2711,7 @@ jobs:
           if (Test-Path $p1Marker) {
             $proc = Get-Marked $p1Marker 'ffmpeg'
             if ($proc) {
-              Stop-Process -Id $proc.Id -Force
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
               Write-Host "Killed ffmpeg publisher 1 (PID $($proc.Id)), left behind by the late-join gate"
             }
             Remove-Item $p1Marker -Force
