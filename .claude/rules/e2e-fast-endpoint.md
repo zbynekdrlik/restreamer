@@ -3,11 +3,57 @@ paths:
   - ".github/workflows/ci.yml"
   - "crates/rs-api/src/delivery_live_edge.rs"
   - "crates/rs-delivery/src/api.rs"
+  - "crates/rs-delivery/src/test_file_sink*.rs"
+  - "crates/rs-delivery/src/endpoint_rtmp_url.rs"
+  - "crates/rs-delivery/tests/test_file_sink_e2e.rs"
   - "leptos-ui/src/components/endpoint_tree.rs"
   - "e2e/frontend.spec.ts"
 ---
 
 # E2E fast-endpoint (`is_fast`) + audit gotchas (#192)
+
+## TEST_FILE = in-process loopback RTMP sink on the VPS; CI seeds every gate alias itself
+
+- **TEST_FILE is a real, credential-free target.** Under the Rust pusher a
+  TEST_FILE endpoint (and its rescue loop) dials `rtmp://127.0.0.1:1935/live/<key>`
+  (`endpoint_rtmp_url.rs`, built from `test_file_sink::TEST_FILE_SINK_ADDR`).
+  `rs-delivery` runs an in-process accept-and-discard sink there
+  (`test_file_sink.rs`) while ANY endpoint in the set is TEST_FILE:
+  `api::reconcile_test_file_sink(state, incoming)` runs BEFORE spawning
+  (init / add / update_start pass the incoming service types, so the first
+  push never races the bind) and after every removal (`&[]`). Its address +
+  counters are on the VPS `/api/status` (`test_file_sink`); the CI step
+  "Assert fast-endpoint audit (#192)" reads them and requires the byte
+  counter to RISE (host `alive` alone is the blind spot that hid #192).
+  Before #192 nothing listened, so TEST_FILE silently never delivered.
+- **Every alias a strict CI gate looks up must be seeded by CI itself.** The
+  OBS-to-YouTube job creates `e2e fast` (TEST_FILE, key `ci-fast`, is_fast)
+  in its pin step and attaches it; `e2e rtmp` is key-synced from
+  `YOUTUBE_STREAM_KEY`. Never point a strict gate at an endpoint an operator
+  (or a migration — v21 deleted the old YT_HLS fixture) can remove. The
+  `test-integrity` self-check "every strict-gate endpoint alias is seeded by
+  CI" fails the build otherwise; extend its rules, don't bypass them.
+- **The sink is xiu `ServerSession` + our own hub-event responder, NOT xiu
+  `StreamsHub`.** streamhub 0.2.4 rejects a 2nd publisher on the same key
+  with `Exists` (rescue pushers reuse the endpoint key) and its transceiver
+  `receive_event_loop` spins at 100% CPU when the hub is dropped mid-publish.
+  Pinned by `two_publishers_on_the_same_key_are_both_accepted`.
+- **xiu `ServerSession` drops a publisher idle >= 2 s** (hard-coded
+  `read_timeout(2s)`). The fast keepalive bridge starts at 2 s
+  (`FAST_KEEPALIVE_TRIGGER_SECS`), so a >= 2 s producer gap on a TEST_FILE
+  fast endpoint becomes a reconnect here (YouTube would hold the session).
+  Not a sink bug — read push deaths on `e2e fast` in that light.
+- **Tests that bind the REAL 1935 live in `tests/test_file_sink_e2e.rs`
+  (own process).** The rs-delivery BIN unit tests assume 127.0.0.1:1935 is
+  REFUSED (e.g. `rescue_endpoint_loop_tests`); a live listener there in the
+  same process breaks them. In-process tests use `AppState::new_for_test()` /
+  `TestFileSinkSlot::new("127.0.0.1:0")` (ephemeral). `api.rs` tests use
+  `AppState::new()` = the production 1935 slot: never seed a TEST_FILE
+  endpoint + reconcile there.
+- **Lock order: slot -> endpoints.** `reconcile` takes the slot mutex then
+  reads the endpoint map; never touch the slot while holding the endpoint
+  lock (`endpoint_status` drops it first) — tokio's fair RwLock deadlocks
+  behind a queued writer otherwise.
 
 ## The per-endpoint cache label has THREE shapes — parse fast-first
 
