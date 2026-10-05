@@ -750,3 +750,8 @@ async fn a_probe_of_another_stream_does_not_cover_a_lag() {
     );
     drop(frames_a);
 }
+
+// Remembered streams (#367, sixth review) live in their own child file for
+// the 1000-line cap.
+#[path = "media_receiver_remembered_tests.rs"]
+mod remembered;
