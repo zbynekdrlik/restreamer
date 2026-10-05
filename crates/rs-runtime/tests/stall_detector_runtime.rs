@@ -3,9 +3,17 @@
 //! reported as `runtime_starved` — in `stall.log` (written during the stall)
 //! and as a `ProcessStall` audit row (emitted after recovery).
 //!
-//! Thresholds are scaled down so the tests run in ~2 s. The detector thread is
+//! Thresholds are scaled down so the tests run in ~3 s. The detector thread is
 //! never blocked, so its ticks stay on time; `tick_late_threshold` is generous
 //! (2 s on a 50 ms interval) so CI scheduler jitter can never flip the class.
+//!
+//! The threshold differs by what a test asserts (#367). A test that PROVES a
+//! stall blocks the runtime far longer than `STALL_THRESHOLD`, so it uses the
+//! short one. A test that proves there is NO stall cannot use 300 ms: a loaded
+//! box can starve a responsive process for that long, and the detector is
+//! RIGHT to report it (seen on dev2 under load: 3 of the 5 tests here failed
+//! that way). Those tests use `QUIET_THRESHOLD` and stay non-vacuous, because
+//! each one runs longer than it, so a never-answered probe still trips it.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -16,15 +24,30 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 const BLOCKED_FOR: Duration = Duration::from_millis(1_500);
+/// Stall threshold for the tests that provoke a stall (`BLOCKED_FOR` is 5x it).
+const STALL_THRESHOLD: Duration = Duration::from_millis(300);
+/// Stall threshold for the tests that assert NO stall. Far above any scheduler
+/// starvation seen under load, yet shorter than `RESPONSIVE_FOR`.
+const QUIET_THRESHOLD: Duration = Duration::from_secs(2);
+/// How long `responsive_runtime_reports_no_stall` watches the runtime.
+const RESPONSIVE_FOR: Duration = Duration::from_millis(3_000);
 
 fn test_config(dir: &Path) -> StallDetectorConfig {
     StallDetectorConfig {
         probe_interval: Duration::from_millis(50),
-        stall_threshold: Duration::from_millis(300),
+        stall_threshold: STALL_THRESHOLD,
         tick_late_threshold: Duration::from_secs(2),
         baseline_every_ticks: 2,
         log_path: dir.join("logs").join("stall.log"),
         log_max_bytes: 1_000_000,
+    }
+}
+
+/// `test_config` for a test that asserts the ABSENCE of a stall.
+fn quiet_config(dir: &Path) -> StallDetectorConfig {
+    StallDetectorConfig {
+        stall_threshold: QUIET_THRESHOLD,
+        ..test_config(dir)
     }
 }
 
@@ -61,10 +84,28 @@ fn wait_for_event(path: &Path, event: &str) {
     }
 }
 
-/// Spawn the detector on a fresh current_thread runtime, wait until it is
-/// probing, then block the runtime's ONLY thread for `BLOCKED_FOR` (the
-/// stimulus). A current_thread runtime is not driven between `block_on`
-/// calls, so the first probe stays unanswered from its send until the
+/// Bounded wait until the detector's first probe task exists on `rt`.
+///
+/// The detector spawns that probe a moment AFTER `detector_started` is on
+/// disk. On a loaded box that moment took 250 ms, so a block started on the
+/// record alone could begin BEFORE the probe existed, and the stall measured
+/// 1250 ms for a 1500 ms block (#367, dev2 under load). A current_thread
+/// runtime is not driven here, so the probe stays alive and unanswered.
+fn wait_for_first_probe(rt: &tokio::runtime::Runtime) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rt.metrics().num_alive_tasks() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the detector spawned no probe within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Spawn the detector on a fresh current_thread runtime, wait until its first
+/// probe is queued, then block the runtime's ONLY thread for `BLOCKED_FOR`
+/// (the stimulus). A current_thread runtime is not driven between `block_on`
+/// calls, so that probe stays unanswered from before the block until the
 /// caller drives the runtime again.
 fn spawn_and_block(
     dir: &Path,
@@ -81,8 +122,8 @@ fn spawn_and_block(
             spawn_stall_detector(tokio::runtime::Handle::current(), cfg, Some(audit_tx))
         })
         .expect("detector thread starts");
-    // The first probe goes out right after `detector_started` is written.
     wait_for_event(&log_path, "detector_started");
+    wait_for_first_probe(&rt);
     rt.block_on(async { std::thread::sleep(BLOCKED_FOR) });
     (rt, guard)
 }
@@ -94,11 +135,10 @@ fn assert_runtime_starved_row(row: &AuditRow, log_path: &Path) {
     assert_eq!(row.detail["class"], "runtime_starved");
     assert_eq!(row.detail["trigger"], "probe_overdue");
     let duration_ms = row.detail["duration_ms"].as_u64().expect("duration_ms");
-    // The probe goes out a moment after `detector_started` is complete on disk
-    // (that record is fsynced first), so allow 100 ms below the block length.
-    let floor = BLOCKED_FOR.as_millis() as u64 - 100;
+    // The probe was queued before the block began and can only run after it
+    // ends, so the stall covers the whole block.
     assert!(
-        duration_ms >= floor,
+        duration_ms >= BLOCKED_FOR.as_millis() as u64,
         "stall spans the {} ms block, got {duration_ms} ms",
         BLOCKED_FOR.as_millis()
     );
@@ -220,14 +260,16 @@ fn responsive_runtime_reports_no_stall() {
         .build()
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = test_config(dir.path());
+    let cfg = quiet_config(dir.path());
     let log_path = cfg.log_path.clone();
     let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
 
     let mut guard = spawn_stall_detector(rt.handle().clone(), cfg, Some(audit_tx)).unwrap();
-    // ~20 probe round trips (3x the stall threshold) on a runtime whose
-    // workers are free the whole time.
-    rt.block_on(async { tokio::time::sleep(Duration::from_millis(1_000)).await });
+    // ~60 probe round trips on a runtime whose workers are free the whole time.
+    // The window outlasts the threshold, so a probe that is never answered
+    // would still be reported here.
+    const _: () = assert!(RESPONSIVE_FOR.as_millis() > QUIET_THRESHOLD.as_millis());
+    rt.block_on(async { tokio::time::sleep(RESPONSIVE_FOR).await });
     guard.stop();
 
     assert!(audit_rx.try_recv().is_err(), "no ProcessStall row");
@@ -245,7 +287,9 @@ fn detector_exits_quietly_when_the_runtime_shuts_down() {
         .build()
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = test_config(dir.path());
+    // A detector that misses the shutdown never exits: the 10 s wait below
+    // fails, and its unanswered probe is reported after QUIET_THRESHOLD.
+    let cfg = quiet_config(dir.path());
     let log_path = cfg.log_path.clone();
 
     let guard = spawn_stall_detector(rt.handle().clone(), cfg, None).unwrap();
