@@ -35,7 +35,8 @@ paths:
   the type ONCE (`endpoint_start::service_type_or_refuse`) and passes the
   `ServiceType` down to warmup and the consumer; an unknown type refuses to
   start: error log, `last_error` + `stall_reason = "unknown_service_type"` +
-  `delivery_mode = "refused"` in the VPS status, and an
+  `delivery_mode = "refused"` in the VPS status (rs-core
+  `endpoint_lifecycle::REFUSED_DELIVERY_MODE`, painted red Attention), and an
   `EndpointFfmpegRestartFailed` row with `phase: "service_type"`.
 - **Every alias a strict CI gate looks up must be seeded by CI itself.** The
   OBS-to-YouTube job creates `e2e fast` (TEST_FILE, key `ci-fast`, is_fast)

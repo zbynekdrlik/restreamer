@@ -7,6 +7,7 @@ paths:
   - "crates/rs-inpoint/src/ingest_skew.rs"
   - "crates/rs-delivery/src/rescue_audit.rs"
   - "crates/rs-delivery/src/endpoint_audit.rs"
+  - "crates/rs-api/src/delivery_monitor.rs"
 ---
 
 # Outage notifier — episodes, scopes, and the one invariant (#367)
@@ -24,11 +25,17 @@ emitter of one.
 - **Families:** `HostInternet`, `VpsReachability`, `S3Upload` (host-level,
   no endpoint), `Rescue` (per endpoint), `IngestSkew` (host-level),
   `AvInvariant` (per stage; push stage also per endpoint).
-  `HostInternetRecovered` ends all three host-level families with ONE alert.
+  `HostInternetRecovered` ends all three host-level families with ONE alert;
+  the delivery monitor's `VpsReachable` ends VPS reachability on its own.
+- **Unmeasured recoveries close silently:** `IngestSkewRecovered` with
+  `state: "reset"` (a session reset cleared the latch, nobody measured the
+  source back in sync) ends the episode with NO alert (`recovery_unmeasured`).
 - **Scopes:** a lifecycle row closes, SILENTLY, the episodes whose subject it
   ended — no "recovered" alert, but the next onset alerts again:
-  - `DeliveryStarted/Stopped`, `VpsReady/Deleted` → every VPS-side episode
-    (rescue, push-stage invariant, VPS reachability);
+  - `DeliveryStopped`, `VpsDeleted` → every VPS-side episode (rescue,
+    push-stage invariant, VPS reachability). END edges only: a start request
+    on a LIVE delivery reuses its instance yet still records
+    `DeliveryStarted` and re-emits `VpsReady`;
   - `EndpointAdded/Removed`, `EndpointStartChunkUpdated` → that endpoint's;
   - `RescueActivated` → that endpoint's push-stage invariant (the live pusher
     was dropped for the rescue clip);
@@ -51,7 +58,11 @@ for the process lifetime: an alert that silently goes quiet. So:
 - An emitter whose latch is cleared by a RESET must write the recovery row
   then: the chunker's session reset writes `IngestSkewRecovered`
   (`state: "reset"`) and `AvInvariantRestored` (`ingest_report.rs`
-  `publish_reanchor`, `ReanchorEdges`).
+  `publish_reanchor`, `ReanchorEdges`), on all three reset paths
+  (`start_new_session`, `reset`, the backward-jump re-anchor).
+- An emitter that only LOGS a recovery edge is a gap: the delivery monitor
+  only logged "VPS health recovered" until round 2 of the #367 review added
+  the `VpsReachable` row.
 - Onset and recovery rows of one episode must carry the SAME stage + endpoint.
   Use `rs_core::audit::AV_STAGE_INGEST` / `AV_STAGE_PUSH` and the shared row
   builders, never a literal.
