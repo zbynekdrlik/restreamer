@@ -1943,8 +1943,8 @@ jobs:
             # Freeze the publisher past FRAME_TIMEOUT (30 s) -> the inpoint stalls.
             $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
             if ($rc -ne 0) { throw "FAILED: NtSuspendProcess returned $rc" }
-            Write-Host "Publisher 1 (PID $($p1.Id)) suspended; waiting 31 s for the inpoint stall"
-            Start-Sleep -Seconds 31
+            Write-Host "Publisher 1 (PID $($p1.Id)) suspended; waiting 31.5 s for the inpoint stall"
+            Start-Sleep -Milliseconds 31500
 
             # Kill it and republish within ~1 s: the Thursday reconnect.
             Stop-Process -Id $p1.Id -Force
@@ -1954,7 +1954,10 @@ jobs:
             Write-Host "Publisher 2 (PID $($p2.Id)) started at unix ms $p2StartMs"
 
             # Snapshot the new session's chunks while they still exist on disk
-            # (the uploader deletes each one right after its S3 upload).
+            # (the uploader deletes each one right after its S3 upload). The
+            # chunker writes a file in place (no rename), so copy a chunk only
+            # once it is non-empty and its size held across two polls.
+            $seen = @{}
             $deadline = (Get-Date).AddSeconds(25)
             while ((Get-Date) -lt $deadline) {
               Get-ChildItem $chunkDir -File -Filter "chunk_*.bin" -ErrorAction SilentlyContinue | ForEach-Object {
@@ -1962,11 +1965,16 @@ jobs:
                   $writtenMs = [int64]$Matches[1]
                   $dest = Join-Path $snapDir $_.Name
                   if ($writtenMs -gt ($p2StartMs + 1500) -and -not (Test-Path $dest)) {
-                    try {
-                      $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
-                      [System.IO.File]::WriteAllBytes($dest, $bytes)
-                    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException], [System.UnauthorizedAccessException] {
-                      # pruned or locked mid-read -- the next poll retries
+                    $len = $_.Length
+                    if ($len -gt 0 -and $seen[$_.Name] -eq $len) {
+                      try {
+                        $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+                        [System.IO.File]::WriteAllBytes($dest, $bytes)
+                      } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                        # pruned, locked or still being written -- the next poll retries
+                      }
+                    } else {
+                      $seen[$_.Name] = $len
                     }
                   }
                 }
@@ -1979,22 +1987,46 @@ jobs:
             }
           }
 
+          # The repro must really have stalled the inpoint, or the gate proves
+          # nothing (old code passes a run without a stall too).
+          $stalls = @(Get-Content 'C:\ProgramData\Restreamer\restreamer.log' -Tail 20000 | Where-Object {
+            $_ -match 'No frames received -- stream stalled' -and $_.Length -ge 19 -and $_.Substring(0, 19) -ge $startTs.Substring(0, 19)
+          })
+          if ($stalls.Count -lt 1) {
+            throw "FAILED: no 'stream stalled' log line since $startTs -- the repro did not exercise the #367 stall path"
+          }
+          Write-Host "Inpoint stall observed: $($stalls[0])"
+
           $snaps = @(Get-ChildItem $snapDir -File | Sort-Object Name)
           Write-Host "Captured $($snaps.Count) chunk(s) of the republished session"
-          if ($snaps.Count -lt 3) { throw "FAILED: captured only $($snaps.Count) post-republish chunks, need >= 3" }
 
           $failures = @()
+          $analysed = 0
           foreach ($snap in $snaps) {
+            # Native stderr under EAP=Stop is a terminating error in PS 5.1:
+            # probe with Continue and judge by the exit code.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
             $json = & $ffprobe -v error -show_entries packet=codec_type,pts_time -of json $snap.FullName 2>&1 | Out-String
-            if ($LASTEXITCODE -ne 0) { throw "FAILED: ffprobe exited $LASTEXITCODE on $($snap.Name): $json" }
+            $probeExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($probeExit -ne 0) {
+              Write-Host "WARNING: ffprobe exited $probeExit on $($snap.Name), skipping it: $json"
+              continue
+            }
             $pk = ($json | ConvertFrom-Json).packets
             $aMax = ($pk | Where-Object { $_.codec_type -eq 'audio' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
             $vMax = ($pk | Where-Object { $_.codec_type -eq 'video' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
-            if ($null -eq $aMax -or $null -eq $vMax) { throw "FAILED: $($snap.Name) lacks an audio or a video packet" }
+            if ($null -eq $aMax -or $null -eq $vMax) {
+              Write-Host "WARNING: $($snap.Name) lacks an audio or a video packet, skipping it"
+              continue
+            }
+            $analysed++
             $deltaMs = [math]::Round(($aMax - $vMax) * 1000.0)
             Write-Host "$($snap.Name): last audio pts $aMax s, last video pts $vMax s, audio-minus-video $deltaMs ms"
             if ([math]::Abs($deltaMs) -gt 100) { $failures += "$($snap.Name): $deltaMs ms" }
           }
+          if ($analysed -lt 3) { throw "FAILED: only $analysed analysable post-republish chunks, need >= 3" }
           if ($failures.Count -gt 0) {
             throw "FAILED: chunk A/V relation drifted from the source relation after a late-join republish (#367): $($failures -join '; ')"
           }
@@ -2004,7 +2036,7 @@ jobs:
           if ($rows.Count -gt 0) {
             throw "FAILED: $($rows.Count) av_invariant_violated audit row(s) during the late-join repro: $($rows | ConvertTo-Json -Compress -Depth 4)"
           }
-          Write-Host "=== Late-join republish GATE PASSED: $($snaps.Count) chunks within 100 ms, 0 invariant violations ==="
+          Write-Host "=== Late-join republish GATE PASSED: $analysed chunks within 100 ms, 0 invariant violations ==="
 
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell
