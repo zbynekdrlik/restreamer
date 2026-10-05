@@ -209,14 +209,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # PINNED to 1.98.0, unlike every other job (#367, 2026-10-05). tarpaulin's
+      # default ptrace engine crashes on code built by rustc 1.99.0: test
+      # `uploader_integration::two_clients_same_event_name_produce_disjoint_keys`
+      # aborts with "memory allocation of 140737152832096 bytes failed" (a
+      # pointer read as a String length inside S3Client::new) and tarpaulin
+      # dies with ESRCH. The SAME instrumented binary passes 20/20 run natively,
+      # so this is ptrace x rustc-1.99 codegen, not our code. dev2 matrix,
+      # full coverage command: rustc 1.99.0 + tarpaulin 0.37.5 CRASH, 1.99.0 +
+      # 0.37.2 CRASH, 1.99.0 on origin/main d7596be4 CRASH, 1.98.0 + 0.37.5
+      # PASS (EXIT 0, 71.13%). Un-pin once a newer stable passes this job.
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      # Pinned too: an unpinned `cargo install` floats to whatever was published
+      # that morning (0.37.2 on the last green run, 0.37.5 now).
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --version 0.37.5 --locked
       - name: Run coverage
         run: cargo tarpaulin --workspace --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300
 
@@ -773,8 +785,16 @@ jobs:
           echo "OK: No SQLite WAL/SHM file deletion patterns found."
       - name: Verify zero ignored tests in cargo test output
         run: |
-          # Run tests and capture output
-          OUTPUT=$(cargo test --workspace --locked 2>&1)
+          # Run tests and capture output. The `|| { ... }` is load-bearing: this
+          # step runs under `bash -e`, so a bare `OUTPUT=$(cargo test ...)`
+          # aborts the script on a test failure BEFORE `echo "$OUTPUT"`, and
+          # the job fails with exit 101 and NO test output at all (push run
+          # 37347095610 lost the name of its failing test this way).
+          OUTPUT=$(cargo test --workspace --locked 2>&1) || {
+            echo "$OUTPUT"
+            echo "ERROR: cargo test --workspace --locked failed -- see the failing test(s) above."
+            exit 1
+          }
           echo "$OUTPUT"
 
           # Check for any ignored tests
@@ -1133,6 +1153,46 @@ jobs:
           fi
           echo "OK: every endpoint alias e2e-obs-youtube-test looks up is attached and seeded by CI:"
           echo "$looked_up"
+
+      - name: "Verify the zero-ignored step prints cargo test output on failure (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Under `bash -e` a bare `OUTPUT=$(cargo test ...)` exits on a test
+          # failure before `echo "$OUTPUT"`, so the job fails with NO test output
+          # (push run 37347095610). The sed range is that one step only, so this
+          # self-check can never match its own lines (#325).
+          STEP=$(sed -n '/- name: Verify zero ignored tests in cargo test output/,/- name: Verify deploy-stream-lan has always() condition/p' "$WORKFLOW_FILE")
+          if [ -z "$STEP" ]; then
+            echo "ERROR: could not find the 'Verify zero ignored tests in cargo test output' step."
+            exit 1
+          fi
+          if ! grep -qE '^\s*OUTPUT=\$\(cargo test --workspace --locked 2>&1\) \|\| \{\s*$' <<<"$STEP"; then
+            echo "ERROR: the cargo test capture must be 'OUTPUT=\$(cargo test --workspace --locked 2>&1) || {' so a failure still prints its output."
+            exit 1
+          fi
+          if ! awk '/^[ \t]*OUTPUT=\$\(cargo test/{c=1; next} c {print; exit}' <<<"$STEP" | grep -qE '^\s*echo "\$OUTPUT"\s*$'; then
+            echo "ERROR: the failure branch must echo \$OUTPUT first."
+            exit 1
+          fi
+          echo "OK: a failing cargo test still prints its output."
+
+      - name: "Verify Coverage keeps its toolchain + tarpaulin pins (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # rustc 1.99.0 + tarpaulin's ptrace engine crashes uploader_integration
+          # (see the comment in the coverage job). Un-pinning is allowed only
+          # together with this guard, after the new toolchain passes the job.
+          # The coverage job precedes test-integrity, so no self-match (#325).
+          COV=$(sed -n '/^  coverage:/,/^  mutation-testing:/p' "$WORKFLOW_FILE")
+          if ! grep -qE '^\s*- uses: dtolnay/rust-toolchain@1\.98\.0\s*$' <<<"$COV"; then
+            echo "ERROR: the coverage job must pin dtolnay/rust-toolchain@1.98.0 (#367)."
+            exit 1
+          fi
+          if ! grep -qE '^\s*run: cargo install cargo-tarpaulin --version [0-9]+\.[0-9]+\.[0-9]+ --locked\s*$' <<<"$COV"; then
+            echo "ERROR: the coverage job must install a pinned cargo-tarpaulin version with --locked (#367)."
+            exit 1
+          fi
+          echo "OK: coverage pins rustc 1.98.0 and an exact cargo-tarpaulin version."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
