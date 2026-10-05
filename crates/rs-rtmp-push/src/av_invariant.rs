@@ -22,6 +22,11 @@
 /// Allowed |delta| between the two tracks' transform offsets, in ms.
 pub const AV_INVARIANT_TOLERANCE_MS: i64 = 50;
 
+/// Whether a delta breaks the invariant (the tolerance itself is still OK).
+fn outside_tolerance(delta_ms: i64) -> bool {
+    delta_ms.abs() > AV_INVARIANT_TOLERANCE_MS
+}
+
 /// A measured violation: how far the stage moved audio relative to video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AvInvariantViolation {
@@ -86,8 +91,7 @@ impl AvInvariantGuard {
     /// The current violation, if both tracks were seen and the delta is
     /// outside tolerance.
     pub fn check(&self) -> Option<AvInvariantViolation> {
-        self.delta()
-            .filter(|d| d.delta_ms.abs() > AV_INVARIANT_TOLERANCE_MS)
+        self.delta().filter(|d| outside_tolerance(d.delta_ms))
     }
 
     /// Evaluate at a chunk boundary. Returns an edge (`Violated` when the
@@ -95,7 +99,7 @@ impl AvInvariantGuard {
     /// Without samples of both tracks nothing can be decided: no edge.
     pub fn evaluate(&mut self) -> Option<AvInvariantEvent> {
         let current = self.delta()?;
-        let violated = current.delta_ms.abs() > AV_INVARIANT_TOLERANCE_MS;
+        let violated = outside_tolerance(current.delta_ms);
         match (self.latched, violated) {
             (false, true) => {
                 self.latched = true;

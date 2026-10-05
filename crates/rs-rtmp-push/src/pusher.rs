@@ -68,6 +68,44 @@ pub fn chunk_pacing_sleep_ms(
     target_wall_ms.saturating_sub(actual_wall_ms)
 }
 
+/// Defensive cap on one tag's pacing sleep (issue #176/#178): a tag with a
+/// corrupt timestamp far in the future (observed: 14 min output_ts at 2 min
+/// wall-clock = a 12-minute sleep) would otherwise stall the entire push,
+/// trip the consumer-side 30 s write timeout, and force-close 5+ endpoint
+/// sessions at once when the bad tag arrives via shared chunk supply.
+const PACING_SLEEP_CAP_MS: u64 = 5_000;
+
+/// A raw per-tag pacing sleep at least this long is logged as LONG.
+const LONG_PACING_SLEEP_MS: u64 = 2_000;
+
+/// How long one tag waits for wall-clock to catch up with its output ts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TagSleep {
+    /// Output ts minus wall-clock elapsed.
+    raw_ms: u64,
+    /// `raw_ms` capped at `PACING_SLEEP_CAP_MS`.
+    sleep_ms: u64,
+}
+
+impl TagSleep {
+    fn is_long(self) -> bool {
+        self.raw_ms >= LONG_PACING_SLEEP_MS
+    }
+}
+
+/// Pure per-tag pacing: `None` when the tag is already due (wall-clock at or
+/// past its output ts), else the capped sleep.
+fn tag_sleep(actual_ms: u64, output_ts: u64) -> Option<TagSleep> {
+    if actual_ms >= output_ts {
+        return None;
+    }
+    let raw_ms = output_ts - actual_ms;
+    Some(TagSleep {
+        raw_ms,
+        sleep_ms: raw_ms.min(PACING_SLEEP_CAP_MS),
+    })
+}
+
 /// `true` for an AVC / AAC codec sequence header (`body[1] == 0x00`).
 fn is_media_seq_header(tag: &crate::flv::FlvTag<'_>) -> bool {
     tag.body.len() >= 2 && tag.body[1] == 0x00
@@ -382,37 +420,31 @@ impl RtmpPusher {
         std::mem::replace(sent, true)
     }
 
-    /// Per-tag pacing: sleep until wall-clock catches up to this tag's PTS.
-    /// Both `output_ts` and `anchor.elapsed()` live in the same ms domain.
-    ///
-    /// Defensive cap (issue #176/#178): if a tag carries a corrupt timestamp
-    /// far in the future (observed 14m output_ts at 2m wall-clock = 12-minute
-    /// pacing sleep), clamp the sleep to PACING_SLEEP_CAP_MS. Otherwise a
-    /// single bad tag stalls the entire push, trips the consumer-side 30s
-    /// write timeout, and force-closes 5+ endpoint sessions at once when the
-    /// bad tag arrives via shared chunk supply.
+    /// Per-tag pacing: sleep until wall-clock catches up to this tag's PTS
+    /// (`tag_sleep`). Both `output_ts` and `anchor.elapsed()` live in the
+    /// same ms domain.
     async fn pace_tag(&self, anchor: Instant, tag_type: u8, output_ts: u64) {
-        const PACING_SLEEP_CAP_MS: u64 = 5_000;
         let actual_ms = anchor.elapsed().as_millis() as u64;
-        if actual_ms >= output_ts {
+        let Some(sleep) = tag_sleep(actual_ms, output_ts) else {
             return;
-        }
-        let raw_sleep_ms = output_ts - actual_ms;
-        let clamped = raw_sleep_ms.min(PACING_SLEEP_CAP_MS);
-        if raw_sleep_ms >= 2_000 {
+        };
+        if sleep.is_long() {
             tracing::warn!(
                 tag_type,
                 output_ts,
                 actual_ms,
-                raw_sleep_ms,
-                clamped_to_ms = clamped,
+                raw_sleep_ms = sleep.raw_ms,
+                clamped_to_ms = sleep.sleep_ms,
                 last_audio_output_ts_ms = self.state.last_audio_output_ts_ms,
                 last_video_output_ts_ms = self.state.last_video_output_ts_ms,
                 base_ms = self.state.base_ms,
-                "rtmp_push: LONG per-tag pacing sleep (>=2s) -- output_ts ahead of wall by {raw_sleep_ms}ms; clamped to {clamped}ms"
+                "rtmp_push: LONG per-tag pacing sleep (>=2s) -- output_ts ahead of wall by {}ms; \
+                 clamped to {}ms",
+                sleep.raw_ms,
+                sleep.sleep_ms
             );
         }
-        tokio::time::sleep(Duration::from_millis(clamped)).await;
+        tokio::time::sleep(Duration::from_millis(sleep.sleep_ms)).await;
     }
 
     /// Lazy-connect + write FLV bytes.
@@ -648,7 +680,7 @@ impl RtmpPusher {
     }
 
     /// Number of times this pusher has detected an upstream chunker
-    /// timestamp regression and re-anchored its per-track base. Mirrors
+    /// timestamp anomaly and started a new shared wire mapping (#367). Mirrors
     /// `reconnect_count()` for visibility — alerts can fire on a non-zero
     /// value to investigate stream.lan crashes / chunker resets that
     /// the operator might otherwise miss.
