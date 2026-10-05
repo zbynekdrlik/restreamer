@@ -103,8 +103,9 @@ baseline-relative, so none of them saw it.
     nothing remembered is left) it probes `last_identifier`. A lag while
     streaming can hide the live stream's own reconnect Publish.
     `begin_session` (the ONE place the last stream changes) settles it:
-    another previous stream is remembered; for the same one the Publish or
-    probe read after the lag is newer than anything it lost. Sending
+    another previous stream is remembered; for the same one, a Publish read
+    after the lag is newer than anything it lost, and a probe of it already
+    cleared the earlier lags when it was sent. Sending
     ANY probe of `last_identifier` clears it (`send_subscribe`); `settle`
     consumes it when it sends the lag probe; a lag during a probe sets it
     again. An accepted Subscribe sets it to `lagged`: a lag while that

@@ -237,9 +237,11 @@ pub struct MediaReceiver {
     /// and nothing remembered is left; turned into a remembered stream when
     /// another stream's session starts (`begin_session`).
     lag_unprobed: bool,
-    /// Streams the receiver left without seeing them end, most recent last:
-    /// each is probed ONCE when the receiver is Idle with no session, and
-    /// forgotten when any probe of it is sent or it gets its own session.
+    /// Streams the receiver left without seeing them end, plus the previous
+    /// last stream of a pending lag (`begin_session`), most recent last. Each
+    /// is probed at most once, one entry per wake that finds the receiver
+    /// Idle with no session, unless forgotten first: any probe of it is sent,
+    /// or it gets its own session.
     remembered: Vec<StreamIdentifier>,
 }
 
@@ -410,6 +412,10 @@ impl MediaReceiver {
                 // handled for safety, and only for the stream it names.
                 info!("Stream unpublished: {identifier}");
                 if self.pending_publish.as_ref() == Some(&identifier) {
+                    info!(
+                        "Dropping the Publish deferred behind the live stream: {identifier} \
+                         unpublished (#367)"
+                    );
                     self.pending_publish = None;
                 }
                 if self
@@ -464,8 +470,10 @@ impl MediaReceiver {
 
     /// Remember a stream the receiver leaves for `next` without seeing it
     /// end (a stalled publisher stays registered at the hub and can resume
-    /// without a new Publish): it is probed once when the receiver is next
-    /// Idle with no session. Leaving a stream for itself remembers nothing.
+    /// without a new Publish), or whose pending lag it would otherwise drop:
+    /// it is probed at most once, one entry per wake that finds the receiver
+    /// Idle with no session, unless forgotten first. Leaving a stream for
+    /// itself remembers nothing.
     fn remember(&mut self, left: StreamIdentifier, next: &StreamIdentifier) {
         if left == *next {
             return;
@@ -484,11 +492,12 @@ impl MediaReceiver {
     /// The ONE place `last_identifier` changes, so every pending lag is
     /// settled here: it belongs to the previous last stream, which is
     /// remembered if it is another one (its reconnect may hide behind the
-    /// lag). For the same stream nothing is lost: the Publish or probe that
-    /// leads here was read after the lag, so it is newer than anything the
-    /// lag swallowed. The caller sets the flag again (`lagged`) for a lag
-    /// that arrived while its Subscribe was in flight. A remembered entry
-    /// for this stream is moot now.
+    /// lag). For the same stream nothing is lost: a Publish that leads here
+    /// was read after the lag, so it is newer than anything the lag
+    /// swallowed; a probe of it already cleared every earlier lag when it
+    /// was sent (`send_subscribe`). Either caller sets the flag again
+    /// (`lagged`) for a lag that arrived while its Subscribe was in flight.
+    /// A remembered entry for this stream is moot now.
     async fn begin_session(&mut self, identifier: StreamIdentifier, trigger: &'static str) {
         if std::mem::take(&mut self.lag_unprobed) {
             if let Some(last) = self.last_identifier.clone() {
