@@ -88,12 +88,14 @@ Note `SQLX_OFFLINE=true ~/.cargo/bin/cargo …` (inline var + full path) instead
 Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
 
 - **Proving RED→GREEN on dev2 with no `.git` in the warm checkout** (it's a
-  source copy): to show the RED test FAILS at the RED commit without a second
-  checkout, on dev1 `git stash push -- <fix-files>` (reverts the working tree to
-  the committed RED state, keeping the RED test), rsync, run the specific tests
-  on dev2 (they FAIL — RED proof); then `git stash pop`, rsync again, run the
-  full suite (PASS — GREEN proof). Keep the RED test itself out of the stash
-  (commit it first) so it exists in both states. One incremental dev2 build each.
+  source copy): commit the RED test first, then export THAT commit's tree on
+  dev1 (`git archive -o <scratch>/red.tar <RED sha>`, `tar -xf` it into a
+  scratch dir), rsync the scratch dir with `--delete` and run the specific
+  tests on dev2 (they FAIL — RED proof); then rsync the worktree again and run
+  the full suite (PASS — GREEN proof). One incremental dev2 build each.
+  `touch` the lane's changed `.rs` files after each rsync so cargo cannot reuse
+  a stale fingerprint. Do NOT use `git stash` for this: the stash stack is
+  shared by every worktree and session on the box (#367 lane L1).
 
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`

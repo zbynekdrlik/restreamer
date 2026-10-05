@@ -142,12 +142,14 @@ accept/reject, subscribe + UnSubscribe log) driving `run()` under
 `start_paused`; the takeover/probe cases live in its child
 `media_receiver_takeover_tests.rs` (plus a hand-answered hub).
 
-**Every paused-clock receiver test starts with `let _wd = watchdog(..)`.** A
-mutant that makes the receiver spin (retry delay 0, a probe loop) keeps the
-runtime busy, so the paused clock never auto-advances and the test hangs
-until cargo-mutants' 300 s timeout (a TIMEOUT fails the gate). The watchdog
-aborts the test process after 30 s of real time instead. Never wait in such
-a test with an unbounded loop over a channel either.
+**Every paused-clock receiver test starts with `let _wd = watchdog(..)`**
+(why: `.claude/rules/mutation-killable-code.md`). With the hand-answered hub
+(`manual_receiver` / `accept`) the TEST sends the reply, so the receiver has
+not processed it yet when the test's next line runs, and its `biased` select
+handles a queued hub event FIRST: sleep a few ms after `accept(..)` before
+publishing another stream, or the "deferred" Publish supersedes a stream that
+is still Subscribing. The programmable hub has no such race (it replies before
+it logs, and tokio runs the woken receiver first).
 `rs-rtmp-push/tests/av_relation_loopback.rs` checks the WIRE relation on the
 real xiu server across a re-anchor and a reconnect. The CI gate is `GATE
 late-join republish keeps chunk A/V aligned (#367)` in `E2E Streaming Test`
