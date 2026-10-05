@@ -8,6 +8,15 @@ paths:
 A green Mutation Testing check does NOT mean the mutants were tested. Prove the
 diff locally instead (recipe below).
 
+**FIXED on integ-b3 (2026-10-05).** `--jobs 1` dropped (`--in-place` kept for CI
+disk). The step runs cargo-mutants under `set +e` and reads `EXIT=$?` on the very
+next line. Exit 0 passes. Exit 2 (missed mutants) fails at once, no retry. Any
+other non-zero exit retries up to 3 times, then fails. test-integrity has a new
+guard step, "Verify mutation step reads the real cargo-mutants exit". It fails
+when the line after the `cargo mutants` command is not `EXIT=$?`, or when
+`--jobs` comes back. The sections below describe the state before the fix. Once
+this lands, a green check means the diff was really mutation-tested.
+
 ## Why it is fake-green
 
 Two defects combine:

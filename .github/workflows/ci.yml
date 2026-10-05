@@ -258,10 +258,15 @@ jobs:
           #
           # Fix: --in-place mutates the workspace directly, so individual
           # mutant builds reuse the Swatinem/rust-cache incrementally
-          # (seconds, not minutes). --in-place forces --jobs=1 (it has to
-          # serialize mutations of the same source tree). Combined with
+          # (seconds, not minutes). --in-place implies serial runs, and
+          # cargo-mutants 27 rejects an explicit --jobs next to it. Combined with
           # --baseline=skip we fit comfortably under the runner window.
           # Retry up to 3 times for residual transient failures.
+          # Exit codes: 0 = all caught (pass); 2 = missed mutants (fail now,
+          # deterministic, no retry); any other non-zero is retried, then fails.
+          # EXIT is read right after cargo mutants under set +e -- never after an
+          # if/fi block, where $? is always 0 (fake-green gate, see
+          # .claude/rules/ci-mutation-gate.md).
           ATTEMPT=0
           MAX_ATTEMPTS=3
           while true; do
@@ -270,7 +275,8 @@ jobs:
             # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
             # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
             # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
-            if cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600 --jobs 1 --baseline=skip --output mutants-out \
+            set +e
+            cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600 --baseline=skip --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
@@ -326,16 +332,22 @@ jobs:
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
             -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
             -e 'crates/rs-endpoint/src/metrics.rs' \
-            -e 'crates/rs-runtime/src/stall_resources_windows.rs'; then
+            -e 'crates/rs-runtime/src/stall_resources_windows.rs'
+            EXIT=$?
+            set -e
+            if [ $EXIT -eq 0 ]; then
               echo "Mutation attempt $ATTEMPT succeeded"
               break
             fi
-            EXIT=$?
+            if [ $EXIT -eq 2 ]; then
+              echo "Mutation testing found MISSED mutants (exit 2) -- see mutants-out/missed.txt"
+              exit 2
+            fi
             if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
               echo "Mutation testing failed after $MAX_ATTEMPTS attempts (last exit: $EXIT)"
               exit $EXIT
             fi
-            echo "Attempt $ATTEMPT failed (exit $EXIT) — likely runner hiccup, retrying after 30s"
+            echo "Attempt $ATTEMPT failed (exit $EXIT) -- likely runner hiccup, retrying after 30s"
             sleep 30
             rm -rf mutants-out
           done
@@ -1038,6 +1050,27 @@ jobs:
             exit 1
           fi
           echo "OK: both OBS-streaming E2E jobs wait on the rig lease before StartStream."
+
+      - name: "Verify mutation step reads the real cargo-mutants exit (fake-green guard)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # The mutation gate was fake-green: EXIT=$? read after an if/fi block is
+          # always 0, and cargo-mutants 27 rejects --in-place with --jobs
+          # (.claude/rules/ci-mutation-gate.md). The sed range is the
+          # mutation-testing job only (before test-integrity), so this self-check
+          # can never self-match its own patterns (#325).
+          MUT_BLOCK=$(sed -n '/^  mutation-testing:/,/^  security:/p' "$WORKFLOW_FILE")
+          NEXT=$(echo "$MUT_BLOCK" | awk '/^ *cargo mutants /{c=1} c && !/\\$/ {getline; print; exit}')
+          if ! echo "$NEXT" | grep -qE '^\s*EXIT=\$\?\s*$'; then
+            echo "ERROR: mutation-testing must read EXIT=\$? on the line right after the cargo mutants command."
+            echo "Found: $NEXT"
+            exit 1
+          fi
+          if echo "$MUT_BLOCK" | grep -vE '^\s*#' | grep -qE -- '--jobs'; then
+            echo "ERROR: cargo-mutants 27 rejects --jobs together with --in-place."
+            exit 1
+          fi
+          echo "OK: mutation step captures the real cargo-mutants exit and passes no --jobs."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
