@@ -691,3 +691,62 @@ async fn the_end_of_an_accepted_takeover_reprobes_the_superseded_stream() {
     assert_eq!(again, live);
     drop(frames_a);
 }
+
+/// Only a probe of the LAST stream covers a lag (it is what a lag probe
+/// would send). A lag while the taken-over B streams can hide B's own
+/// reconnect: probing the superseded A after B ends must not swallow it.
+#[tokio::test(start_paused = true)]
+async fn a_probe_of_another_stream_does_not_cover_a_lag() {
+    let _wd = watchdog("a_probe_of_another_stream_does_not_cover_a_lag");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the live stream is subscribed")
+        .unwrap();
+    let frames_a = accept(reply);
+    frames_a.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+    let (_, b_reply) = tokio::time::timeout(FRAME_TIMEOUT + within, requests.recv())
+        .await
+        .expect("the deferred stream is probed at the stall")
+        .unwrap();
+    let frames_b = accept(b_reply);
+    frames_b.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // A lag while B streams, then B ends.
+    overflow(&event_tx);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(frames_b);
+    let mut probed = Vec::new();
+    for _ in 0..3 {
+        match tokio::time::timeout(within, requests.recv()).await {
+            Ok(Some((id, reply))) => {
+                probed.push(id);
+                let _ = reply.send(Err(rejected()));
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        probed,
+        vec![live, other],
+        "the superseded A once, then the lag probe of the last stream B"
+    );
+    drop(frames_a);
+}
