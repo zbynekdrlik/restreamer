@@ -538,3 +538,38 @@ node mock-api.js >/tmp/mock.log 2>&1 </dev/null & )`.
   checkout, then rsync the worktree) for trunk + Playwright. Before an
   in-place run, `stat -c %h` the mutated files: link count 1 means rsync
   already replaced them, so no hardlinked sibling checkout gets mutated too.
+
+## Hunting an intermittent test failure on dev2 (#367, 2026-10-05)
+
+A full `cargo test --workspace` loop on an idle dev2 proves little: 21 green
+runs did not reproduce a CI-only failure. Load is what exposes timing races.
+
+- **Loop the already-built test binaries directly.** Build once with
+  `cargo test --workspace --locked --no-run --message-format=json`, and map each
+  `executable` to `dirname(manifest_path)` (cargo runs each binary from its crate
+  dir). Then run every binary N times under `taskset -c 0-3`, which is a CI-sized
+  4 vCPU. Give each run `</dev/null`. A `while read exe dir; do …; done <map`
+  loop hands its stdin to the test binaries, and they eat the map: one sweep
+  ran only 136 of 170 binaries.
+- **Busy loops alone do not reproduce it; build load does.** 8 `while :; do :;
+  done` hogs gave 0/100 failures. A concurrent from-scratch workspace build
+  (CPU + IO + memory) gave a 1-3 % failure rate. Compare RED and GREEN
+  INTERLEAVED in one loop (old binary, then new binary, each iteration), so
+  both sides see the same load.
+- **Never run port-1935 tests concurrently on dev2.** rs-delivery's bin unit
+  tests dial 127.0.0.1:1935 expecting a refusal, and `test_file_sink_e2e`
+  binds it. A sweep running one while another lane ran the other produced a
+  fake failure (`connections_accepted: 68`, 2 publishes).
+- **Launch shape that returns at once:** `ssh … '( setsid bash script.sh …
+  >/tmp/x.out 2>&1 </dev/null & ) ; echo LAUNCHED'`, with the `&` INSIDE the
+  parentheses. `( cmd ; echo EXIT=$? >done ) >/dev/null 2>&1 &` kept the ssh
+  session open until the job ended. `pkill`/`rm -rf` over ssh are blocked by
+  `block-manual-remote-drain.sh`. So make load generators end themselves
+  (`timeout N`, a stop file), and drop scratch targets with `cargo clean
+  --target-dir <dir>`.
+- **If `ssh dev2` fails with "Could not resolve hostname"**, dev1's own
+  tailscale may be logged out (`tailscale status` prints `Logged out.`; node
+  key expiry). dev2 is still on the LAN. Find its current LAN address from
+  known_hosts without hardcoding it: `for b in $(seq 1 254); do ssh-keygen -F
+  10.77.8.$b | grep -q <dev2 key fragment> && echo 10.77.8.$b; done`. Get the
+  key fragment with `ssh-keygen -F 100.82.64.27`.

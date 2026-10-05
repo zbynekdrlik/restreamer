@@ -2,7 +2,9 @@
 paths:
   - "crates/**/*.rs"
   - "Cargo.toml"
+  - "Cargo.lock"
   - "crates/**/Cargo.toml"
+  - ".github/workflows/ci.yml"
 ---
 
 # Rust crate hygiene — the CI gates that bite late
@@ -71,8 +73,43 @@ as long as the items IT touches stay in the parent. `handlers.rs` went 955 →
 
 Five workspace commands carry `--locked` (#322). A stale lock fails Lint + Test +
 Test-integrity together within ~1 min. Regenerate in the SAME commit as the bump:
-`cargo update --workspace --offline` (diff must be exactly the 11 local member
+`cargo update --workspace --offline` (diff must be exactly the 12 local member
 versions — any transitive churn means you resolved online).
+
+## CI floats to the newest stable: verify with CI's toolchain, not dev2's default
+
+Every job except Coverage uses `dtolnay/rust-toolchain@stable`, so a new Rust
+release can turn an untouched tree red overnight (#367, 2026-10-05: 1.99.0 added
+`clippy::double_must_use`). dev2's default toolchain lags, so a green dev2 run
+proves nothing about such drift. Read the version from the failing job log
+(`rustc 1.99.0 (b940084d7 …)`, or the `rust-1.99.0` clippy link) and use exactly
+that version on dev2, without changing dev2's default:
+
+```bash
+rustup toolchain install 1.99.0 --profile minimal -c clippy,rustfmt
+cargo +1.99.0 clippy --workspace --all-targets --locked     # no -D warnings: lists EVERY crate
+cargo +1.99.0 clippy --workspace --all-targets --locked -- -D warnings
+```
+
+Run the first command without `-D warnings`. With it, clippy stops at the first
+crate that fails and never checks the crates that depend on it. CI showed one
+`double_must_use` site; the full run found three. They came from the
+`#[must_use]` that async-trait 0.1.89 adds to every async trait method.
+`cargo update -p async-trait` (0.1.92) was the fix, with no `#[allow]` needed.
+
+`cargo update -p <crate>` can also re-point UNRELATED dependency edges. In #367,
+`-p rustls` moved the `windows-sys` edge of four crates from 0.52 to 0.60. Read
+the whole lock diff. If you revert stray hunks by hand, prove that cargo still
+accepts the lock unchanged with `cargo metadata --locked --format-version 1`.
+
+**Coverage is the exception: it pins `dtolnay/rust-toolchain@1.98.0` and
+`cargo-tarpaulin --version 0.37.5 --locked`.** tarpaulin's ptrace engine crashes
+on rustc 1.99.0 code. The SAME binary passes when run natively, so this is
+not our bug. Details are in the coverage job comment, and a test-integrity
+guard keeps both pins. To un-pin, run the full Coverage command on dev2 with
+the new stable (`RUSTUP_TOOLCHAIN=<ver> cargo-tarpaulin tarpaulin --workspace
+--exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300`, in
+its own `CARGO_TARGET_DIR`). Then change the pin and the guard together.
 
 ## Slow crypto in tests: optimize the dependency, don't weaken the test
 
