@@ -797,8 +797,9 @@ jobs:
           }
           echo "$OUTPUT"
 
-          # Check for any ignored tests
-          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -v '0 ignored' || true)
+          # Check for any ignored tests. `grep -vx` (whole line): a plain
+          # `grep -v '0 ignored'` also dropped "10 ignored", "20 ignored", ...
+          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -vx '0 ignored' || true)
           if [ -n "$IGNORED_COUNT" ]; then
             echo "ERROR: Some tests were ignored:"
             echo "$IGNORED_COUNT"
@@ -806,7 +807,7 @@ jobs:
           fi
 
           # Check for any filtered tests
-          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -v '0 filtered out' || true)
+          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -vx '0 filtered out' || true)
           if [ -n "$FILTERED_COUNT" ]; then
             echo "ERROR: Some tests were filtered out:"
             echo "$FILTERED_COUNT"
@@ -1159,9 +1160,10 @@ jobs:
           WORKFLOW_FILE=".github/workflows/ci.yml"
           # Under `bash -e` a bare `OUTPUT=$(cargo test ...)` exits on a test
           # failure before `echo "$OUTPUT"`, so the job fails with NO test output
-          # (push run 37347095610). The sed range is that one step only, so this
-          # self-check can never match its own lines (#325).
-          STEP=$(sed -n '/- name: Verify zero ignored tests in cargo test output/,/- name: Verify deploy-stream-lan has always() condition/p' "$WORKFLOW_FILE")
+          # (push run 37347095610). Both sed addresses are anchored to a whole
+          # 6-space-indented step-name line, so the range is that one step and
+          # can never open on this guard's own line (#325).
+          STEP=$(sed -n '/^      - name: Verify zero ignored tests in cargo test output$/,/^      - name: Verify deploy-stream-lan has always() condition$/p' "$WORKFLOW_FILE")
           if [ -z "$STEP" ]; then
             echo "ERROR: could not find the 'Verify zero ignored tests in cargo test output' step."
             exit 1
