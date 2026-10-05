@@ -28,18 +28,20 @@
 //!   inpoint "connected" and never runs a retry ladder against a publisher
 //!   that is gone.
 //! - A stream the receiver LEAVES without seeing it end is remembered
-//!   (`remembered`): a stalled or retrying session a takeover or a Publish
-//!   of another stream supersedes, an in-flight probe such a Publish
-//!   abandons, a deferred Publish a newer one overwrites, and the last
-//!   stream with a pending lag when another stream's session starts. Every
-//!   time the receiver is Idle with no session it probes ONE remembered
-//!   stream (most recent first): a stalled publisher stays registered at the
-//!   hub and can resume without a new Publish. Two keys do reach stream.lan
-//!   (OBS and the CI ffmpeg). Probing a stream or starting its session
-//!   forgets it, so each entry costs at most one probe. A stream seen ending
-//!   (publisher closed, given up) is never remembered. Known limit: nothing
-//!   remembered is probed while a session runs its retry ladder (up to
-//!   ~4.5 min rejected, longer while a registered stream sends no frames).
+//!   (`remembered`): a non-streaming session (stalled, retrying, or with
+//!   its first Subscribe in flight) a takeover or a Publish of another
+//!   stream supersedes, an in-flight probe such a Publish abandons, a
+//!   deferred Publish a newer one overwrites, and the previous last stream
+//!   with a pending lag when another stream's session starts. Every time
+//!   the receiver is Idle with no session it probes ONE remembered stream
+//!   (most recent first): a stalled publisher stays registered at the hub
+//!   and can resume without a new Publish. Two keys do reach stream.lan (OBS
+//!   and the CI ffmpeg). Probing a stream or starting its session forgets
+//!   it, so each entry costs at most one probe. Seeing a stream end
+//!   (publisher closed, given up, UnPublish) never remembers it by itself;
+//!   a pending lag still can. Known limit: nothing remembered is probed
+//!   while a session runs its retry ladder (up to ~4.5 min rejected, longer
+//!   while a registered stream sends no frames).
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
@@ -47,12 +49,14 @@
 //!   next Idle with no session and nothing remembered is left; then the
 //!   last known stream is probed: the lag may have swallowed its Publish,
 //!   even the live stream's own reconnect. `begin_session`, the one place
-//!   the last stream changes, settles it: another previous stream is
-//!   remembered, the same stream is covered by attaching. Sending ANY probe
-//!   of the last stream clears it too (`send_subscribe`), and an accepted
-//!   Subscribe sets it to whether a lag arrived while it was in flight.
-//!   Each lag adds at most one probe. A `Closed` hub channel is an error,
-//!   so the orchestrator restarts the RTMP server.
+//!   the last stream changes, settles every pending lag: another previous
+//!   stream is remembered; for the same stream a Publish read after the lag
+//!   is newer than anything it lost. Sending ANY probe of the last stream
+//!   clears it too (`send_subscribe`), and an accepted Subscribe sets it to
+//!   whether a lag arrived while it was in flight. A lag costs at most one
+//!   probe per stream it can belong to (the previous last stream, and the
+//!   attached one if it arrived during that Subscribe). A `Closed` hub
+//!   channel is an error, so the orchestrator restarts the RTMP server.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -235,7 +239,7 @@ pub struct MediaReceiver {
     lag_unprobed: bool,
     /// Streams the receiver left without seeing them end, most recent last:
     /// each is probed ONCE when the receiver is Idle with no session, and
-    /// forgotten when it gets its own session again.
+    /// forgotten when any probe of it is sent or it gets its own session.
     remembered: Vec<StreamIdentifier>,
 }
 
@@ -402,11 +406,21 @@ impl MediaReceiver {
                 }
             }
             BroadcastEvent::UnPublish { identifier } => {
-                // streamhub 0.2.4 never broadcasts this; handled for safety.
+                // streamhub 0.2.4 never broadcasts this (any 0.2.x might);
+                // handled for safety, and only for the stream it names.
                 info!("Stream unpublished: {identifier}");
-                self.drop_subscription();
-                self.flv_chunk_sink.flush().await;
-                self.end_session("unpublish").await;
+                if self.pending_publish.as_ref() == Some(&identifier) {
+                    self.pending_publish = None;
+                }
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.identifier == identifier)
+                {
+                    self.drop_subscription();
+                    self.flv_chunk_sink.flush().await;
+                    self.end_session("unpublish").await;
+                }
             }
             BroadcastEvent::Subscribe { identifier, .. } => {
                 debug!("New subscriber for stream: {identifier}");
@@ -467,12 +481,14 @@ impl MediaReceiver {
     /// it and re-anchor audio+video onto a fresh shared session origin
     /// (#255, #367): a new publisher's source ts restart.
     ///
-    /// The ONE place `last_identifier` changes, so the pending lag is settled
-    /// here: it belongs to the previous last stream, which is remembered if
-    /// it is another one (its reconnect may hide behind the lag); for the
-    /// same stream, attaching covers it. The caller sets the flag again for
-    /// a lag that arrives while its Subscribe is in flight. A remembered
-    /// entry for this stream is moot now.
+    /// The ONE place `last_identifier` changes, so every pending lag is
+    /// settled here: it belongs to the previous last stream, which is
+    /// remembered if it is another one (its reconnect may hide behind the
+    /// lag). For the same stream nothing is lost: the Publish or probe that
+    /// leads here was read after the lag, so it is newer than anything the
+    /// lag swallowed. The caller sets the flag again (`lagged`) for a lag
+    /// that arrived while its Subscribe was in flight. A remembered entry
+    /// for this stream is moot now.
     async fn begin_session(&mut self, identifier: StreamIdentifier, trigger: &'static str) {
         if std::mem::take(&mut self.lag_unprobed) {
             if let Some(last) = self.last_identifier.clone() {
@@ -603,7 +619,8 @@ impl MediaReceiver {
                 trigger = p.trigger,
                 "Probe found {} publishing -- starting its session (#367)", p.identifier
             );
-            // begin_session settles a lag from before this Subscribe.
+            // begin_session settles every pending lag; `lagged` (below) sets
+            // it again for this stream.
             self.begin_session(p.identifier, p.trigger).await;
         }
         // Attached: a Publish a lag hid BEFORE this Subscribe went out is moot
