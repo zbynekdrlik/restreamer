@@ -19,6 +19,17 @@ anyhow.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+log.workspace = true
+
+# #367 part 2: the process-stall detector's resource snapshot. Windows uses the
+# exact psapi/kernel32 counters (handles, kernel pools, commit); elsewhere a
+# sysinfo memory-only fallback keeps Linux CI compiling and testing the path.
+# Both versions are the ones already in Cargo.lock (no new packages).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(not(windows))'.dependencies]
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }

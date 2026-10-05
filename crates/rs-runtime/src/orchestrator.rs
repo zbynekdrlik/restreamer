@@ -199,6 +199,14 @@ impl ServiceCore {
         // audit rows were silently dropped — see the 2026-04-19 post-mortem).
         let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
 
+        // #367: OS-thread process-stall detector on THIS runtime (Tauri's in GUI
+        // mode). Records the cause of the next freeze in `logs/stall.log` and a
+        // ProcessStall audit row. Stops when this guard drops at shutdown.
+        let _stall_detector = crate::stall_detector::start_for_service(
+            self.db_path.parent().unwrap_or(std::path::Path::new(".")),
+            audit_tx.clone(),
+        );
+
         // #278: a stale per-install config.json can silently carry a
         // degraded/wrong S3 region across an upgrade (the 2026-06-24
         // incident: streampp ran a live event on nbg1, a known-degraded

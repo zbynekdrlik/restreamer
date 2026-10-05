@@ -168,6 +168,18 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Host-side (#367): the process stopped responding for at least the stall
+    /// threshold (5 s) and has now RECOVERED. Emitted by the OS-thread stall
+    /// detector (`rs_runtime::stall_detector`) only after the tokio runtime
+    /// answers a probe again. `class` tells `runtime_starved` (the runtime
+    /// stopped polling while the OS kept running the process) from
+    /// `whole_process` (the OS did not run the process at all). Severity::Warn,
+    /// Source::System. Detail JSON: {class, trigger, started_at, ended_at,
+    /// duration_ms, detector_max_late_ms, detector_total_late_ms,
+    /// probe_age_at_detect_ms, resources_at_start, resources_at_end, stall_log,
+    /// stall_log_error}. Full evidence (incl. a pre-stall baseline) is in
+    /// `logs/stall.log`.
+    ProcessStall,
     /// Local chunk-store volume crossed a disk-pressure threshold on the
     /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
     /// chunks are never dropped (continuity guarantee). Detail JSON:
@@ -602,6 +614,14 @@ mod tests {
         let a = Action::DeliveryLogLost;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"delivery_log_lost\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_process_stall_serdes() {
+        let a = Action::ProcessStall;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"process_stall\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 }

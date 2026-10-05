@@ -7,6 +7,7 @@
 mod log_capture;
 mod orchestrator;
 mod shutdown;
+pub mod stall_detector;
 
 pub use log_capture::LogCaptureLayer;
 pub use orchestrator::ServiceCore;
