@@ -77,28 +77,34 @@ baseline-relative, so none of them saw it.
     (audited with the trigger); a failure (rejected or timed out) only logs
     and returns to Idle: never a "connected" inpoint, never a retry ladder.
   - Every stream the receiver LEAVES without seeing it end is remembered
-    (`remembered`, deduplicated): the last stream at a deferred takeover,
-    the session or in-flight probe an `on_publish` of ANOTHER stream
-    supersedes, and the last stream when an ACCEPTED probe of another
-    stream would otherwise swallow its pending lag. Each time the receiver
+    (`remembered`, deduplicated, via `remember()`): a stalled / retrying
+    SESSION a takeover or an `on_publish` of ANOTHER stream supersedes, an
+    in-flight probe such a Publish abandons, a deferred Publish a newer one
+    overwrites, and the previous last stream with a pending lag when
+    another stream's session starts (`begin_session`). A stream seen ending
+    (publisher closed, given up) is NOT remembered. Each time the receiver
     is Idle with no session, `settle()` probes ONE remembered stream (most
-    recent first), and only then a pending lag. `begin_session` forgets the
-    stream it starts. A stalled publisher stays registered at the hub and
-    can resume without a new Publish; two keys do reach stream.lan (OBS
+    recent first), and only then a pending lag. Probing a stream or starting
+    its session forgets it. A stalled publisher stays registered at the hub
+    and can resume without a new Publish; two keys do reach stream.lan (OBS
     `live/obs-e2e-test`, the CI ffmpeg `live/ci-e2e-test`). Each remembered
     entry costs at most one probe and each lag at most one more: never a
     loop. Do not patch one more path with its own flag: feed `remember()`.
+    Accepted limit: nothing remembered is probed while a session runs its
+    retry ladder.
   - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
     because xiu has no session id.
   - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
-  - `Lagged` is survived and remembered (`lag_unprobed`): once the receiver
-    is Idle with no session (and no remembered stream is left) it probes
-    `last_identifier`. A lag while streaming can hide the live stream's own
-    reconnect Publish. Sending ANY probe of `last_identifier` clears the
-    flag (`send_subscribe`); `settle` consumes it when it sends the lag
-    probe; a lag during a probe sets it again. An accepted Subscribe sets
-    it to `lagged`: it covers only the lags from BEFORE it was sent, a lag
-    while it was in flight (`Phase::Subscribing { lagged }`) stays set.
+  - `Lagged` is survived and kept (`lag_unprobed`, it belongs to
+    `last_identifier`): once the receiver is Idle with no session (and
+    nothing remembered is left) it probes `last_identifier`. A lag while
+    streaming can hide the live stream's own reconnect Publish.
+    `begin_session` (the ONE place the last stream changes) settles it:
+    another previous stream is remembered, the same one is covered. Sending
+    ANY probe of `last_identifier` clears it (`send_subscribe`); `settle`
+    consumes it when it sends the lag probe; a lag during a probe sets it
+    again. An accepted Subscribe sets it to `lagged`: a lag while that
+    Subscribe was in flight (`Phase::Subscribing { lagged }`) stays set.
   - A `Closed` hub channel and a StreamsHub exit both return `Err`, so the
     orchestrator restarts.
   - Unsubscribe every dropped subscription (xiu keeps dead senders and logs

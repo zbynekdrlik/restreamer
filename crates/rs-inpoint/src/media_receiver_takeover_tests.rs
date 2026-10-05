@@ -8,7 +8,7 @@ use std::time::Duration;
 
 /// Review finding (#367): a Publish of a DIFFERENT stream must not preempt a
 /// healthy live stream. That would leave the live publisher orphaned once
-/// the other one leaves. It is remembered instead, and picked up when the
+/// the other one leaves. It is deferred instead, and picked up when the
 /// current stream ends.
 #[tokio::test(start_paused = true)]
 async fn other_stream_publish_waits_for_the_live_stream_to_end() {
@@ -38,7 +38,7 @@ async fn other_stream_publish_waits_for_the_live_stream_to_end() {
         "a different stream's Publish must not preempt the healthy live stream"
     );
 
-    // A ends: the remembered Publish of B is picked up right away.
+    // A ends: the deferred Publish of B is picked up right away.
     drop(tx_a);
     let ended_at = tokio::time::Instant::now();
     let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
@@ -463,7 +463,7 @@ async fn a_stale_deferred_publish_reprobes_the_stalled_live_stream() {
     // The stalled live stream is still registered: it is probed again.
     let (again, a_reply) = tokio::time::timeout(within, requests.recv())
         .await
-        .expect("a stale takeover must fall back to the stalled live stream")
+        .expect("after a stale takeover the stalled live stream is probed again")
         .unwrap();
     assert_eq!(again, live);
     assert!(
