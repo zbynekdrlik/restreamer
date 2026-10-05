@@ -14,6 +14,7 @@ auto-load on their `paths:` — you do not invoke those.
 - authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
 - process-stall detector (`logs/stall.log`, ProcessStall, Windows-cfg verify on dev2) → `.claude/rules/process-stall-detector.md` (auto)
+- CI Mutation Testing job is fake-green; local diff-scoped mutation recipe on dev2 → `.claude/rules/ci-mutation-gate.md` (auto)
 - DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
