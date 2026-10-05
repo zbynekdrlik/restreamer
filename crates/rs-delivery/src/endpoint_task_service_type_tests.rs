@@ -23,8 +23,8 @@ use tokio::sync::{Mutex, watch};
 
 use crate::api::EndpointConfig;
 use crate::audit_ring::{AuditRing, RingRow};
-use crate::buffer_state::BufferState;
-use crate::endpoint_stats::{EndpointStats, Stats};
+use crate::buffer_state::{BufferState, initial_delivery_mode};
+use crate::endpoint_stats::{EndpointStats, Stats, initial_endpoint_stats};
 use crate::endpoint_task::{OutputProcess, OutputProcessFactory, endpoint_loop};
 
 /// Counts every S3 access. Serves chunks so a start that DOES proceed has
@@ -88,7 +88,12 @@ struct Outcome {
 /// returns at once, so a 10 s budget is only a hang guard.
 async fn run(cfg: EndpointConfig, delivery_delay_ms: u64) -> Outcome {
     let ring = AuditRing::new(100);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    // Seeded exactly like `EndpointHandle::spawn` with a rescue video set:
+    // a non-fast endpoint with a delay starts in "warmup".
+    let stats: Stats = Arc::new(Mutex::new(initial_endpoint_stats(
+        1,
+        initial_delivery_mode(true, cfg.is_fast, delivery_delay_ms),
+    )));
     let calls = Arc::new(AtomicU32::new(0));
     let spawns = Arc::new(AtomicU32::new(0));
     let (_stop_tx, stop_rx) = watch::channel(false);
@@ -144,6 +149,12 @@ fn assert_refused_loudly(o: &Outcome, alias: &str) {
         o.stats.stall_reason.as_deref(),
         Some("unknown_service_type"),
         "VPS status must carry the refusal reason"
+    );
+    // Review C1: the mode must not keep claiming WARMUP (the dashboard badge)
+    // next to `alive: false` for an endpoint that never started.
+    assert_eq!(
+        o.stats.delivery_mode, "refused",
+        "a refused endpoint is not warming up"
     );
     let refusals: Vec<&RingRow> = o
         .rows
