@@ -24,6 +24,9 @@ pub(crate) mod endpoint_producer;
 // `endpoint_loop` so that file stays under the 1000-line CI cap.
 pub(crate) mod endpoint_respawn;
 pub(crate) mod endpoint_rtmp_url;
+// Start-up checks before the first fetch/push: parse the service type once,
+// refuse an unknown one loudly (#192).
+pub(crate) mod endpoint_start;
 pub mod endpoint_stats;
 pub mod endpoint_task;
 mod fast_delay;

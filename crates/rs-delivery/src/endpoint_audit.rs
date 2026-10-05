@@ -167,6 +167,31 @@ pub fn emit_s3_fetcher_init_failed(audit_ring: &Option<Arc<AuditRing>>, alias: &
     );
 }
 
+/// Audit row emitted when an endpoint REFUSES to start because its service
+/// type is unknown (#192). Same `EndpointFfmpegRestartFailed` start-failure
+/// action as [`emit_s3_fetcher_init_failed`], tagged `phase: "service_type"`.
+/// Before #192 such an endpoint fell back to TEST_FILE, the loopback discard
+/// sink, and silently "delivered" into it.
+pub fn emit_unknown_service_type(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    service_type: &str,
+    error: &str,
+) {
+    let Some(ring) = audit_ring else { return };
+    ring.push(
+        Severity::Error,
+        Source::Vps,
+        Some(alias.to_string()),
+        Action::EndpointFfmpegRestartFailed,
+        serde_json::json!({
+            "phase": "service_type",
+            "service_type": service_type,
+            "error": error,
+        }),
+    );
+}
+
 /// Audit row emitted when the VPS rs-delivery cannot fetch a chunk from S3
 /// (Hetzner 503/504, network blip, etc.). Issue #173 — operator could
 /// previously not distinguish "all endpoints stuck because of upstream S3

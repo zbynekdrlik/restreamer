@@ -105,11 +105,15 @@ pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url as build_rtmp_url_pub;
 /// pacing layer (removed 2026-04-21) was a workaround for the normalizer not
 /// rebasing the first chunk per process -- it fought `-re` and caused
 /// cumulative drift + cascading cache growth after ffmpeg restarts.
+///
+/// `service_type` is the endpoint's service type, parsed ONCE by
+/// `endpoint_loop` (#192): an unknown type never reaches this task.
 #[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
     ep_cfg: EndpointConfig,
+    service_type: ServiceType,
     delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
@@ -119,14 +123,6 @@ async fn consumer_task<P: OutputProcessFactory>(
 ) {
     let alias = ep_cfg.alias.clone();
     let service_type_str = ep_cfg.service_type.clone();
-
-    let service_type: ServiceType = match ep_cfg.service_type.parse() {
-        Ok(st) => st,
-        Err(e) => {
-            tracing::error!(alias = %alias, "Unknown service type '{}': {e}", ep_cfg.service_type);
-            return;
-        }
-    };
 
     let mut flv_normalizer = FlvStreamNormalizer::new();
     // `proc` is the ffmpeg-path output handle (None when using Rust pusher).
@@ -324,14 +320,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 alias = %alias,
                                 "Consumer: producer gone, entering defensive rescue before teardown"
                             );
-                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                                .service_type
-                                .parse()
-                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                             crate::rescue::run_defensive_rescue(
                                 &alias,
                                 rescue_video_url.as_deref(),
-                                svc_type,
+                                service_type,
                                 &ep_cfg.stream_key,
                                 &buffer_state,
                                 &stats,
@@ -392,14 +384,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             // existing rust_pusher and reconnects FRESH for the
                             // rescue clip, then reconstructs the pusher on
                             // recovery so the fast low-latency path resumes.
-                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                                .service_type
-                                .parse()
-                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                             let outcome = crate::rescue::run_outage_rescue(
                                 &alias,
                                 rescue_video_url.as_deref(),
-                                svc_type,
+                                service_type,
                                 &ep_cfg.stream_key,
                                 &buffer_state,
                                 &stats,
@@ -467,14 +455,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             alias = %alias,
                             "Consumer: producer gone, entering defensive rescue before teardown"
                         );
-                        let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                            .service_type
-                            .parse()
-                            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                         crate::rescue::run_defensive_rescue(
                             &alias,
                             rescue_video_url.as_deref(),
-                            svc_type,
+                            service_type,
                             &ep_cfg.stream_key,
                             &buffer_state,
                             &stats,
@@ -502,8 +486,6 @@ async fn consumer_task<P: OutputProcessFactory>(
                 // and consumers fell silent.
                 if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                     tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
-                    let svc_type: rs_ffmpeg::ServiceType =
-                        ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                     // Extracted to `rescue::run_outage_rescue` so this fn
                     // stays under the 1000-line CI cap and so the
                     // review-finding #1 fix (drop+reconstruct rust_pusher
@@ -512,7 +494,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     let outcome = crate::rescue::run_outage_rescue(
                         &alias,
                         rescue_video_url.as_deref(),
-                        svc_type,
+                        service_type,
                         &ep_cfg.stream_key,
                         &buffer_state,
                         &stats,
@@ -740,21 +722,26 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 ) {
     let alias = ep_cfg.alias.clone();
 
+    // #192: parse the service type ONCE, before anything is fetched or pushed.
+    // An unknown type never falls back to TEST_FILE (a real discard sink since
+    // #192): the endpoint refuses to start, loudly (log, status, audit).
+    let Some(svc_type) =
+        crate::endpoint_start::service_type_or_refuse(&ep_cfg, &stats, &audit_ring).await
+    else {
+        return;
+    };
+
     // Wait for enough duration to buffer before starting (duration-based approach).
     // When rescue_video_url is configured and the endpoint is not fast, the
     // helper also spawns a rescue ffmpeg in parallel so viewers see the
     // rescue video (with countdown) during the initial cache fill. Without
     // this, viewers see nothing until ~120s of buffer has accumulated.
     if delivery_delay_ms > 0 {
-        let warmup_svc_type: rs_ffmpeg::ServiceType = ep_cfg
-            .service_type
-            .parse()
-            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
         let stopped = crate::rescue::run_warmup_loop(
             &fetcher,
             &alias,
             &ep_cfg,
-            warmup_svc_type,
+            svc_type,
             start_chunk_id,
             delivery_delay_ms,
             rescue_video_url.as_deref(),
@@ -823,6 +810,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         rx,
         factory,
         ep_cfg,
+        svc_type,
         delivery_delay_ms,
         consumer_stop,
         consumer_stats,
