@@ -383,3 +383,125 @@ async fn a_lag_during_a_probe_is_covered_after_it() {
     );
     assert!(!state.is_connected());
 }
+
+/// Receiver + hand-answered hub, ready to `run()`.
+fn manual_receiver(
+    state: InpointState,
+) -> (
+    tokio::sync::broadcast::Sender<BroadcastEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<(StreamIdentifier, oneshot::Sender<SubscribeReply>)>,
+) {
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receiver = MediaReceiver::new(event_rx, hub_tx, Arc::new(FlvChunkSink::new_null()), state);
+    let requests = spawn_manual_hub(hub_rx);
+    tokio::spawn(receiver.run());
+    (event_tx, requests)
+}
+
+/// Accept a Subscribe with a fresh frame channel; returns its sender.
+fn accept(reply: oneshot::Sender<SubscribeReply>) -> tokio::sync::mpsc::UnboundedSender<FrameData> {
+    let (frames_tx, frames_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = reply.send(Ok((
+        DataReceiver {
+            frame_receiver: Some(frames_rx),
+            packet_receiver: None,
+        },
+        None,
+    )));
+    frames_tx
+}
+
+/// Third review (#367): a deferred Publish is taken over at the live
+/// stream's stall, but that publisher may already be gone. A stalled live
+/// publisher can still be registered at the hub (a 30 s network stall on the
+/// same connection) and resume WITHOUT a new Publish. When the takeover probe
+/// finds nothing, the receiver must look at the stalled live stream again
+/// instead of going dark.
+#[tokio::test(start_paused = true)]
+async fn a_stale_deferred_publish_falls_back_to_the_stalled_live_stream() {
+    let _wd = watchdog("a_stale_deferred_publish_falls_back_to_the_stalled_live_stream");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the live stream is subscribed")
+        .unwrap();
+    let frames_a = accept(reply);
+    frames_a.send(a_frame(0)).unwrap();
+    // Let A reach Streaming before B publishes.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // B publishes while A is live: deferred.
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+
+    // A stalls: B is taken over as a probe ... and B is already gone.
+    let (probed, b_reply) =
+        tokio::time::timeout(FRAME_TIMEOUT + Duration::from_secs(5), requests.recv())
+            .await
+            .expect("the deferred stream is probed at the stall")
+            .unwrap();
+    assert_eq!(probed, other);
+    let _ = b_reply.send(Err(rejected()));
+
+    // The stalled live stream is still registered: the receiver falls back.
+    let (again, a_reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("a stale takeover must fall back to the stalled live stream")
+        .unwrap();
+    assert_eq!(again, live);
+    let frames_a2 = accept(a_reply);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(state.is_connected(), "the live stream is attached again");
+    drop(frames_a);
+    drop(frames_a2);
+}
+
+/// Third review (#367): a lag that arrives while a Subscribe is IN FLIGHT
+/// can hide a Publish newer than the attachment the Subscribe brings back.
+/// Accepting that Subscribe covers only the lags from before it was sent;
+/// once the session ends, the newer lag still gets its probe.
+#[tokio::test(start_paused = true)]
+async fn a_lag_while_subscribing_is_probed_after_the_session() {
+    let _wd = watchdog("a_lag_while_subscribing_is_probed_after_the_session");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let id = test_identifier();
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: id.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the Publish is subscribed")
+        .unwrap();
+    // A lag while that Subscribe is in flight, THEN the hub accepts it.
+    overflow(&event_tx);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let frames = accept(reply);
+    frames.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // The session ends: the lag seen during the Subscribe gets its probe.
+    drop(frames);
+    let (probed, _probe_reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("a lag seen while subscribing must be probed once the session ends")
+        .unwrap();
+    assert_eq!(probed, id);
+}

@@ -660,3 +660,40 @@ async fn a_forward_glitch_does_not_stretch_the_chunk_duration() {
         "a glitched last tag must not stretch the chunk duration"
     );
 }
+
+/// Third review (#367): a forward-glitched KEYFRAME that opens a chunk must
+/// not zero that chunk's duration. Its successors walk back below the
+/// glitch, so the chunk's first ts is the earliest video ts in it.
+#[tokio::test]
+async fn a_forward_glitch_opening_a_chunk_does_not_zero_its_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    // A zero chunk duration: every keyframe after the first closes a chunk.
+    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::ZERO)
+        .with_wall_clock(Arc::clone(&clock) as Arc<dyn WallClock>);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    sink.write_video(0, &body(Kind::KeyFrame, 0)).await;
+    for src in (40..=1_000).step_by(40) {
+        sink.write_video(src, &body(Kind::InterFrame, src)).await;
+    }
+    // The next keyframe (content 1_040) carries a ts 40 s ahead.
+    sink.write_video(1_040 + 40_000, &body(Kind::KeyFrame, 1_040))
+        .await;
+    for src in (1_080..=2_000).step_by(40) {
+        sink.write_video(src, &body(Kind::InterFrame, src)).await;
+    }
+    sink.flush().await;
+
+    let mut durations = Vec::new();
+    while let Ok(Ok(info)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        durations.push((info.index, info.duration_ms));
+    }
+    durations.sort_unstable();
+    assert_eq!(
+        durations,
+        vec![(0, 1_000), (1, 920)],
+        "the glitch-opened chunk spans 1_080..2_000, not 0 ms"
+    );
+}
