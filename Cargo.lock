@@ -2756,6 +2756,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "log",
  "reqwest 0.12.28",
  "rs-api",
  "rs-core",
@@ -2763,10 +2764,12 @@ dependencies = [
  "rs-inpoint",
  "serde_json",
  "sqlx",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

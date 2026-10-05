@@ -325,7 +325,8 @@ jobs:
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
             -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
-            -e 'crates/rs-endpoint/src/metrics.rs'; then
+            -e 'crates/rs-endpoint/src/metrics.rs' \
+            -e 'crates/rs-runtime/src/stall_resources_windows.rs'; then
               echo "Mutation attempt $ATTEMPT succeeded"
               break
             fi
