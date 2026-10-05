@@ -60,6 +60,32 @@ pub fn chunk_pacing_sleep_ms(
     target_wall_ms.saturating_sub(actual_wall_ms)
 }
 
+/// `true` for an AVC / AAC codec sequence header (`body[1] == 0x00`).
+fn is_media_seq_header(tag: &crate::flv::FlvTag<'_>) -> bool {
+    tag.body.len() >= 2 && tag.body[1] == 0x00
+}
+
+/// For each tag index `i`, the minimum input ts of the MEDIA tags (audio /
+/// video, codec sequence headers excluded) at index `>= i`, or `None` when
+/// no media tag follows. A shared mapping re-pinned at tag `i` uses it as
+/// its origin, so no remaining tag of the chunk maps below the shared base
+/// (#367).
+fn media_pin_suffix(tags: &[crate::flv::FlvTag<'_>]) -> Vec<Option<u32>> {
+    let mut out = vec![None; tags.len()];
+    let mut running: Option<u32> = None;
+    for (i, tag) in tags.iter().enumerate().rev() {
+        let is_media = matches!(
+            tag.tag_type,
+            crate::flv::FLV_TAG_AUDIO | crate::flv::FLV_TAG_VIDEO
+        );
+        if is_media && !is_media_seq_header(tag) {
+            running = Some(running.map_or(tag.timestamp_ms, |m| m.min(tag.timestamp_ms)));
+        }
+        out[i] = running;
+    }
+    out
+}
+
 impl RtmpPusher {
     pub fn new(url: String, config: PusherConfig) -> Self {
         Self {
@@ -106,11 +132,11 @@ impl RtmpPusher {
     /// this is the Task 3 test contract: "handshake completes, no tags sent".
     ///
     /// For non-empty `bytes`, each audio/video tag body is written via
-    /// `ChunkPacketizer` with per-track monotonically rewritten timestamps.
-    /// Each track (audio xiu-ts vs video wall-clock — see
-    /// `feedback_chunker_time_domains`) carries its own cumulative
-    /// `output_ts` so chunk boundaries don't introduce cross-track
-    /// collisions or audible clicks (#103).
+    /// `ChunkPacketizer` with its timestamp rewritten by ONE transform shared
+    /// by both tracks (`PusherState::wire_ts`, #367): the wire A/V relation
+    /// is exactly the chunk's content relation, and each track's wire
+    /// timeline stays monotonic and continuous across chunk boundaries
+    /// (#103).
     pub async fn push_flv_bytes(&mut self, bytes: &[u8]) -> Result<(), PushError> {
         // Lazy connect.
         if self.session.is_none() {
@@ -126,14 +152,14 @@ impl RtmpPusher {
             // the receiver can decode subsequent NALU/raw-AAC tags.
             self.state.avc_seq_header_sent = false;
             self.state.aac_seq_header_sent = false;
-            // Reset per-track origins so the new session anchors on its
-            // first tag. Roll the per-track BASE forward to one past the
-            // highest output_ts we sent in the previous session — that
-            // keeps the wire timeline strictly monotonic across the
-            // reconnect even if xiu's RTMP session resets to ts=0.
-            self.state.audio_origin_xiu_ts = None;
-            self.state.video_origin_xiu_ts = None;
-            // Roll the per-track BASE forward to the LATER of:
+            // Start a new SHARED wire mapping (#367): one base for both
+            // tracks, one past the highest output_ts sent on either track
+            // in the previous session (wire monotonic even if xiu's RTMP
+            // session resets to ts=0), and one origin re-pinned by the
+            // first chunk -- so the wire A/V relation after the reconnect
+            // is the content relation, never pusher history.
+            //
+            // History of the base choice. It used to be the LATER of:
             //   1. one ms past the highest output_ts already sent
             //      (preserves wire monotonicity)
             //   2. wall-clock since pusher session start
@@ -150,13 +176,10 @@ impl RtmpPusher {
             // problem (v0.3.92 cascaded YT TCP, v0.3.94 5ms-cap-killed
             // FB) is now mitigated by the chunk-end rate cap (see
             // `chunk_pacing_sleep_ms` and CATCHUP_FACTOR_PCT below).
-            self.state.audio_base_ms = self.state.last_audio_output_ts_ms.saturating_add(1);
-            self.state.video_base_ms = self.state.last_video_output_ts_ms.saturating_add(1);
-            // last_*_xiu_ts is "what we just saw upstream"; the new
-            // session starts fresh, so any xiu_ts value is valid (the
-            // origin will anchor on the first tag we see).
-            self.state.last_audio_xiu_ts = None;
-            self.state.last_video_xiu_ts = None;
+            // `begin_new_mapping` also clears last_*_xiu_ts ("what we just
+            // saw upstream"): the new session starts fresh, so any input ts
+            // is valid.
+            self.state.begin_new_mapping();
             // A fresh RTMP session re-anchors BOTH tracks from a common
             // start, so the A/V-skew detector must measure from the new
             // shared epoch (issue #257). This is also how the bounded
@@ -170,24 +193,21 @@ impl RtmpPusher {
             return Ok(());
         }
 
-        // Parse FLV tags. Each non-seq-header media tag's `output_ts` is
-        // computed PER TRACK as `track_base + (tag.ts - track_origin)`.
-        // The two tracks evolve on independent monotonic timelines, both
-        // measured in the same units (ms) so the receiver sees them as
-        // a coherent A/V pair.
+        // Parse FLV tags. Each media tag's `output_ts` is
+        // `base_ms + (tag.ts - origin_ts)` with ONE base and ONE origin
+        // shared by both tracks (#367). The chunker stamps both tracks in
+        // the publisher's source-ts domain, so this keeps the wire A/V
+        // relation exactly equal to the content relation.
         //
-        // Why per-track: the chunker stamps audio with xiu's RTMP session
-        // ts and video with wall-clock since chunker session start. Within
-        // a single chunk those two clocks are aligned, but the SPAN of
-        // audio in a chunk often differs from the SPAN of video in the
-        // same chunk (chunks flush at video keyframes — audio frames
-        // straddling that boundary go to whichever chunk happens to be
-        // open at the moment). Mixing the two into one shared cumulative
-        // counter caused audio frames at chunk boundaries to land on the
-        // SAME `output_ts` as the previous chunk's last audio frame, and
-        // YouTube/the decoder rendered that as an audible click every
-        // ~2 s (#103 production test on 2026-04-30).
-        let iter = crate::flv::FlvTagIter::new(bytes)?;
+        // The origin is per MAPPING (fresh session / re-anchor), never per
+        // chunk: each track's wire ts stays continuous across chunk
+        // boundaries. The #103 click came from a per-CHUNK rebase that put
+        // a chunk's first audio frame on the previous chunk's last audio
+        // output_ts. Per-TRACK origins (the #103 fix) were rejected for #367
+        // because they made the wire offset depend on which track's first
+        // tag a mapping happened to see first.
+        let tags: Vec<crate::flv::FlvTag<'_>> = crate::flv::FlvTagIter::new(bytes)?.collect();
+        let pin_from = media_pin_suffix(&tags);
         let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
 
         let chunk_started_at = Instant::now();
@@ -204,7 +224,11 @@ impl RtmpPusher {
         let mut max_audio_output_ts: u64 = 0;
         let mut max_video_output_ts: u64 = 0;
 
-        for tag in iter {
+        for (i, tag) in tags.into_iter().enumerate() {
+            // The shared origin a mapping re-pinned at this tag would get:
+            // the minimum input ts of the media tags still to be sent, so
+            // none of them maps below the shared base.
+            let pin = pin_from[i].unwrap_or(tag.timestamp_ms);
             // Sequence headers (codec config: AVC SPS/PPS, AAC config) are
             // identified by body[1] == 0x00 (`AVCPacketType::SequenceHeader`
             // / `AACPacketType::SequenceHeader`). The chunker writes them
@@ -260,7 +284,8 @@ impl RtmpPusher {
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
                                     direction = if backward { "backward" } else { "forward" },
-                                    shared_base = self.state.audio_base_ms,
+                                    shared_base = self.state.base_ms,
+                                    shared_origin_pin = pin,
                                     "rtmp_push: AUDIO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
                                 );
                             }
@@ -271,20 +296,13 @@ impl RtmpPusher {
                         // re-anchor rewrites it (#257).
                         self.skew.observe_audio(tag.timestamp_ms);
                     }
-                    let origin = if is_seq_header {
-                        // Don't anchor on the seq header (its ts=0 would
-                        // pollute the audio origin with the chunk preamble
-                        // value); use the existing or future first real
-                        // audio tag instead.
-                        self.state.audio_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
+                    // Never pin the shared origin on a codec sequence header
+                    // (the chunker writes it with ts 0 in every chunk).
+                    let ts = if is_seq_header {
+                        self.state.wire_ts_unpinned(tag.timestamp_ms, pin)
                     } else {
-                        *self
-                            .state
-                            .audio_origin_xiu_ts
-                            .get_or_insert(tag.timestamp_ms)
+                        self.state.wire_ts(tag.timestamp_ms, pin)
                     };
-                    let delta = tag.timestamp_ms.saturating_sub(origin) as u64;
-                    let ts = self.state.audio_base_ms + delta;
                     (ts, &mut max_audio_output_ts)
                 }
                 crate::flv::FLV_TAG_VIDEO => {
@@ -304,7 +322,8 @@ impl RtmpPusher {
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
                                     direction = if backward { "backward" } else { "forward" },
-                                    shared_base = self.state.video_base_ms,
+                                    shared_base = self.state.base_ms,
+                                    shared_origin_pin = pin,
                                     "rtmp_push: VIDEO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
                                 );
                             }
@@ -314,16 +333,11 @@ impl RtmpPusher {
                         // (#257), pre per-track output re-anchor.
                         self.skew.observe_video(tag.timestamp_ms);
                     }
-                    let origin = if is_seq_header {
-                        self.state.video_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
+                    let ts = if is_seq_header {
+                        self.state.wire_ts_unpinned(tag.timestamp_ms, pin)
                     } else {
-                        *self
-                            .state
-                            .video_origin_xiu_ts
-                            .get_or_insert(tag.timestamp_ms)
+                        self.state.wire_ts(tag.timestamp_ms, pin)
                     };
-                    let delta = tag.timestamp_ms.saturating_sub(origin) as u64;
-                    let ts = self.state.video_base_ms + delta;
                     (ts, &mut max_video_output_ts)
                 }
                 crate::flv::FLV_TAG_SCRIPT => {
@@ -394,8 +408,7 @@ impl RtmpPusher {
                         clamped_to_ms = clamped,
                         last_audio_output_ts_ms = self.state.last_audio_output_ts_ms,
                         last_video_output_ts_ms = self.state.last_video_output_ts_ms,
-                        audio_base_ms = self.state.audio_base_ms,
-                        video_base_ms = self.state.video_base_ms,
+                        base_ms = self.state.base_ms,
                         "rtmp_push: LONG per-tag pacing sleep (>=2s) -- output_ts ahead of wall by {raw_sleep_ms}ms; clamped to {clamped}ms"
                     );
                 }
