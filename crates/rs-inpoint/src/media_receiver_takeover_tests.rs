@@ -491,3 +491,56 @@ async fn a_lag_while_subscribing_is_probed_after_the_session() {
         .unwrap();
     assert_eq!(probed, id);
 }
+
+/// Fourth review (#367): the fallback probe targets the same stream a lag
+/// probe would, so sending it covers an earlier lag too. A lag while the
+/// live stream streamed, then a stale takeover, costs the takeover probe and
+/// ONE fallback probe, not a third, identical lag probe after them.
+#[tokio::test(start_paused = true)]
+async fn a_fallback_probe_also_covers_an_earlier_lag() {
+    let _wd = watchdog("a_fallback_probe_also_covers_an_earlier_lag");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the live stream is subscribed")
+        .unwrap();
+    let frames_a = accept(reply);
+    frames_a.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // B is deferred (read before the lag), then a lag while A streams.
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    overflow(&event_tx);
+
+    // A stalls: B is taken over and found gone, the fallback finds A gone.
+    let mut probed = Vec::new();
+    for _ in 0..3 {
+        match tokio::time::timeout(FRAME_TIMEOUT + within, requests.recv()).await {
+            Ok(Some((id, reply))) => {
+                probed.push(id);
+                let _ = reply.send(Err(rejected()));
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        probed,
+        vec![other, live],
+        "the takeover probe, then ONE fallback probe that also covers the lag"
+    );
+    drop(frames_a);
+}
