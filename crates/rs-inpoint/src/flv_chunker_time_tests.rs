@@ -628,3 +628,35 @@ async fn a_held_tag_is_dropped_by_a_session_restart() {
     );
     assert_eq!(out_ts(&chunks, Kind::Audio, 400), 400);
 }
+
+/// Review finding (#367): a forward-glitched LAST video tag of a chunk must
+/// not stretch the chunk's content duration. `duration_ms` feeds the S3
+/// chunk metadata and the VPS buffer accounting; with source-ts stamping one
+/// corrupt ts made it 40 s too long.
+#[tokio::test]
+async fn a_forward_glitch_does_not_stretch_the_chunk_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    feed(
+        &sink,
+        &clock,
+        &av_frames(0, 1_000, |src| T0 + i64::from(src)),
+    )
+    .await;
+    clock.set(T0 + 1_040);
+    sink.write_video(1_040 + 40_000, &body(Kind::InterFrame, 1_040))
+        .await;
+    sink.flush().await;
+    let info = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("the flushed chunk")
+        .expect("chunk info");
+    assert_eq!(
+        info.duration_ms, 1_000,
+        "a glitched last tag must not stretch the chunk duration"
+    );
+}
