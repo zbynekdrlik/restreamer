@@ -294,24 +294,24 @@ fn rescue_episodes_are_keyed_per_endpoint() {
     );
 }
 
-/// A recovery ends only its OWN family's episode.
+/// A recovery ends only its OWN family's episode, on the SAME endpoint.
 #[test]
 fn a_recovery_ends_only_its_own_family() {
     let mut n = notifier();
     let rescue_on = row_ep(Action::RescueActivated, "YT A");
     let rescue_off = row_ep(Action::RescueRecovered, "YT A");
-    // The invariant episode is on ANOTHER endpoint: entering rescue on A
-    // drops A's live pusher, which ends A's own push-side invariant episode
-    // by scope (notify_scope_tests.rs), not by a recovery.
-    let av_violated = row_av(Action::AvInvariantViolated, "push", Some("FB B"));
-    let av_restored = row_av(Action::AvInvariantRestored, "push", Some("FB B"));
+    let av_violated = row_av(Action::AvInvariantViolated, "push", Some("YT A"));
+    let av_restored = row_av(Action::AvInvariantRestored, "push", Some("YT A"));
+    let rescue_key = EpisodeKey::of(Family::Rescue, &rescue_on);
 
     assert!(n.observe(&rescue_on, None).is_some());
     assert!(n.observe(&av_violated, None).is_some());
     assert!(n.observe(&row(Action::IngestSkewDetected), None).is_some());
     assert!(n.observe(&row(Action::IngestSkewRecovered), None).is_some());
+    // Looked up directly: re-observing `rescue_on` would ALSO end A's live
+    // pusher scope (notify_scope_tests.rs) and close the invariant episode.
     assert!(
-        n.observe(&rescue_on, None).is_none(),
+        n.episodes.open.contains_key(&rescue_key),
         "an ingest-skew recovery must not end the rescue episode"
     );
     assert!(
@@ -326,11 +326,11 @@ fn a_recovery_ends_only_its_own_family() {
     assert!(n.observe(&av_restored, None).is_some());
 }
 
-/// The host-level connectivity onsets (internet egress, S3 upload, VPS
-/// reachability) share ONE episode that `HostInternetRecovered` ends; a
-/// per-endpoint rescue recovery does not end it.
+/// The host-level families (internet egress, VPS reachability, S3 upload)
+/// are NOT ended by a per-endpoint rescue recovery; `HostInternetRecovered`
+/// ends all three. (Their scope ends are in notify_scope_tests.rs.)
 #[test]
-fn host_connectivity_episode_is_ended_only_by_internet_recovery() {
+fn host_level_episodes_are_not_ended_by_a_rescue_recovery() {
     let mut n = notifier();
     assert!(
         n.observe(&row(Action::HostInternetUnreachable), None)
@@ -348,7 +348,11 @@ fn host_connectivity_episode_is_ended_only_by_internet_recovery() {
     assert!(
         n.observe(&row(Action::HostInternetUnreachable), None)
             .is_none(),
-        "a rescue recovery must not end the host-connectivity episode"
+        "a rescue recovery must not end the host internet episode"
+    );
+    assert!(
+        n.observe(&row(Action::VpsUnreachable), None).is_none(),
+        "a rescue recovery must not end the VPS reachability episode"
     );
     assert!(
         n.observe(&row(Action::HostInternetRecovered), None)
@@ -356,7 +360,7 @@ fn host_connectivity_episode_is_ended_only_by_internet_recovery() {
     );
     assert!(
         n.observe(&row(Action::VpsUnreachable), None).is_some(),
-        "the internet recovery ended the whole host-connectivity episode"
+        "the internet recovery also ended the VPS reachability episode"
     );
 }
 
