@@ -26,24 +26,24 @@
 //!   lag may have swallowed, are PROBES: a Subscribe the hub accepts starts
 //!   the session; a failed one (rejected or timed out) never marks the
 //!   inpoint "connected" and never runs a retry ladder against a publisher
-//!   that is gone. A failed probe of any stream but the last one that had a
-//!   session falls back to ONE probe of that last stream (a stalled live
-//!   publisher can resume without a new Publish); then the receiver idles.
+//!   that is gone.
+//! - A takeover remembers the stream it superseded (`superseded`). The next
+//!   time the receiver is Idle with no session (the takeover probe failed,
+//!   or the taken-over session ended) it probes that stream ONCE: a stalled
+//!   publisher stays registered at the hub and can resume without a new
+//!   Publish. Two keys do reach stream.lan (OBS and the CI ffmpeg).
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
 //! - `Lagged` is logged and survived. The lag is remembered until the
 //!   receiver is next Idle with no session, and then the last known stream
 //!   is probed: the lag may have swallowed its Publish, even the live
-//!   stream's own reconnect. Sending a probe of the last stream covers the
+//!   stream's own reconnect. Sending ANY probe of the last stream covers the
 //!   lags seen so far; an accepted Subscribe covers the lags from before it
-//!   was sent, not one that arrived while it was in flight. A `Closed` hub
-//!   channel is an error, so the orchestrator restarts the RTMP server.
-//!
-//! Known limit: when a taken-over stream B is accepted and its session later
-//! ends, the stalled stream A it superseded is not probed again (the last
-//! stream is B by then). It needs two different stream keys on one inpoint;
-//! production publishes one.
+//!   was sent, not one that arrived while it was in flight. Without a new
+//!   lag the chain is at most takeover -> superseded probe -> idle; each lag
+//!   during a probe adds at most one lag probe. A `Closed` hub channel is an
+//!   error, so the orchestrator restarts the RTMP server.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -92,8 +92,9 @@ type SubscribeReply = Result<(DataReceiver, Option<StatisticDataSender>), Stream
 
 /// A Subscribe sent with no session behind it yet (#367): a deferred
 /// Publish taken over, a stream a broadcast lag may have hidden, or the
-/// fallback after a failed probe. Acceptance starts the session (audited
-/// with `trigger`); a failure goes through `probe_failed`.
+/// stream a takeover superseded. Acceptance starts the session (audited
+/// with `trigger`); a failure only returns to Idle (`settle` decides what
+/// comes next).
 struct Probe {
     identifier: StreamIdentifier,
     trigger: &'static str,
@@ -222,6 +223,9 @@ pub struct MediaReceiver {
     /// A broadcast lag happened that no probe has covered yet: the next time
     /// the receiver is Idle with no session, it probes `last_identifier`.
     lag_unprobed: bool,
+    /// The stream a deferred-Publish takeover superseded: probed ONCE the
+    /// next time the receiver is Idle with no session.
+    superseded: Option<StreamIdentifier>,
 }
 
 impl MediaReceiver {
@@ -241,6 +245,7 @@ impl MediaReceiver {
             pending_publish: None,
             last_identifier: None,
             lag_unprobed: false,
+            superseded: None,
         }
     }
 
@@ -286,7 +291,10 @@ impl MediaReceiver {
                         SUBSCRIPTION_TIMEOUT.as_secs()
                     );
                     match self.drop_subscription() {
-                        Some(probe) => self.probe_failed(probe, "timed_out").await,
+                        Some(p) => info!(
+                            trigger = p.trigger,
+                            "Probe of {} timed out -- nothing publishing (#367)", p.identifier
+                        ),
                         None => self.schedule_retry("subscription_timeout").await,
                     }
                 }
@@ -321,8 +329,9 @@ impl MediaReceiver {
 
     /// Run after every wakeup (#367). A Publish deferred behind a live
     /// stream is taken over the moment that stream is no longer live
-    /// (stalled, retrying, given up or ended). An unprobed broadcast lag is
-    /// covered once the receiver is Idle with no session. Both are probes.
+    /// (stalled, retrying, given up or ended). Once the receiver is Idle
+    /// with no session, the stream a takeover superseded is probed once,
+    /// then an unprobed broadcast lag is covered. All three are probes.
     async fn settle(&mut self) {
         if matches!(self.phase, Phase::Idle | Phase::RetryWait { .. }) {
             if let Some(next) = self.pending_publish.take() {
@@ -331,13 +340,25 @@ impl MediaReceiver {
                     "The live stream stopped streaming -- taking over the Publish deferred \
                      behind it, as a probe: {next} (#367)"
                 );
+                self.superseded = self.last_identifier.clone().filter(|last| *last != next);
                 self.end_session("superseded_by_deferred_publish").await;
                 self.send_subscribe(next, Some("deferred_publish")).await;
                 return;
             }
         }
-        if self.lag_unprobed && self.session.is_none() && matches!(self.phase, Phase::Idle) {
-            self.lag_unprobed = false;
+        if self.session.is_some() || !matches!(self.phase, Phase::Idle) {
+            return;
+        }
+        if let Some(previous) = self.superseded.take() {
+            warn!(
+                "Idle after a takeover -- probing once the stream it superseded: {previous} \
+                 (a stalled publisher can resume without a new Publish, #367)"
+            );
+            self.send_subscribe(previous, Some("superseded_probe"))
+                .await;
+            return;
+        }
+        if std::mem::take(&mut self.lag_unprobed) {
             if let Some(identifier) = self.last_identifier.clone() {
                 warn!(
                     "Idle after a lagged broadcast -- probing the last stream {identifier} (#367)"
@@ -431,9 +452,17 @@ impl MediaReceiver {
     /// with no session behind it yet (see [`Probe`]); `None` subscribes for
     /// the current session.
     async fn send_subscribe(&mut self, identifier: StreamIdentifier, probe: Option<&'static str>) {
-        let probe = probe.map(|trigger| Probe {
-            identifier: identifier.clone(),
-            trigger,
+        let probe = probe.map(|trigger| {
+            // ANY probe of the last stream is what a lag probe would send:
+            // it covers every lag seen so far (a lag during its flight sets
+            // the flag again).
+            if self.last_identifier.as_ref() == Some(&identifier) {
+                self.lag_unprobed = false;
+            }
+            Probe {
+                identifier: identifier.clone(),
+                trigger,
+            }
         });
         let info = SubscriberInfo {
             id: Uuid::new(RandomDigitCount::Six),
@@ -505,7 +534,10 @@ impl MediaReceiver {
         };
         let Some(frames) = frames else {
             match probe {
-                Some(p) => self.probe_failed(p, "rejected").await,
+                Some(p) => info!(
+                    trigger = p.trigger,
+                    "Probe found nothing publishing on {} (#367)", p.identifier
+                ),
                 None => self.schedule_retry("subscription_failed").await,
             }
             return;
@@ -634,39 +666,6 @@ impl MediaReceiver {
             warn!("Failed to send unsubscribe request to hub");
         }
         probe
-    }
-
-    /// A probe found nothing publishing (rejected or timed out). A taken-over
-    /// deferred Publish can be stale while the stream it superseded is still
-    /// up: a stalled live publisher stays registered at the hub and can
-    /// resume on its connection WITHOUT a new Publish. So a failed probe of
-    /// any other stream falls back to ONE probe of the last stream that had a
-    /// session. A failed probe of that stream ends it: no probe loop.
-    async fn probe_failed(&mut self, probe: Probe, why: &'static str) {
-        let fallback = self
-            .last_identifier
-            .clone()
-            .filter(|last| *last != probe.identifier);
-        let Some(last) = fallback else {
-            info!(
-                trigger = probe.trigger,
-                why,
-                "Probe found nothing publishing on {} -- staying idle (#367)",
-                probe.identifier
-            );
-            return;
-        };
-        warn!(
-            trigger = probe.trigger,
-            why,
-            "Probe found nothing publishing on {} -- falling back to probing the last live \
-             stream {last} (#367)",
-            probe.identifier
-        );
-        // The fallback targets exactly what a lag probe would: it covers
-        // every lag seen so far (a lag during its flight sets the flag again).
-        self.lag_unprobed = false;
-        self.send_subscribe(last, Some("fallback_probe")).await;
     }
 
     /// End the current published-stream session: mark the inpoint
