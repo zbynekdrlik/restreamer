@@ -1,10 +1,13 @@
 ---
 paths:
   - "crates/rs-inpoint/src/flv_chunker.rs"
+  - "crates/rs-inpoint/src/flv_chunker_ingest.rs"
   - "crates/rs-inpoint/src/flv_chunker_tests.rs"
   - "crates/rs-inpoint/src/flv_chunker_time_tests.rs"
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/media_receiver_tests.rs"
+  - "crates/rs-inpoint/src/media_receiver_takeover_tests.rs"
+  - "crates/rs-inpoint/src/frame_stats.rs"
   - "crates/rs-inpoint/src/ingest_report.rs"
   - "crates/rs-inpoint/src/src_track.rs"
   - "crates/rs-rtmp-push/src/pusher.rs"
@@ -31,34 +34,52 @@ baseline-relative, so none of them saw it.
 
 ## The stages
 
-- **Chunker (`flv_chunker.rs` + `src_track.rs`):** `out = src_ts -
-  session_origin` for both tracks. `session_origin` is the source ts of the
-  session's first video keyframe; on a GOP replay that is the cached
-  keyframe. Audio before the origin is dropped.
-  `chunk_first_ts`/`chunk_last_ts`/`duration_ms` come from VIDEO tags only
-  (#146). Each track's last two source ts classify a new one (`SrcStep`):
-  - a REAL backward jump (a new publisher) re-anchors BOTH tracks: flush,
-    then clear the origin AND both histories, otherwise the other track
-    trips a second re-anchor;
+- **Chunker (`flv_chunker.rs`, per-tag path in `flv_chunker_ingest.rs`,
+  `src_track.rs`):** `out = src_ts - session_origin` for both tracks.
+  `session_origin` is the source ts of the session's first video keyframe; on
+  a GOP replay that is the cached keyframe. Audio before the origin is
+  dropped. `chunk_first_ts`/`chunk_last_ts`/`duration_ms` come from VIDEO
+  tags only (#146). Each track's last two source ts classify a new one
+  (`SrcStep`):
   - a backward step <= 1000 ms is jitter: clamped to the track's last ts;
   - a lone forward glitch > 30 s, recognised by its successor walking back,
-    is dropped from the history.
+    is dropped from the history;
+  - a FAR backward step is only a candidate: a new publisher and a lone LOW
+    glitch look the same at that tag. The tag is HELD (`HeldTag`, at most
+    one). If the next tag of EITHER track is also far behind, it is a new
+    timeline: flush, clear the origin AND both histories (otherwise the other
+    track trips a second re-anchor), and the held tag heads the new session,
+    so a new publisher's first keyframe survives. If the next tag of the
+    held tag's OWN track is back on the old timeline, the held tag was a
+    glitch: written clamped at the track's last ts, no re-anchor. A session
+    restart drops a held tag.
 
   A re-anchor costs a flush plus a drop until the next keyframe, so one odd
   timestamp must never cause one. Never write a per-track self-heal again.
+  A clamped tag (jitter, a glitch) is off the transform: never feed it to
+  the invariant guard.
 - **Receiver (`media_receiver.rs`):** one `select!` loop (`biased`, hub events
   first; the inner frame/reply waits are biased too, so a frame ready after a
   freeze beats an expired stall timer).
   - A Publish of the SAME stream at ANY phase supersedes the subscription,
     calls `start_new_session` and subscribes immediately. A DIFFERENT stream
     supersedes only a session that is not Streaming; otherwise it waits in
-    `pending_publish` until the live one ends. Never orphan a live publisher.
+    `pending_publish` and is taken over (`settle()`, after every wakeup) the
+    moment the live one stops streaming: stalled (RetryWait), ended or given
+    up (Idle). Never orphan a live publisher, never wait out a stalled one's
+    whole retry ladder.
+  - Taking over a deferred Publish and looking for a Publish a lag hid are
+    PROBES (`Probe { identifier, trigger }`): accept starts the session
+    (audited with the trigger), reject stays Idle with no "connected" flag
+    and no retry ladder.
   - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
     because xiu has no session id.
   - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
-  - `Lagged` is survived. While Idle it probes `last_identifier` (a probe
-    Subscribe: accept starts the session; reject stays idle with no
-    "connected" flag).
+  - `Lagged` is survived and remembered (`lag_unprobed`): once the receiver
+    is Idle with no session it probes `last_identifier`. A lag while
+    streaming can hide the live stream's own reconnect Publish. A probe
+    clears the flag when SENT (a lag during a probe costs one more probe,
+    never a loop); any successful subscribe clears it too.
   - A `Closed` hub channel and a StreamsHub exit both return `Err`, so the
     orchestrator restarts.
   - Unsubscribe every dropped subscription (xiu keeps dead senders and logs
@@ -112,7 +133,16 @@ measures the rate again. The default log level does not emit it.
 `flv_chunker_time_tests.rs` uses a `ManualClock` (`with_wall_clock`) to replay
 arrival patterns deterministically (burst at one instant, dead air, new
 publisher). `media_receiver_tests.rs` has a programmable hub (publisher slot,
-accept/reject, subscribe log) driving `run()` under `start_paused`.
+accept/reject, subscribe + UnSubscribe log) driving `run()` under
+`start_paused`; the takeover/probe cases live in its child
+`media_receiver_takeover_tests.rs` (plus a hand-answered hub).
+
+**Every paused-clock receiver test starts with `let _wd = watchdog(..)`.** A
+mutant that makes the receiver spin (retry delay 0, a probe loop) keeps the
+runtime busy, so the paused clock never auto-advances and the test hangs
+until cargo-mutants' 300 s timeout (a TIMEOUT fails the gate). The watchdog
+aborts the test process after 30 s of real time instead. Never wait in such
+a test with an unbounded loop over a channel either.
 `rs-rtmp-push/tests/av_relation_loopback.rs` checks the WIRE relation on the
 real xiu server across a re-anchor and a reconnect. The CI gate is `GATE
 late-join republish keeps chunk A/V aligned (#367)` in `E2E Streaming Test`
