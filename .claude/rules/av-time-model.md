@@ -185,3 +185,35 @@ it logs, and tokio runs the woken receiver first).
 real xiu server across a re-anchor and a reconnect. The CI gate is `GATE
 late-join republish keeps chunk A/V aligned (#367)` in `E2E Streaming Test`
 (ffmpeg publisher only, never OBS).
+
+### Reproducing the receiver stall (`Wake::Stalled`) live
+
+Two rules, both learned the hard way on #367:
+
+- **Suspending only the PUBLISHER can never reproduce a receiver stall.**
+  xiu's `ServerSession` drops a publisher idle >= 2 s (`read_timeout(2s)`), so
+  the receiver sees a closed channel (`publisher_closed`), never the 30 s
+  `FRAME_TIMEOUT` (CI run 37371694859). Suspend **Restreamer.exe itself**
+  (`NtSuspendProcess`, 35 s), as Thursday's freeze did.
+- **The publisher must have nothing deliverable at resume.** A publisher that
+  keeps sending through the freeze leaves a socket backlog. At resume xiu reads
+  it first: IO wakes come before timer wakes, and the frame task forwards it.
+  The receiver's `biased` select then takes the frame over the expired stall
+  timer ("a frame ready after a process freeze wins"), so there is no stall
+  line. That is a race on a correct binary.
+  - The gate freezes the ffmpeg publisher **0.3 s before** Restreamer. In that
+    window Restreamer drains the socket; xiu's 2 s cut cannot run while
+    Restreamer is suspended.
+  - At resume the receiver's channel is still open and empty. Only the hub (in
+    the same serve-task poll) and then the frame task can close it. So
+    `Wake::Stalled` fires deterministically.
+  - The baseline session got the same effect from OBS dropping its connection
+    during the freeze: at resume, `RTMP session ended ... net io error` came
+    just before the stall line.
+
+The gate finds the stall by `STALL_LOG_MARKER` (`media_receiver.rs`). A
+test-integrity step fails when the gate's `$stallMarker` differs from it, or
+when Restreamer is not resumed on every exit path: the gate's `finally` plus
+the `if: always()` step `Resume Restreamer if the late-join gate left it
+suspended (#367)`, which share a PID marker file in `$env:TEMP`. Never call
+the API while Restreamer is suspended.
