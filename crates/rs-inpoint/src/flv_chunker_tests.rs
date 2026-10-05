@@ -704,3 +704,8 @@ async fn with_ingest_state_stays_clear_on_a_healthy_source() {
         ingest_state.ingest_skew_ms()
     );
 }
+
+// #367 time-model regression tests (source-ts domain, GOP-cache burst,
+// backward source jump) live in their own child file for the 1000-line cap.
+#[path = "flv_chunker_time_tests.rs"]
+mod time_domain;

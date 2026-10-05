@@ -1,0 +1,274 @@
+//! #367 time-model regression tests for `FlvChunkSink`.
+//!
+//! INVARIANT under test: the A/V relationship is defined ONLY by the
+//! publisher's source timestamps. Whatever ARRIVAL pattern the frames have
+//! (a GOP-cache replay burst at one wall instant, a dead-air gap, a new
+//! publisher reusing the stream identifier), coincident A/V content must stay
+//! coincident in the chunk bytes.
+//!
+//! Child of `flv_chunker_tests.rs` (`#[path]`): `super::super` is the chunker
+//! module, `super` the FLV tag readers.
+
+use super::super::{ChunkInfo, FLV_TAG_AUDIO, FLV_TAG_VIDEO, FlvChunkSink};
+use super::first_flv_tag_timestamp;
+use crate::wall_clock::WallClock;
+use bytes::BytesMut;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+use std::time::Duration;
+use tokio::sync::broadcast;
+
+/// Deterministic wall clock: the test decides when every frame "arrives".
+struct ManualClock(AtomicI64);
+
+impl ManualClock {
+    fn new(ms: i64) -> Arc<Self> {
+        Arc::new(Self(AtomicI64::new(ms)))
+    }
+    fn set(&self, ms: i64) {
+        self.0.store(ms, AtomicOrdering::SeqCst);
+    }
+}
+
+impl WallClock for ManualClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(AtomicOrdering::SeqCst)
+    }
+}
+
+/// Arbitrary Unix-epoch base for the manual clock.
+const T0: i64 = 1_790_000_000_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    KeyFrame,
+    InterFrame,
+    Audio,
+}
+
+/// One frame as the hub delivers it: source ts + the wall instant it arrives.
+#[derive(Clone, Copy)]
+struct Frame {
+    kind: Kind,
+    src_ts: u32,
+    wall_ms: i64,
+}
+
+/// Tag body carrying the frame's source ts, so a test can find the exact
+/// tag of a given content instant in the chunk bytes.
+fn body(kind: Kind, src_ts: u32) -> BytesMut {
+    let ts = src_ts.to_be_bytes();
+    match kind {
+        Kind::KeyFrame => {
+            BytesMut::from(&[0x17, 0x01, 0, 0, 0, 0xEE, ts[0], ts[1], ts[2], ts[3]][..])
+        }
+        Kind::InterFrame => {
+            BytesMut::from(&[0x27, 0x01, 0, 0, 0, 0xEE, ts[0], ts[1], ts[2], ts[3]][..])
+        }
+        Kind::Audio => BytesMut::from(&[0xAF, 0x01, 0xEE, ts[0], ts[1], ts[2], ts[3]][..]),
+    }
+}
+
+/// Video every 40 ms (25 fps) and audio every 20 ms over `[from, to]`, the
+/// first video frame a keyframe. Both grids hit every multiple of 40, so a
+/// content instant on that grid has an exactly coincident A and V frame.
+/// `arrival(src)` maps a frame's source ts to its arrival wall instant.
+fn av_frames(from: u32, to: u32, arrival: impl Fn(u32) -> i64) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    let mut v = from;
+    while v <= to {
+        let kind = if v == from {
+            Kind::KeyFrame
+        } else {
+            Kind::InterFrame
+        };
+        frames.push(Frame {
+            kind,
+            src_ts: v,
+            wall_ms: arrival(v),
+        });
+        v += 40;
+    }
+    let mut a = from;
+    while a <= to {
+        frames.push(Frame {
+            kind: Kind::Audio,
+            src_ts: a,
+            wall_ms: arrival(a),
+        });
+        a += 20;
+    }
+    // Delivery order = source order; at equal ts video goes first, so the
+    // keyframe opens the chunk before its coincident audio frame.
+    frames.sort_by_key(|f| (f.src_ts, if f.kind == Kind::Audio { 1 } else { 0 }));
+    frames
+}
+
+async fn seed_sequence_headers(sink: &FlvChunkSink) {
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+}
+
+async fn feed(sink: &FlvChunkSink, clock: &ManualClock, frames: &[Frame]) {
+    for f in frames {
+        clock.set(f.wall_ms);
+        let data = body(f.kind, f.src_ts);
+        match f.kind {
+            Kind::Audio => sink.write_audio(f.src_ts, &data).await,
+            _ => sink.write_video(f.src_ts, &data).await,
+        }
+    }
+}
+
+/// Flush and collect the bytes of every chunk the sink emitted.
+async fn drain_chunks(
+    sink: &FlvChunkSink,
+    rx: &mut broadcast::Receiver<ChunkInfo>,
+) -> Vec<Vec<u8>> {
+    sink.flush().await;
+    let mut chunks = Vec::new();
+    while let Ok(Ok(info)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        chunks.push(std::fs::read(&info.path).expect("chunk file readable"));
+    }
+    chunks
+}
+
+/// Output (chunk) ts of the tag carrying `kind`/`src_ts`, across all chunks.
+fn out_ts(chunks: &[Vec<u8>], kind: Kind, src_ts: u32) -> u32 {
+    let marker = body(kind, src_ts);
+    let tag_type = if kind == Kind::Audio {
+        FLV_TAG_AUDIO
+    } else {
+        FLV_TAG_VIDEO
+    };
+    chunks
+        .iter()
+        .find_map(|c| first_flv_tag_timestamp(c, tag_type, &marker))
+        .unwrap_or_else(|| panic!("no {tag_type} tag for source ts {src_ts} in any chunk"))
+}
+
+fn new_sink(dir: &std::path::Path, clock: &Arc<ManualClock>) -> FlvChunkSink {
+    FlvChunkSink::new(dir.to_path_buf(), Duration::from_secs(60))
+        .with_wall_clock(Arc::clone(clock) as Arc<dyn WallClock>)
+}
+
+/// Design test 1 (#367): the Thursday late-join. A subscriber that joins
+/// late gets xiu's 1-GOP cache replayed as a BURST at one wall instant (here
+/// a keyframe + 1.4 s of A+V), then live frames at real-time pace. Before the
+/// fix, video was stamped by ARRIVAL (the burst compressed to ~0 ms) while
+/// audio kept its source spacing, which baked a constant audio-late offset
+/// equal to the GOP age at join (measured +1430 ms on the YouTube VOD).
+/// Coincident A/V content must stay within 50 ms.
+#[tokio::test]
+async fn gop_cache_burst_keeps_coincident_av_aligned() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    const GOP_START: u32 = 10_000;
+    const BURST_END: u32 = GOP_START + 1_400;
+    // Everything up to the live edge arrives at T0 (the replay burst); later
+    // content arrives at real-time pace after it.
+    let frames = av_frames(GOP_START, GOP_START + 3_000, |src| {
+        if src <= BURST_END {
+            T0
+        } else {
+            T0 + i64::from(src - BURST_END)
+        }
+    });
+    feed(&sink, &clock, &frames).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    // A coincident content instant well after the burst (source 12_000).
+    let mark = GOP_START + 2_000;
+    let v = out_ts(&chunks, Kind::InterFrame, mark);
+    let a = out_ts(&chunks, Kind::Audio, mark);
+    let offset = i64::from(a) - i64::from(v);
+    assert!(
+        offset.abs() <= 50,
+        "coincident A/V content at source {mark} must stay within 50 ms after a GOP-cache \
+         burst; got video_out={v} audio_out={a} (audio {offset:+} ms vs video)"
+    );
+}
+
+/// Design test 4 (#367): a new publisher reusing the stream identifier
+/// restarts its source ts near 0 while the chunker never saw a Publish event
+/// (the lost-event case). The backward source-ts jump must re-anchor BOTH
+/// tracks onto one new session origin, never self-heal one track only.
+/// Here the new publisher's VIDEO keyframe arrives first.
+#[tokio::test]
+async fn backward_source_jump_video_first_reanchors_both_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    // Session A: 2 s of live A/V at source 600_000.., real-time arrival.
+    let a = av_frames(600_000, 602_000, |src| T0 + i64::from(src - 600_000));
+    feed(&sink, &clock, &a).await;
+    // 5 s of dead air, then a NEW publisher starting at source 0.
+    let restart = T0 + 7_000;
+    let b = av_frames(0, 1_000, |src| restart + i64::from(src));
+    feed(&sink, &clock, &b).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    let v = out_ts(&chunks, Kind::InterFrame, 400);
+    let a = out_ts(&chunks, Kind::Audio, 400);
+    assert!(
+        (i64::from(a) - i64::from(v)).abs() <= 50,
+        "after a backward source-ts jump coincident A/V must stay aligned; got \
+         video_out={v} audio_out={a}"
+    );
+    assert_eq!(
+        v, 400,
+        "the new publisher's keyframe (source 0) must become the new shared session origin"
+    );
+}
+
+/// Design test 4, other arrival order: the new publisher's AUDIO arrives
+/// before its first keyframe. The audio backward jump alone must re-anchor
+/// both tracks (audio before the new keyframe is dropped like any audio
+/// before a session's first keyframe), so the shared origin is the new
+/// keyframe and coincident content stays aligned.
+#[tokio::test]
+async fn backward_source_jump_audio_first_reanchors_both_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let a = av_frames(600_000, 602_000, |src| T0 + i64::from(src - 600_000));
+    feed(&sink, &clock, &a).await;
+
+    let restart = T0 + 7_000;
+    // New publisher: audio from source 0, first video keyframe at source 100.
+    let mut b: Vec<Frame> = (0..100u32)
+        .step_by(20)
+        .map(|src| Frame {
+            kind: Kind::Audio,
+            src_ts: src,
+            wall_ms: restart + i64::from(src),
+        })
+        .collect();
+    b.extend(av_frames(100, 1_100, |src| restart + i64::from(src)));
+    feed(&sink, &clock, &b).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    let v = out_ts(&chunks, Kind::InterFrame, 500);
+    let a = out_ts(&chunks, Kind::Audio, 500);
+    assert!(
+        (i64::from(a) - i64::from(v)).abs() <= 50,
+        "after an audio-first backward jump coincident A/V must stay aligned; got \
+         video_out={v} audio_out={a}"
+    );
+    assert_eq!(
+        v, 400,
+        "the new publisher's first keyframe (source 100) must become the shared session origin"
+    );
+}
