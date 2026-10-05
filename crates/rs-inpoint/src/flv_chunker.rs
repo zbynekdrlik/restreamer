@@ -73,31 +73,25 @@ struct FlvChunkSinkInner {
     /// Saved codec sequence headers for writing at chunk start.
     video_sequence_header: Option<BytesMut>,
     audio_sequence_header: Option<BytesMut>,
-    /// Wall-clock timestamp of the first frame in current chunk (milliseconds).
+    /// Output ts (session source domain) of the first VIDEO frame in the
+    /// current chunk. VIDEO tags only (#146).
     chunk_first_ts: u32,
-    /// Wall-clock timestamp of the last frame written to current chunk (milliseconds).
+    /// Output ts of the last VIDEO frame written to the current chunk.
     chunk_last_ts: u32,
     /// Unix epoch ms when write_chunk_header was called for the current chunk.
     /// Used to compute wall-clock span vs FLV tag span for drift diagnostics.
     chunk_first_wall_clock_ms: i64,
-    /// Unix epoch ms at first tag of current session. 0 = not yet set.
-    /// Reset when reset() is called (RTMP disconnect / new session).
-    session_start_wall_clock_ms: i64,
-    /// Highest output timestamp emitted in the current session. Enforces
-    /// monotonic stamping under OS clock skew or wall-clock anomalies.
-    last_session_ts: u32,
-    /// xiu RTMP timestamp of the first audio tag of the current session.
-    /// Audio output ts = `xiu_ts - audio_session_origin_xiu`, putting audio on
-    /// the SAME 0-based per-session epoch as video (which restarts at 0 via
-    /// `current_session_ts`). `None` until the first audio tag of a session;
-    /// re-captured on `start_new_session()` or a backward-jump self-heal (#255).
-    /// Preserves the #142 chipmunk fix: the inter-tag deltas (xiu cadence) are
-    /// untouched, only the per-session offset is removed.
-    audio_session_origin_xiu: Option<u32>,
-    /// Last raw xiu audio ts seen — used to detect a backward jump (a missed
-    /// republish) so the audio epoch can self-heal even if `start_new_session()`
-    /// was never called (#255).
-    last_audio_xiu_ts: Option<u32>,
+    /// #367 shared session origin: the publisher's SOURCE ts of the session's
+    /// first video keyframe. BOTH tracks are stamped `src - session_origin`
+    /// (one common transform), so the publisher's A/V relationship survives
+    /// any arrival pattern. `None` until a session's first keyframe; cleared
+    /// by `start_new_session()`, `reset()` and a backward source-ts jump.
+    session_origin_src: Option<u32>,
+    /// Last source ts seen per track, to detect a backward jump (a new
+    /// publisher reusing the identifier with no Publish event reaching us).
+    /// A jump on EITHER track re-anchors the session for BOTH (#367).
+    last_video_src: Option<u32>,
+    last_audio_src: Option<u32>,
     /// Ingest A/V-skew monitor (#354): observes the SAME chunker-stamped
     /// content-PTS the VPS pusher's `SkewTracker` consumes downstream, and
     /// latches a sustained-over-threshold state at each chunk boundary. Reset
@@ -126,14 +120,19 @@ impl FlvChunkSinkInner {
             chunk_first_ts: 0,
             chunk_last_ts: 0,
             chunk_first_wall_clock_ms: 0,
-            session_start_wall_clock_ms: 0,
-            last_session_ts: 0,
-            audio_session_origin_xiu: None,
-            last_audio_xiu_ts: None,
+            session_origin_src: None,
+            last_video_src: None,
+            last_audio_src: None,
             skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
             clock: system_clock(),
         }
     }
+}
+
+/// A backward-jump session re-anchor, finished outside the lock (#367).
+struct Reanchored {
+    /// The old session's partial chunk, if it had any data.
+    flushed: Option<PendingChunkWrite>,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -251,51 +250,28 @@ impl FlvChunkSink {
         }
     }
 
-    /// Compute a wall-clock-derived session timestamp in milliseconds.
-    ///
-    /// On the first call after a session reset, records `now` as the session
-    /// anchor and returns 0. On subsequent calls, returns `now - anchor`,
-    /// clamped to be non-decreasing across the session.
-    ///
-    /// This replaces OBS's declared-fps-based timestamps (which produce 994ms
-    /// of tag time per wall-clock second at 30fps) with actual arrival timing,
-    /// fixing the cache-drift described in issue #135.
-    ///
-    /// **A/V sync note:** audio and video tags get stamped with their respective
-    /// arrival wall-clock, so network jitter between the two streams (typically
-    /// <50ms on TCP RTMP) maps directly to A/V offset in the output. This is
-    /// well below the perceptible threshold (~150ms) and acceptable for our
-    /// use case of OBS-on-LAN ingest. A future revision may introduce
-    /// OBS-PTS-relative stamping with a smoothed rate factor for environments
-    /// where ingest jitter is higher (e.g. cellular bonded encoders).
-    fn current_session_ts(inner: &mut FlvChunkSinkInner) -> u32 {
-        let now_ms = inner.clock.now_ms();
-        if inner.session_start_wall_clock_ms == 0 {
-            inner.session_start_wall_clock_ms = now_ms;
-            inner.last_session_ts = 0;
-            return 0;
-        }
-        let delta = (now_ms - inner.session_start_wall_clock_ms).max(0);
-        // u32 overflows after ~49 days — clamp rather than truncate.
-        let candidate = delta.min(u32::MAX as i64) as u32;
-        // Monotonic guard: if the OS clock jumped backward (NTP step,
-        // suspend/resume) or `now_ms` regressed, clamp to the highest stamp
-        // we've already emitted so the FLV stream stays monotonic.
-        let out = candidate.max(inner.last_session_ts);
-        inner.last_session_ts = out;
-        out
-    }
-
     /// Process a video frame from xiu's FrameData::Video.
     ///
     /// `data` is the FLV tag body (codec header + payload) as provided by xiu.
-    /// `_xiu_timestamp` is the OBS-declared timestamp — intentionally ignored.
-    /// Frames are stamped using wall-clock time since session start instead,
-    /// which eliminates the 0.994× producer drift (#135).
-    pub async fn write_video(&self, _xiu_timestamp: u32, data: &BytesMut) {
+    /// `xiu_timestamp` is the publisher's SOURCE ts. The frame is stamped
+    /// `xiu_timestamp - session_origin`, the SAME transform audio gets, so
+    /// the publisher's A/V relationship survives into the chunk bytes
+    /// whatever the arrival pattern is (#367).
+    ///
+    /// Arrival time is never used as content time. #135/#140 stamped video by
+    /// arrival wall-clock while audio kept source ts, so every burst arrival
+    /// (a GOP-cache replay to a late subscriber, a process freeze, TCP
+    /// backlog) became a constant A/V offset: the 2026-10-01 incident
+    /// (+1430 ms on YouTube). The #135 rate concern was re-measured for #367:
+    /// on the current rig |src/wall - 1| <= 0.0005 %, so no rate correction
+    /// is applied.
+    pub async fn write_video(&self, xiu_timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && data[1] == 0x00;
 
-        let (pending, skew_transition) = {
+        let reanchored;
+        let mut pending = None;
+        let mut skew_transition = None;
+        {
             let mut inner = self.inner.lock().await;
 
             // Always save sequence headers (even in null mode, for state tracking)
@@ -309,105 +285,121 @@ impl FlvChunkSink {
                 return;
             }
 
-            // Check if we need to start a new chunk (at keyframe boundary)
+            // #367: a backward source jump means a new publisher reused the
+            // stream identifier without its Publish event reaching us.
+            // Re-anchor BOTH tracks on a new shared session origin.
+            let prev = inner.last_video_src;
+            reanchored = Self::reanchor_if_backward(&mut inner, "video", prev, xiu_timestamp);
+
             let is_keyframe = !data.is_empty() && (data[0] >> 4) == 1;
-            let should_flush = inner
-                .chunk_start
-                .map(|s| s.elapsed() >= inner.chunk_duration)
-                .unwrap_or(false);
+            // A chunk -- and a session -- always starts on a keyframe. Drop
+            // non-keyframes before that, BEFORE anchoring the session origin.
+            if inner.chunk_start.is_some() || is_keyframe {
+                let ts = Self::video_out_ts(&mut inner, xiu_timestamp);
 
-            // Drop non-keyframes before the first chunk has started.
-            // Do this BEFORE calling current_session_ts so we don't burn the
-            // session anchor on a frame we're about to discard.
-            if inner.chunk_start.is_none() && !is_keyframe {
-                return;
-            }
+                // Check if we need to start a new chunk (at keyframe boundary)
+                let should_flush = inner
+                    .chunk_start
+                    .map(|s| s.elapsed() >= inner.chunk_duration)
+                    .unwrap_or(false);
 
-            // Stamp this frame with wall-clock time since session start.
-            let ts = Self::current_session_ts(&mut inner);
-
-            let mut pending = None;
-            // #354: a chunk boundary is where the ingest skew monitor is
-            // evaluated. Evaluate the CLOSING chunk BEFORE this keyframe's ts
-            // is observed (below), so the boundary reflects exactly the frames
-            // that belonged to the chunk being flushed.
-            let mut skew_transition = None;
-
-            if should_flush && is_keyframe {
-                pending = Self::extract_chunk(&mut inner);
-                skew_transition = Some(inner.skew_monitor.evaluate_chunk());
-                Self::write_chunk_header(&mut inner, ts);
-            } else if inner.chunk_start.is_none() {
-                // First keyframe — start the chunk.
-                Self::write_chunk_header(&mut inner, ts);
-            }
-
-            inner.chunk_last_ts = ts;
-            Self::write_tag(&mut inner, FLV_TAG_VIDEO, ts, data);
-            // Observe the SAME stamped ts the pusher's SkewTracker will see
-            // downstream, so ingest and VPS agree on the number (#354).
-            inner.skew_monitor.observe_video(ts);
-
-            // Force-flush if buffer exceeds max size
-            if inner.buffer.len() >= MAX_BUFFER_SIZE {
-                tracing::warn!(
-                    "FLV chunk buffer exceeded {}MB limit, force-flushing",
-                    MAX_BUFFER_SIZE / (1024 * 1024)
-                );
-                if pending.is_none() {
+                // #354: a chunk boundary is where the ingest skew monitor is
+                // evaluated. Evaluate the CLOSING chunk BEFORE this keyframe's
+                // ts is observed (below), so the boundary reflects exactly the
+                // frames that belonged to the chunk being flushed.
+                if should_flush && is_keyframe {
                     pending = Self::extract_chunk(&mut inner);
-                    // #354: this is ALSO a real chunk boundary -- evaluate the
-                    // skew monitor here too, not just on the normal
-                    // duration+keyframe path above (this branch runs only
-                    // when that one did NOT, since `pending` is still `None`
-                    // at this point in exactly that case). Otherwise a
-                    // pathological stream that keeps hitting the 50MB
-                    // force-flush path (e.g. a misconfigured chunk_duration)
-                    // would never advance the debounce counter.
                     skew_transition = Some(inner.skew_monitor.evaluate_chunk());
+                    Self::write_chunk_header(&mut inner, ts);
+                } else if inner.chunk_start.is_none() {
+                    // First keyframe — start the chunk.
+                    Self::write_chunk_header(&mut inner, ts);
+                }
+
+                // chunk_first_ts / chunk_last_ts / duration_ms derive from
+                // VIDEO tags only (#146).
+                inner.chunk_last_ts = ts;
+                Self::write_tag(&mut inner, FLV_TAG_VIDEO, ts, data);
+                // Observe the SAME stamped ts the pusher's SkewTracker will see
+                // downstream, so ingest and VPS agree on the number (#354).
+                inner.skew_monitor.observe_video(ts);
+
+                // Force-flush if buffer exceeds max size
+                if inner.buffer.len() >= MAX_BUFFER_SIZE {
+                    tracing::warn!(
+                        "FLV chunk buffer exceeded {}MB limit, force-flushing",
+                        MAX_BUFFER_SIZE / (1024 * 1024)
+                    );
+                    if pending.is_none() {
+                        pending = Self::extract_chunk(&mut inner);
+                        // #354: this is ALSO a real chunk boundary -- evaluate
+                        // the skew monitor here too, not just on the normal
+                        // duration+keyframe path above (this branch runs only
+                        // when that one did NOT, since `pending` is still
+                        // `None` at this point in exactly that case).
+                        // Otherwise a pathological stream that keeps hitting
+                        // the 50MB force-flush path (e.g. a misconfigured
+                        // chunk_duration) would never advance the debounce
+                        // counter.
+                        skew_transition = Some(inner.skew_monitor.evaluate_chunk());
+                    }
                 }
             }
+        }
 
-            (pending, skew_transition)
-        };
-
+        // The re-anchor's flushed chunk goes out FIRST (it precedes the new
+        // session's chunk in index order).
+        if let Some(r) = reanchored {
+            self.finish_reanchor(r).await;
+        }
         // Publish the skew transition OUTSIDE the inner lock (audit + shared
         // atomics live on the ingest state, not the chunker mutex).
         if let Some(t) = skew_transition {
             self.report_skew(t);
         }
-
         if let Some(pending) = pending {
-            if self.spawn_write(pending) {
-                // Commit the chunk_index advance now that the write is accepted
-                let mut inner = self.inner.lock().await;
-                inner.chunk_index += 1;
-            }
+            self.commit_chunk(pending).await;
         }
+    }
+
+    /// Stamp a video frame into the session's source-ts domain, anchoring the
+    /// shared session origin on the session's first (key)frame.
+    fn video_out_ts(inner: &mut FlvChunkSinkInner, src_ts: u32) -> u32 {
+        let origin = match inner.session_origin_src {
+            Some(origin) => origin,
+            None => {
+                inner.session_origin_src = Some(src_ts);
+                info!(
+                    chunk_index = inner.chunk_index,
+                    session_origin_src = src_ts,
+                    "flv_chunker: session origin anchored on the first keyframe -- both tracks \
+                     are stamped src_ts - origin (#367)"
+                );
+                src_ts
+            }
+        };
+        inner.last_video_src = Some(src_ts);
+        // Never below the origin: every later video frame is >= the previous
+        // one (a backward step re-anchors above), and the origin IS the
+        // session's first video frame.
+        src_ts.saturating_sub(origin)
     }
 
     /// Process an audio frame from xiu's FrameData::Audio.
     ///
-    /// `timestamp` is the xiu-forwarded RTMP timestamp (in milliseconds).
-    /// Audio is stamped on the SAME 0-based per-session epoch as video
-    /// (`audio_out = xiu_ts - audio_session_origin_xiu`) — unlike video, which
-    /// derives its session ts from wall-clock to fix #135 cache drift. Audio
-    /// keeps the xiu inter-tag DELTAS (AAC cadence: 1024 samples => 21.3 ms at
-    /// 48 kHz, 23.2 ms at 44.1 kHz, drift-free) and only removes the constant
-    /// per-session offset. This preserves the #142 chipmunk fix (no wall-clock
-    /// jitter in PTS, no resampling artefacts) while keeping audio aligned with
-    /// video across an OBS mid-stream republish (#255) — both restart at 0 on
-    /// each new session.
+    /// `timestamp` is the publisher's SOURCE ts (xiu forwards the RTMP ts).
+    /// Audio is stamped `timestamp - session_origin`: the SAME shared origin
+    /// as video, which is the source ts of the session's first keyframe
+    /// (#367). The xiu inter-tag deltas (AAC cadence: 1024 samples, 21.3 ms
+    /// at 48 kHz) are untouched, so the #142 chipmunk fix holds: no wall-clock
+    /// jitter in PTS, no resampling artefacts.
     ///
-    /// Internally, this function writes the re-based timestamp into the FLV tag
-    /// only — it must NOT touch `chunk_last_ts`, which is an accounting
-    /// field owned by `write_video` for tracking wall-clock chunk duration.
-    /// Mixing the two domains causes `duration_ms` to underflow and produce
-    /// 0 for every chunk (#146, regression introduced by PR #144).
+    /// Audio never touches `chunk_last_ts`. That field is owned by
+    /// `write_video` (VIDEO-only chunk-duration accounting, #146).
     pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
 
-        let pending = {
+        let reanchored = {
             let mut inner = self.inner.lock().await;
 
             // Always save sequence headers (even in null mode, for state tracking)
@@ -421,57 +413,40 @@ impl FlvChunkSink {
                 return;
             }
 
-            // Only write audio if a chunk has been started (by a video keyframe)
-            if inner.chunk_start.is_none() {
-                return;
-            }
+            // #367: a backward audio source jump re-anchors BOTH tracks (never
+            // the old per-track audio self-heal, which re-zeroed audio alone
+            // while video kept counting).
+            let prev = inner.last_audio_src;
+            let reanchored = Self::reanchor_if_backward(&mut inner, "audio", prev, timestamp);
+            inner.last_audio_src = Some(timestamp);
 
-            // Defensive self-heal (#255): if the incoming xiu ts jumps backward
-            // vs the last audio ts we saw, an OBS republish happened without a
-            // start_new_session() re-anchor reaching us. Re-capture the audio
-            // origin so audio re-zeroes with the (also-restarting) video epoch
-            // instead of baking the dead-air gap into the A/V skew. Mirrors the
-            // pusher-side guard (pusher.rs).
-            if let Some(prev) = inner.last_audio_xiu_ts {
-                if timestamp < prev {
-                    let old_origin = inner.audio_session_origin_xiu;
-                    inner.audio_session_origin_xiu = Some(timestamp);
-                    tracing::warn!(
-                        prev_xiu_ts = prev,
-                        new_xiu_ts = timestamp,
-                        old_origin = ?old_origin,
-                        "flv_chunker: AUDIO xiu ts jumped backward -- self-healing audio session origin to new ts (#255)"
+            // Audio is written only inside a chunk, i.e. once the session's
+            // first keyframe has anchored the shared origin.
+            match (inner.chunk_start, inner.session_origin_src) {
+                (Some(_), Some(origin)) if timestamp >= origin => {
+                    let audio_out = timestamp - origin;
+                    Self::write_tag(&mut inner, FLV_TAG_AUDIO, audio_out, data);
+                    // Observe the SAME ts the pusher's SkewTracker sees
+                    // downstream, so ingest and VPS skew agree (#354).
+                    inner.skew_monitor.observe_audio(audio_out);
+                }
+                (Some(_), Some(origin)) => {
+                    // Content earlier than the session's first keyframe has
+                    // no place on the session timeline -- same as audio that
+                    // arrives before the first keyframe.
+                    debug!(
+                        src_ts = timestamp,
+                        session_origin_src = origin,
+                        "flv_chunker: dropping audio that precedes the session origin keyframe"
                     );
                 }
+                _ => {}
             }
-            inner.last_audio_xiu_ts = Some(timestamp);
-
-            // Capture the per-session audio origin on the first real audio tag
-            // of the session (set to None by new()/start_new_session()).
-            let origin = *inner.audio_session_origin_xiu.get_or_insert(timestamp);
-
-            // Re-base audio onto the shared 0-based session epoch:
-            //   audio_out = xiu_ts - origin
-            // Video already restarts at 0 each session via current_session_ts,
-            // so both tracks share one 0-based epoch and stay aligned across an
-            // OBS republish (#255). This PRESERVES the #142 chipmunk fix: only
-            // the constant per-session offset is removed, the inter-tag deltas
-            // (xiu AAC cadence) are untouched, so PTS still carries correct
-            // sample timing (no wall-clock jitter, no resampling artefacts).
-            //
-            // chunk_last_ts is owned by write_video (wall-clock span for
-            // chunk-duration accounting) and MUST NOT be touched here — mixing
-            // the domains underflows duration_ms (#146).
-            let audio_out = timestamp.saturating_sub(origin);
-            Self::write_tag(&mut inner, FLV_TAG_AUDIO, audio_out, data);
-            // Observe the SAME rebased audio ts the pusher's SkewTracker sees
-            // downstream, so ingest and VPS skew agree on the number (#354).
-            inner.skew_monitor.observe_audio(audio_out);
-            None
+            reanchored
         };
 
-        if let Some(pending) = pending {
-            self.spawn_write(pending);
+        if let Some(r) = reanchored {
+            self.finish_reanchor(r).await;
         }
     }
 
@@ -497,15 +472,11 @@ impl FlvChunkSink {
         }
     }
 
-    /// Start a new ingest session at an OBS mid-stream republish boundary.
+    /// Start a new ingest session at a (re)publish / re-subscribe boundary.
     ///
-    /// Flushes the partial chunk FIRST, then re-zeros the shared per-session
-    /// epoch for BOTH tracks so the next session restarts video and audio at a
-    /// common 0 — fixing the ~25.5s A/V skew that was baked into the chunk bytes
-    /// after each OBS restart at live event 9315 (#255). Video re-zeroes via
-    /// `session_start_wall_clock_ms = 0` (next `current_session_ts` returns 0);
-    /// audio re-zeroes via `audio_session_origin_xiu = None` (next audio tag
-    /// captures the new origin).
+    /// Flushes the partial chunk FIRST, then clears the shared session origin
+    /// so the next keyframe re-anchors BOTH tracks onto a new common origin
+    /// (#255, #367).
     ///
     /// Deliberately does NOT clear `chunk_index` (chunk numbering must stay
     /// monotonic across republishes) or the saved `video_sequence_header` /
@@ -513,60 +484,105 @@ impl FlvChunkSink {
     /// playable). This is distinct from `reset()`, which is the full-disconnect
     /// teardown.
     pub async fn start_new_session(&self) {
-        // Flush the partial chunk on the OLD epoch before re-anchoring.
+        // Flush the partial chunk on the OLD session before re-anchoring.
         self.flush().await;
 
         let mut inner = self.inner.lock().await;
-        let old_anchor = inner.session_start_wall_clock_ms;
-        let old_audio_origin = inner.audio_session_origin_xiu;
-        // Re-zero the per-session epoch fields for both domains. Keep
-        // chunk_index and the saved sequence headers.
+        let old_origin = inner.session_origin_src;
+        Self::clear_session_epoch(&mut inner);
+        info!(
+            chunk_index = inner.chunk_index,
+            old_session_origin_src = ?old_origin,
+            "flv_chunker: start_new_session -- cleared the shared session origin; the next \
+             keyframe re-anchors audio+video together (#255, #367)"
+        );
+        drop(inner);
+        self.clear_ingest_surface();
+    }
+
+    /// Reset the chunker state.
+    ///
+    /// Discards the buffered partial chunk and clears the session origin so
+    /// timestamps restart from 0 on the next keyframe. Call this on RTMP
+    /// disconnect or when a new streaming session begins.
+    pub async fn reset(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.buffer.clear();
+        Self::clear_session_epoch(&mut inner);
+        drop(inner);
+        self.clear_ingest_surface();
+    }
+
+    /// Re-zero the per-session time state: the shared source origin, the
+    /// last source ts of BOTH tracks and the skew monitor. Keeps
+    /// `chunk_index` and the saved sequence headers.
+    fn clear_session_epoch(inner: &mut FlvChunkSinkInner) {
         inner.chunk_start = None;
         inner.chunk_first_ts = 0;
         inner.chunk_last_ts = 0;
         inner.chunk_first_wall_clock_ms = 0;
-        inner.session_start_wall_clock_ms = 0;
-        inner.last_session_ts = 0;
-        inner.audio_session_origin_xiu = None;
-        inner.last_audio_xiu_ts = None;
-        // #354: re-anchor the ingest skew monitor too — a republish is a new
-        // common origin, and the operator banner must clear on it.
+        inner.session_origin_src = None;
+        inner.last_video_src = None;
+        inner.last_audio_src = None;
+        // #354: a new session is a new common origin, and the operator banner
+        // must clear on it.
         inner.skew_monitor.reset();
-        info!(
-            chunk_index = inner.chunk_index,
-            old_video_anchor_ms = old_anchor,
-            old_audio_origin_xiu = ?old_audio_origin,
-            "flv_chunker: start_new_session -- re-anchored audio+video to a shared 0 epoch on republish (#255)"
-        );
-        drop(inner);
+    }
+
+    /// Clear the operator-facing ingest skew surface after a session
+    /// re-anchor (the skew monitor was reset with it).
+    fn clear_ingest_surface(&self) {
         if let Some(state) = &self.ingest_state {
             state.set_ingest_skew_active(false);
             state.set_ingest_skew_ms(0);
         }
     }
 
-    /// Reset the chunker state.
-    ///
-    /// Resets the session wall-clock anchor so timestamps restart from 0
-    /// on the next incoming frame. Call this on RTMP disconnect or when a
-    /// new streaming session begins.
-    pub async fn reset(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.buffer.clear();
-        inner.chunk_start = None;
-        inner.chunk_first_ts = 0;
-        inner.chunk_last_ts = 0;
-        inner.chunk_first_wall_clock_ms = 0;
-        inner.session_start_wall_clock_ms = 0;
-        inner.last_session_ts = 0;
-        inner.audio_session_origin_xiu = None;
-        inner.last_audio_xiu_ts = None;
-        // #354: full disconnect teardown clears the skew monitor + latch too.
-        inner.skew_monitor.reset();
-        drop(inner);
-        if let Some(state) = &self.ingest_state {
-            state.set_ingest_skew_active(false);
-            state.set_ingest_skew_ms(0);
+    /// #367: if `src_ts` went backward on a track, re-anchor the session for
+    /// BOTH tracks: extract the partial chunk (it belongs to the old
+    /// publisher) and clear the session epoch. The caller finishes the
+    /// re-anchor outside the lock with [`Self::finish_reanchor`].
+    fn reanchor_if_backward(
+        inner: &mut FlvChunkSinkInner,
+        track: &'static str,
+        prev_src_ts: Option<u32>,
+        src_ts: u32,
+    ) -> Option<Reanchored> {
+        let prev = prev_src_ts?;
+        if src_ts >= prev {
+            return None;
+        }
+        let flushed = Self::extract_chunk(inner);
+        let old_origin = inner.session_origin_src;
+        Self::clear_session_epoch(inner);
+        tracing::warn!(
+            track,
+            prev_src_ts = prev,
+            new_src_ts = src_ts,
+            old_session_origin_src = ?old_origin,
+            chunk_index = inner.chunk_index,
+            flushed_partial_chunk = flushed.is_some(),
+            "flv_chunker: source ts jumped backward -- a new publisher on the same identifier; \
+             re-anchoring BOTH tracks on a new shared session origin (#367)"
+        );
+        Some(Reanchored { flushed })
+    }
+
+    /// Outside-the-lock half of a backward-jump re-anchor: write the old
+    /// session's partial chunk and clear the ingest skew surface.
+    async fn finish_reanchor(&self, r: Reanchored) {
+        if let Some(pending) = r.flushed {
+            self.commit_chunk(pending).await;
+        }
+        self.clear_ingest_surface();
+    }
+
+    /// Hand an extracted chunk to the background writer, and commit the
+    /// `chunk_index` advance only once the write was accepted.
+    async fn commit_chunk(&self, pending: PendingChunkWrite) {
+        if self.spawn_write(pending) {
+            let mut inner = self.inner.lock().await;
+            inner.chunk_index += 1;
         }
     }
 
@@ -577,9 +593,10 @@ impl FlvChunkSink {
     }
 
     /// Write FLV file header + sequence headers at the start of a new chunk.
-    /// `timestamp` is the RTMP timestamp of the first frame — used for content duration tracking.
+    /// `timestamp` is the output ts (session source domain) of the chunk's
+    /// first video frame — used for content duration tracking.
     /// Note: `chunk_start` (Instant) is for wall-clock flush timing decisions,
-    /// while `chunk_first_ts`/`chunk_last_ts` track RTMP content duration.
+    /// while `chunk_first_ts`/`chunk_last_ts` track the VIDEO content span.
     fn write_chunk_header(inner: &mut FlvChunkSinkInner, timestamp: u32) {
         // FLV file header (9 bytes)
         inner.buffer.extend_from_slice(&FLV_HEADER);
@@ -643,7 +660,9 @@ impl FlvChunkSink {
 
         let index = inner.chunk_index;
 
-        // Diagnostic logging for drift analysis (#135).
+        // Diagnostic logging for drift analysis (#135). Since #367 the tag
+        // span is the VIDEO span in the publisher's source-ts domain, so
+        // tag_span_ms vs wall_span_ms measures the src-vs-wall rate again.
         {
             let now_ms = inner.clock.now_ms();
             let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);

@@ -71,10 +71,11 @@ pub struct SkewTransition {
 /// (`observe_video`/`observe_audio`), advances the tracker at each chunk
 /// boundary, reads its baseline-relative `last_skew_ms()`, and applies an
 /// operator threshold with a `SKEW_DEBOUNCE_CHUNKS` sustain-latch. Because it
-/// uses the tracker's baseline-relative deviation, a benign CONSTANT startup
-/// domain gap (audio xiu-ts vs video wall-clock have different absolute zero
-/// points) folds into the baseline and never trips — only a desync that
-/// APPEARS/GROWS mid-stream does (the incident signature; #257 guard reused).
+/// uses the tracker's baseline-relative deviation, a CONSTANT offset present
+/// from the first chunk folds into the baseline and never trips — only a
+/// desync that APPEARS/GROWS mid-stream does (the incident signature; #257
+/// guard reused). Since #367 both tracks share one source-ts transform, and
+/// the absolute (no-baseline) check is the chunker's A/V invariant guard.
 pub struct IngestSkewMonitor {
     tracker: SkewTracker,
     /// Operator alert threshold (ms). Deliberately BELOW the pusher's
