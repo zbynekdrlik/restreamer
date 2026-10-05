@@ -92,6 +92,12 @@ pub enum Action {
     VpsReady,
     VpsDeleted,
     VpsUnreachable,
+    /// Host-side (#367 review): the delivery health monitor reached the VPS
+    /// again after `VpsUnreachable` failures. Info severity. Detail carries
+    /// `{recovered_after_failures}`. Outage-alert recovery, pairs with
+    /// `VpsUnreachable` (before it the VPS-reachability episode only ended on
+    /// a host internet recovery or a delivery boundary).
+    VpsReachable,
     /// Host-side (#352): the runtime orphan reaper found a Hetzner VPS labelled
     /// for THIS install (`app=restreamer,client_uuid=<this>`) with no live
     /// `delivery_instances` row — a server that is billing but invisible to the
@@ -711,6 +717,14 @@ mod tests {
         let a = Action::DeliveryLogLost;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"delivery_log_lost\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_vps_reachable_serdes() {
+        let a = Action::VpsReachable;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"vps_reachable\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 
