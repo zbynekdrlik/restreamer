@@ -200,7 +200,7 @@ writes locally is invisible to camera-box's dev1 gate (a false guard; never ship
 a stream-box-local lockdir).
 
 **Solution shipped (#349):** camera-box exposes its lockdir READ-ONLY over HTTP
-(`GET http://10.77.9.103:8890/rig-lease.json`, their #1277); restreamer POLLS it
+(`GET http://dev1:8890/rig-lease.json`, their #1277 — address dev1 by its LAN hostname `dev1`: the IP drifts on DHCP (.103 -> .109 by 2026-10-05, and the stale default silently never waited because the script is fail-open), tailscale 100.104.8.125 times out from stream.lan, and `dev1.lan` does not resolve); restreamer POLLS it
 in `scripts/ci/rig-lease-wait.ps1` before starting OBS streaming and WRITES
 NOTHING (our OBS streaming IS the lease in their direction). Semantics: held &&
 !stale → wait bounded `min(ttl_s+grace, 60min)`; stale → proceed (reclaimable);

@@ -29,7 +29,7 @@
 # fallible call (the HTTP GET) is wrapped in its own try/catch that proceeds
 # fail-open, and we must never let an unexpected terminating error fail the job.
 
-$Url          = if ($env:RIG_LEASE_URL) { $env:RIG_LEASE_URL } else { "http://10.77.9.103:8890/rig-lease.json" }
+$Url          = if ($env:RIG_LEASE_URL) { $env:RIG_LEASE_URL } else { "http://dev1:8890/rig-lease.json" }
 # -as [int] yields $null (never throws) on a null/blank/non-numeric override.
 $BudgetS      = $env:RIG_LEASE_BUDGET_S       -as [int]   # 60 min default (camera-box E2E ~75 min, ttl_s guides the real wait)
 $GraceS       = $env:RIG_LEASE_GRACE_S        -as [int]
