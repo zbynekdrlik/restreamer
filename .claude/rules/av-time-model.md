@@ -6,7 +6,10 @@ paths:
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/media_receiver_tests.rs"
   - "crates/rs-inpoint/src/ingest_report.rs"
+  - "crates/rs-inpoint/src/src_track.rs"
   - "crates/rs-rtmp-push/src/pusher.rs"
+  - "crates/rs-rtmp-push/src/pusher_tests.rs"
+  - "crates/rs-rtmp-push/tests/av_*.rs"
   - "crates/rs-rtmp-push/src/state.rs"
   - "crates/rs-rtmp-push/src/av_invariant.rs"
   - "crates/rs-rtmp-push/src/skew.rs"
@@ -28,27 +31,52 @@ baseline-relative, so none of them saw it.
 
 ## The stages
 
-- **Chunker (`flv_chunker.rs`):** `out = src_ts - session_origin` for both
-  tracks. `session_origin` is the source ts of the session's first video
-  keyframe; on a GOP replay that is the cached keyframe. Audio before the
-  origin is dropped. `chunk_first_ts`/`chunk_last_ts`/`duration_ms` come from
-  VIDEO tags only (#146). A backward source jump on EITHER track re-anchors
-  BOTH tracks (flush, then clear the origin AND both `last_*_src` trackers;
-  otherwise the other track trips a second re-anchor). Never write a per-track
-  self-heal again.
+- **Chunker (`flv_chunker.rs` + `src_track.rs`):** `out = src_ts -
+  session_origin` for both tracks. `session_origin` is the source ts of the
+  session's first video keyframe; on a GOP replay that is the cached
+  keyframe. Audio before the origin is dropped.
+  `chunk_first_ts`/`chunk_last_ts`/`duration_ms` come from VIDEO tags only
+  (#146). Each track's last two source ts classify a new one (`SrcStep`):
+  - a REAL backward jump (a new publisher) re-anchors BOTH tracks: flush,
+    then clear the origin AND both histories, otherwise the other track
+    trips a second re-anchor;
+  - a backward step <= 1000 ms is jitter: clamped to the track's last ts;
+  - a lone forward glitch > 30 s, recognised by its successor walking back,
+    is dropped from the history.
+
+  A re-anchor costs a flush plus a drop until the next keyframe, so one odd
+  timestamp must never cause one. Never write a per-track self-heal again.
 - **Receiver (`media_receiver.rs`):** one `select!` loop (`biased`, hub events
-  first). A Publish at ANY phase supersedes the subscription, calls
-  `start_new_session` and subscribes immediately. A successful re-subscribe
-  after frames flowed (`dirty`) also re-anchors, because xiu has no session id.
-  streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
-  `Lagged` is survived; `Closed` returns `Err`. Unsubscribe every dropped
-  subscription (xiu keeps dead senders and logs per frame).
+  first; the inner frame/reply waits are biased too, so a frame ready after a
+  freeze beats an expired stall timer).
+  - A Publish of the SAME stream at ANY phase supersedes the subscription,
+    calls `start_new_session` and subscribes immediately. A DIFFERENT stream
+    supersedes only a session that is not Streaming; otherwise it waits in
+    `pending_publish` until the live one ends. Never orphan a live publisher.
+  - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
+    because xiu has no session id.
+  - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
+  - `Lagged` is survived. While Idle it probes `last_identifier` (a probe
+    Subscribe: accept starts the session; reject stays idle with no
+    "connected" flag).
+  - A `Closed` hub channel and a StreamsHub exit both return `Err`, so the
+    orchestrator restarts.
+  - Unsubscribe every dropped subscription (xiu keeps dead senders and logs
+    per frame).
 - **Pusher (`pusher.rs` / `state.rs`):** ONE `origin_ts` + ONE `base_ms` for
-  both tracks (`PusherState::wire_ts`). A new mapping (connect / re-anchor)
-  sets base = max(last outputs) + 1 and re-pins the origin to the MIN of the
-  chunk's remaining media tags (`media_pin_suffix`, sequence headers
-  excluded). The origin is per MAPPING, never per chunk; a per-chunk rebase
-  is the #103 click.
+  both tracks (`PusherState::wire_ts`, used in `map_media_tag`). The origin is
+  per MAPPING, never per chunk; a per-chunk rebase is the #103 click.
+  - A new mapping (connect / re-anchor) sets base = max(last outputs) + 1.
+    Outputs advance PER TAG (#124), so a mid-chunk re-anchor never goes
+    backward.
+  - It re-pins the origin with `robust_pin`: the min remaining media ts
+    within `MAX_TAG_TS_JUMP_MS` of the LOCAL median (the next 9 media tags).
+    A plain minimum lets one corrupt ts shift the whole chunk.
+  - One shared origin makes a single bad ts dangerous, so `track_input_ts`
+    clamps outliers to the track's last wire ts + 1 instead of pinning or
+    re-anchoring:
+    - a jumped tag the rest of the chunk does not follow;
+    - a head tag of a new mapping that its neighbourhood disagrees with.
 
 ## The guards — two kinds, both kept
 
