@@ -185,6 +185,167 @@ fn av_invariant_violation_alerts_then_restored_rearms() {
     );
 }
 
+// ---- #367 ROZHODNUTE item 1: episodes keyed by (family, stage, endpoint) ----
+// One global episode let endpoint A's recovery clear the alert while
+// endpoint B was still violated, and B's edge-triggered guard never
+// re-alerted: a false all-clear. Each (family, stage, endpoint) now alerts
+// and recovers on its own.
+
+/// The exact ROZHODNUTE scenario: A violated, B violated, A restored. B is
+/// still in its own alert episode, and B's later restore emits its own
+/// "restored".
+#[test]
+fn av_invariant_episodes_are_keyed_per_endpoint() {
+    let mut n = notifier();
+    let a_violated = row_av(Action::AvInvariantViolated, "push", Some("YT A"));
+    let a_restored = row_av(Action::AvInvariantRestored, "push", Some("YT A"));
+    let b_violated = row_av(Action::AvInvariantViolated, "push", Some("FB B"));
+    let b_restored = row_av(Action::AvInvariantRestored, "push", Some("FB B"));
+
+    assert!(n.observe(&a_violated, None).is_some(), "A violated alerts");
+    let b_alert = n
+        .observe(&b_violated, None)
+        .expect("B violated alerts on its own, not deduped by A's episode");
+    assert!(b_alert.content.contains("FB B"), "{}", b_alert.content);
+    assert!(n.observe(&a_restored, None).is_some(), "A restored alerts");
+    assert!(
+        n.observe(&b_violated, None).is_none(),
+        "A's restore must not end B's episode: B's repeat stays deduped"
+    );
+    let b_restored_alert = n
+        .observe(&b_restored, None)
+        .expect("B's own restore emits its own restored");
+    assert!(
+        b_restored_alert.content.contains("FB B"),
+        "{}",
+        b_restored_alert.content
+    );
+    assert!(
+        n.observe(&b_restored, None).is_none(),
+        "no second restored once B's episode is closed"
+    );
+    assert!(
+        n.observe(&a_violated, None).is_some(),
+        "A's restore re-armed A"
+    );
+}
+
+/// The ingest stage (no endpoint) and a push endpoint are separate
+/// episodes of the same family.
+#[test]
+fn av_invariant_ingest_and_push_episodes_are_independent() {
+    let mut n = notifier();
+    let ingest_violated = row_av(Action::AvInvariantViolated, "ingest", None);
+    let ingest_restored = row_av(Action::AvInvariantRestored, "ingest", None);
+    let push_violated = row_av(Action::AvInvariantViolated, "push", Some("YT A"));
+    let push_restored = row_av(Action::AvInvariantRestored, "push", Some("YT A"));
+
+    assert!(n.observe(&ingest_violated, None).is_some());
+    assert!(
+        n.observe(&push_violated, None).is_some(),
+        "a push violation is its own episode, not a repeat of the ingest one"
+    );
+    assert!(n.observe(&ingest_restored, None).is_some());
+    assert!(
+        n.observe(&push_violated, None).is_none(),
+        "the ingest restore must not end the push episode"
+    );
+    assert!(n.observe(&push_restored, None).is_some());
+}
+
+/// The same contract for the rescue family: each endpoint enters and leaves
+/// rescue on its own.
+#[test]
+fn rescue_episodes_are_keyed_per_endpoint() {
+    let mut n = notifier();
+    let a_on = row_ep(Action::RescueActivated, "YT A");
+    let b_on = row_ep(Action::RescueActivated, "FB B");
+    let a_off = row_ep(Action::RescueRecovered, "YT A");
+    let b_off = row_ep(Action::RescueRecovered, "FB B");
+
+    assert!(n.observe(&a_on, None).is_some());
+    assert!(
+        n.observe(&b_on, None).is_some(),
+        "B entering rescue alerts on its own"
+    );
+    assert!(n.observe(&a_off, None).is_some());
+    assert!(
+        n.observe(&b_on, None).is_none(),
+        "A's recovery must not end B's rescue episode"
+    );
+    assert!(
+        n.observe(&b_off, None).is_some(),
+        "B's own recovery emits its own recovered"
+    );
+    assert!(
+        n.observe(&a_off, None).is_none(),
+        "A's episode is already closed"
+    );
+}
+
+/// A recovery ends only its OWN family's episode.
+#[test]
+fn a_recovery_ends_only_its_own_family() {
+    let mut n = notifier();
+    let rescue_on = row_ep(Action::RescueActivated, "YT A");
+    let rescue_off = row_ep(Action::RescueRecovered, "YT A");
+    let av_violated = row_av(Action::AvInvariantViolated, "push", Some("YT A"));
+    let av_restored = row_av(Action::AvInvariantRestored, "push", Some("YT A"));
+
+    assert!(n.observe(&rescue_on, None).is_some());
+    assert!(n.observe(&av_violated, None).is_some());
+    assert!(n.observe(&row(Action::IngestSkewDetected), None).is_some());
+    assert!(n.observe(&row(Action::IngestSkewRecovered), None).is_some());
+    assert!(
+        n.observe(&rescue_on, None).is_none(),
+        "an ingest-skew recovery must not end the rescue episode"
+    );
+    assert!(
+        n.observe(&av_violated, None).is_none(),
+        "an ingest-skew recovery must not end the A/V invariant episode"
+    );
+    assert!(n.observe(&rescue_off, None).is_some());
+    assert!(
+        n.observe(&av_violated, None).is_none(),
+        "a rescue recovery must not end the A/V invariant episode"
+    );
+    assert!(n.observe(&av_restored, None).is_some());
+}
+
+/// The host-level connectivity onsets (internet egress, S3 upload, VPS
+/// reachability) share ONE episode that `HostInternetRecovered` ends; a
+/// per-endpoint rescue recovery does not end it.
+#[test]
+fn host_connectivity_episode_is_ended_only_by_internet_recovery() {
+    let mut n = notifier();
+    assert!(
+        n.observe(&row(Action::HostInternetUnreachable), None)
+            .is_some()
+    );
+    assert!(n.observe(&row(Action::VpsUnreachable), None).is_some());
+    assert!(
+        n.observe(&row_ep(Action::RescueActivated, "YT A"), None)
+            .is_some()
+    );
+    assert!(
+        n.observe(&row_ep(Action::RescueRecovered, "YT A"), None)
+            .is_some()
+    );
+    assert!(
+        n.observe(&row(Action::HostInternetUnreachable), None)
+            .is_none(),
+        "a rescue recovery must not end the host-connectivity episode"
+    );
+    assert!(
+        n.observe(&row(Action::HostInternetRecovered), None)
+            .is_some()
+    );
+    assert!(
+        n.observe(&row(Action::VpsUnreachable), None).is_some(),
+        "the internet recovery ended the whole host-connectivity episode"
+    );
+}
+
 #[test]
 fn first_onset_alerts_then_dedups_within_episode() {
     let mut n = notifier();
