@@ -78,8 +78,8 @@ async fn glitched_head_tag_of_a_new_mapping_is_clamped() {
         video.iter().all(|&ts| ts < 10_000),
         "the glitched head tag must not jump the wire: {video:?}"
     );
-    let v = wire_ts(&rec, FLV_VIDEO, 0x0B, 400);
-    let a = wire_ts(&rec, FLV_AUDIO, 0x0B, 400);
+    let v = wire_ts(&rec, FLV_VIDEO, 0x0B, 420);
+    let a = wire_ts(&rec, FLV_AUDIO, 0x0B, 420);
     assert_eq!(v, a, "coincident content stays coincident");
 }
 
