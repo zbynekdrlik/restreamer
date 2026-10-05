@@ -210,6 +210,32 @@ and print `$e.Count`. 0 errors = safe. (Also: `shell: powershell` on GitHub
 prepends `$ErrorActionPreference='stop'`, so a bare cmdlet error IS terminating
 and lands in your `catch`; no native exe means `$LASTEXITCODE` stays unset.)
 
+**Hand-copying a long base64 blob into the MCP command corrupts it.** On #367
+a 10 KB gzip+base64 paste failed its CRC. Let the box FETCH the script
+instead: `python3 ~/devel/airuleset/airuleset.py share --private <file>`, then
+on stream.lan run `Invoke-WebRequest -UseBasicParsing http://dev1:8788/<token>/<file>`
+and compare its sha256 with the local file before parsing.
+- Address dev1 by its hostname `dev1`.
+- The public `share` URL returns 302 to Cloudflare Access, so a machine can't
+  fetch it.
+- A script embedded as a single-quoted here-string (e.g. one passed to
+  `-EncodedCommand`) is NOT parsed with its host, so parse it as a separate
+  part.
+
+**GitHub also APPENDS `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) {
+exit $LASTEXITCODE }` to every `powershell` step.** So the last native exe's
+non-zero exit (e.g. a tolerated ffprobe failure) turns a step that printed
+PASSED into a failure. Reset it on the success path with
+`$global:LASTEXITCODE = 0`.
+
+**A force-cancel (`/force-cancel`) skips `if: always()` steps and `finally`
+blocks.** Any step that leaves the box in a bad state (a suspended process, a
+frozen publisher) needs a recovery that lives outside the runner's process
+tree. The #367 late-join gate creates a dead-man through WMI
+(`Invoke-CimMethod Win32_Process -MethodName Create`, parented to WmiPrvSE).
+It runs without `RUNNER_TRACKING_ID`, so the runner's orphan cleanup leaves
+it alone.
+
 ## Cross-repo rig lease (#349/#830): the two runners are DIFFERENT machines
 
 camera-box's `full-path-e2e` gate runs on `[self-hosted, linux, camera-lan]` =
