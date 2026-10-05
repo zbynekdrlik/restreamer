@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use rs_core::endpoint_lifecycle::{REFUSED_DELIVERY_MODE, UNKNOWN_SERVICE_TYPE_STALL};
 use rs_ffmpeg::ServiceType;
 
 use crate::api::EndpointConfig;
@@ -19,14 +20,11 @@ use crate::audit_ring::AuditRing;
 use crate::endpoint_audit;
 use crate::endpoint_stats::Stats;
 
-/// `stall_reason` of an endpoint that refused to start because its service
-/// type is unknown.
-pub(crate) const UNKNOWN_SERVICE_TYPE_STALL: &str = "unknown_service_type";
-
-/// `delivery_mode` of a refused endpoint. It replaces the seeded "warmup"
-/// so the dashboard never shows a WARMUP badge next to `alive: false`; the
-/// UI renders no badge for it and shows the `stall_reason` instead.
-pub(crate) const REFUSED_DELIVERY_MODE: &str = "refused";
+// `stall_reason` + `delivery_mode` of a refused endpoint come from rs-core,
+// whose `EndpointLifecycle::compute` paints that mode Attention (the
+// operator must fix the endpoint; it never starts by itself). The mode also
+// replaces the seeded "warmup", so the dashboard never shows a WARMUP badge
+// next to `alive: false`.
 
 /// Parse the endpoint's service type, or refuse the start loudly and return
 /// `None` (the caller returns without fetching or pushing anything).

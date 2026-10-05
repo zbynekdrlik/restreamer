@@ -32,6 +32,14 @@ pub enum EndpointLifecycle {
 /// and `rs-delivery` already depends on `rs-core`.
 pub const DEAD_TARGET_STALL_PREFIX: &str = "DEAD_TARGET: ";
 
+/// `delivery_mode` of an endpoint the VPS REFUSED to start (#192: an unknown
+/// service type). Written by `rs-delivery`'s `endpoint_start`; it never
+/// starts on its own, so `compute` paints it Attention.
+pub const REFUSED_DELIVERY_MODE: &str = "refused";
+
+/// `stall_reason` of an endpoint refused for an unknown service type (#192).
+pub const UNKNOWN_SERVICE_TYPE_STALL: &str = "unknown_service_type";
+
 /// True when `reason` carries the #236 dead-target marker.
 fn stall_reason_is_dead_target(reason: Option<&str>) -> bool {
     reason
@@ -75,6 +83,9 @@ impl EndpointLifecycle {
             return EndpointLifecycle::Attention;
         }
         match i.delivery_mode.as_deref() {
+            // #192: refused at start (unknown service type) -- it will never
+            // start by itself, the operator must fix the endpoint.
+            Some(REFUSED_DELIVERY_MODE) => return EndpointLifecycle::Attention,
             Some("rescue") => return EndpointLifecycle::Rescue,
             Some("recovering") | Some("warmup") => return EndpointLifecycle::Recovering,
             _ => {}
