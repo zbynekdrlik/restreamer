@@ -842,4 +842,58 @@ mod tests {
         );
         assert_eq!(p.av_invariant_violation_count(), 1);
     }
+
+    // --- track_input_ts (#367 outlier vs new timeline) ---
+
+    fn pusher_at(prev_audio: u32, prev_video: u32) -> RtmpPusher {
+        let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+        p.state.last_audio_xiu_ts = Some(prev_audio);
+        p.state.last_video_xiu_ts = Some(prev_video);
+        p.state.origin_ts = Some(0);
+        p
+    }
+
+    /// A single BACKWARD-glitched tag the rest of the chunk does not follow
+    /// is clamped: no re-anchor, the mapping and the trackers stay put.
+    #[test]
+    fn isolated_backward_outlier_keeps_the_mapping() {
+        let mut p = pusher_at(600_000, 600_010);
+        let outlier = p.track_input_ts(Track::Video, 5, 5, Some(600_020));
+        assert!(outlier);
+        assert_eq!(p.regression_reanchor_count(), 0);
+        assert_eq!(p.state.origin_ts, Some(0), "mapping unchanged");
+        assert_eq!(
+            p.state.last_video_xiu_ts,
+            Some(600_010),
+            "the tracker keeps the previous ts so the next normal tag is no jump"
+        );
+    }
+
+    /// A backward step the rest of the chunk FOLLOWS is a new timeline (new
+    /// chunker session): re-anchor both tracks onto a new mapping.
+    #[test]
+    fn followed_backward_step_starts_a_new_mapping() {
+        let mut p = pusher_at(600_000, 600_010);
+        let outlier = p.track_input_ts(Track::Video, 0, 0, Some(20));
+        assert!(!outlier);
+        assert_eq!(p.regression_reanchor_count(), 1);
+        assert!(
+            p.state.origin_ts.is_none(),
+            "the next tag re-pins the origin"
+        );
+        assert_eq!(p.state.last_video_xiu_ts, Some(0));
+        assert!(
+            p.state.last_audio_xiu_ts.is_none(),
+            "the other track's tracker clears with the new mapping"
+        );
+    }
+
+    /// An anomalous LAST media tag of a chunk (nothing after it to compare)
+    /// re-anchors, as before #367.
+    #[test]
+    fn anomalous_last_tag_reanchors() {
+        let mut p = pusher_at(1_000, 1_000);
+        assert!(!p.track_input_ts(Track::Audio, 900_000, 900_000, None));
+        assert_eq!(p.regression_reanchor_count(), 1);
+    }
 }
