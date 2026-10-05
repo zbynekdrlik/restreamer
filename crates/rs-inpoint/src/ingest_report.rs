@@ -98,23 +98,36 @@ pub(crate) fn publish_reanchor(state: Option<&InpointState>, invariant: Option<A
 /// One invariant-guard edge as its audit row, logged loudly on the way: the
 /// log line and the row come from the same decision.
 fn invariant_edge(ev: &AvInvariantEvent) -> (Severity, Action, serde_json::Value) {
-    let row = match ev {
-        AvInvariantEvent::Violated(v) => av_invariant_violated_row(
-            "ingest",
-            v.a_rel_ms,
-            v.v_rel_ms,
-            v.delta_ms,
-            AV_INVARIANT_TOLERANCE_MS,
-        ),
-        AvInvariantEvent::Restored { delta_ms } => av_invariant_restored_row("ingest", *delta_ms),
-    };
-    tracing::warn!(
-        action = ?row.1,
-        detail = %row.2,
-        "flv_chunker: A/V invariant edge -- a violation means the chunk A/V relation differs \
-         from the publisher's source relation (#367)"
-    );
-    row
+    // Same level + wording as the push side (`RtmpPusher::evaluate_av_invariant`)
+    // so both stages grep alike.
+    match ev {
+        AvInvariantEvent::Violated(v) => {
+            tracing::warn!(
+                stage = "ingest",
+                a_rel_ms = v.a_rel_ms,
+                v_rel_ms = v.v_rel_ms,
+                delta_ms = v.delta_ms,
+                tolerance_ms = AV_INVARIANT_TOLERANCE_MS,
+                "flv_chunker: A/V INVARIANT VIOLATED -- the chunk A/V relation differs from the \
+                 publisher's source relation (#367)"
+            );
+            av_invariant_violated_row(
+                "ingest",
+                v.a_rel_ms,
+                v.v_rel_ms,
+                v.delta_ms,
+                AV_INVARIANT_TOLERANCE_MS,
+            )
+        }
+        AvInvariantEvent::Restored { delta_ms } => {
+            tracing::info!(
+                stage = "ingest",
+                delta_ms,
+                "flv_chunker: A/V invariant restored (#367)"
+            );
+            av_invariant_restored_row("ingest", *delta_ms)
+        }
+    }
 }
 
 /// One audit row per skew-monitor edge. Uses the paired

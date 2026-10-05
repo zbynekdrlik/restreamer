@@ -56,7 +56,10 @@ pub(crate) enum SrcStep {
     /// timeline from before it.
     AfterGlitch { glitch: u32 },
     /// A far backward step from `prev`: a new publisher on the identifier,
-    /// or a lone low glitch. Recorded, it starts a new timeline.
+    /// or a lone low glitch. The chunker never records it: it holds the tag,
+    /// and records `Continue` (after the re-anchor cleared the history) or
+    /// `ClampTiny` once the next tag decided. `record` treats it as the
+    /// start of a new timeline.
     FarBackward { prev: u32 },
 }
 
