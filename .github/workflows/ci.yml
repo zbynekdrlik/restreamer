@@ -1196,6 +1196,75 @@ jobs:
           fi
           echo "OK: coverage pins rustc 1.98.0 and an exact cargo-tarpaulin version."
 
+      - name: "Verify the late-join gate's log markers and resume safety (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          RX="crates/rs-inpoint/src/media_receiver.rs"
+          # The late-join gate in e2e-streaming-test finds the inpoint stall,
+          # the publish and the subscribe in restreamer.log by literal text, and
+          # it suspends Restreamer.exe for 35 s. Guard both halves here, a
+          # minute into CI instead of a "no stall line" failure after a deploy:
+          # (1) the gate's $stallMarker equals STALL_LOG_MARKER, the stall log
+          #     call uses that const, and the other two markers still exist in
+          #     the receiver and in the gate;
+          # (2) Restreamer is resumed on every exit path: in the gate's finally
+          #     block, and by an if: always() step reading the same PID marker;
+          # (3) the gate never touches OBS (ffmpeg publisher only).
+          # Both sed ranges are anchored on whole 6-space step-name lines of a
+          # job that lies after test-integrity, so they never open on this
+          # guard's own lines (#325).
+          GATE=$(sed -n '/^      - name: GATE late-join republish keeps chunk A\/V aligned (#367)$/,/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/p' "$WORKFLOW_FILE")
+          SAFETY=$(sed -n '/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/,/^      - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget$/p' "$WORKFLOW_FILE")
+          if [ -z "$GATE" ] || [ -z "$SAFETY" ]; then
+            echo "ERROR: the late-join gate must be followed directly by the step 'Resume Restreamer if the late-join gate left it suspended (#367)' (#367)."
+            exit 1
+          fi
+          MARKER=$(sed -nE 's/^const STALL_LOG_MARKER: &str = "([^"]+)";$/\1/p' "$RX")
+          if [ -z "$MARKER" ] || [ "$(grep -c '^const STALL_LOG_MARKER: ' "$RX")" -ne 1 ]; then
+            echo "ERROR: $RX must define exactly one 'const STALL_LOG_MARKER: &str = \"...\";' (#367)."
+            exit 1
+          fi
+          if ! grep -qF '"{STALL_LOG_MARKER}, will re-subscribe"' "$RX"; then
+            echo "ERROR: the stall log call in $RX must log \"{STALL_LOG_MARKER}, will re-subscribe\" (#367)."
+            exit 1
+          fi
+          if ! grep -qF "\$stallMarker = '$MARKER'" <<<"$GATE"; then
+            echo "ERROR: the late-join gate's \$stallMarker must be '$MARKER', STALL_LOG_MARKER in $RX (#367)."
+            exit 1
+          fi
+          for m in 'Stream published: ' 'Subscribed to stream, processing frames' 'NetStream\.Publish\.Start'; do
+            if ! grep -qF "$m" <<<"$GATE"; then
+              echo "ERROR: the late-join gate no longer matches '$m' (#367 self-check anchors moved)."
+              exit 1
+            fi
+          done
+          for m in 'Stream published: ' 'Subscribed to stream, processing frames'; do
+            if ! grep -qF "$m" "$RX"; then
+              echo "ERROR: the late-join gate matches '$m', but $RX no longer logs it (#367)."
+              exit 1
+            fi
+          done
+          FINALLY=$(awk '/^          \} finally \{ *$/{f=1; next} f && /^          \}$/{exit} f' <<<"$GATE")
+          if ! grep -qF 'NtResumeProcess($rsHandle)' <<<"$FINALLY"; then
+            echo "ERROR: the late-join gate must resume Restreamer (NtResumeProcess) in its finally block (#367)."
+            exit 1
+          fi
+          if ! grep -qE '^        if: always\(\)$' <<<"$SAFETY" || ! grep -qF 'NtResumeProcess' <<<"$SAFETY"; then
+            echo "ERROR: the step after the late-join gate must be 'if: always()' and resume Restreamer with NtResumeProcess (#367)."
+            exit 1
+          fi
+          for s in "$GATE" "$SAFETY"; do
+            if ! grep -qF 'latejoin-367-restreamer-suspended.txt' <<<"$s"; then
+              echo "ERROR: the late-join gate and the resume step must share the PID marker latejoin-367-restreamer-suspended.txt (#367)."
+              exit 1
+            fi
+          done
+          if grep -nE 'ws://|:4455|obs-e2e-test|/obs/' <<<"$GATE"; then
+            echo "ERROR: the late-join gate must never touch OBS; it uses the ffmpeg publisher only (#367)."
+            exit 1
+          fi
+          echo "OK: the late-join gate matches '$MARKER' from $RX and resumes Restreamer on every exit path."
+
   frontend-e2e:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
@@ -2188,34 +2257,67 @@ jobs:
         shell: powershell
         timeout-minutes: 5
         run: |
-          # Regression for the 2026-10-01 live A/V desync (#367). The trigger
-          # was a consumer stall (FRAME_TIMEOUT re-subscribe) while the
-          # publisher reconnected: the Publish event got queued behind the
-          # re-subscribe retry ladder, the new publisher was joined late with
-          # xiu's GOP-cache replay as a burst, and the old chunker stamped
-          # video by ARRIVAL time (audio by source ts), baking a constant A/V
-          # offset into every chunk. Repro: suspend the ffmpeg publisher past
-          # FRAME_TIMEOUT (30 s), kill it, republish within ~1 s (keyint 60 =
-          # 2 s GOP like OBS). Assert every chunk of the new session keeps the
-          # source A/V relation (ffmpeg lavfi A+V start together, so the last
-          # audio and last video pts of a chunk are within one frame), and
-          # that no av_invariant_violated audit row appeared. The YouTube
-          # VOD-measured gate stays camera-box #357. Never touches OBS.
+          # Regression for the 2026-10-01 live A/V desync (#367). Thursday's
+          # trigger was RESTREAMER freezing (~35 s): the inpoint receiver's
+          # 30 s FRAME_TIMEOUT stall path ran at resume, the publisher's
+          # reconnect Publish was queued behind the re-subscribe retry ladder,
+          # and the new publisher was joined late with xiu's GOP-cache replay
+          # as a burst (0.29.27 stamped video by arrival time, audio by source
+          # ts -> a constant A/V offset in every chunk).
+          #
+          # Repro (ROZHODNUTE issuecomment-6004626859): suspend Restreamer.exe
+          # itself for 35 s. Suspending only the PUBLISHER can never reach the
+          # stall path: xiu's session drops a publisher idle >= 2 s
+          # (read_timeout), so the receiver sees a closed channel instead.
+          # Publisher 1 is frozen 0.3 s BEFORE Restreamer (far below xiu's 2 s
+          # cut, which cannot run while Restreamer is suspended): Restreamer
+          # drains the socket, so at resume nothing is deliverable. A publisher
+          # that keeps sending through the freeze leaves a backlog whose frames
+          # can win the receiver's biased select at resume (media_receiver.rs
+          # "a frame ready after a process freeze wins"), and the stall would
+          # be a race. Then publisher 1 is killed and publisher 2 publishes
+          # fresh within ~3 s. Asserts, from restreamer.log and the chunks:
+          #   stall  the receiver's stall line after the freeze (else FAIL: the
+          #          repro proved nothing);
+          #   a)     every "Stream published" answers its own xiu
+          #          NetStream.Publish.Start within 1 s (no stale hub event);
+          #   b)     "Subscribed" within 1 s of publisher 2's Publish.Start (no
+          #          GOP-cache late join);
+          #   c)     every analysable chunk of publisher 2 keeps the source A/V
+          #          relation within 100 ms (ffmpeg lavfi A+V start together);
+          #   d)     0 av_invariant_violated audit rows.
+          # No API call while Restreamer is suspended; Restreamer is resumed on
+          # every exit path (finally + the always() step after this one). The
+          # YouTube VOD-measured gate stays camera-box #357. Never touches OBS.
           $ErrorActionPreference = 'Stop'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
           $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
           if (-not (Test-Path $ffprobe)) { throw "FAILED: ffprobe not found at $ffprobe" }
           $chunkDir = "C:\ProgramData\Restreamer\chunks"
+          $logPath = "C:\ProgramData\Restreamer\restreamer.log"
           $snapDir = Join-Path $env:TEMP "latejoin-367"
+          # Holds the PID of a Restreamer this step suspended and has not resumed
+          # yet; the always() step after this one resumes it if it is left over.
+          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
+          # MUST equal STALL_LOG_MARKER in crates/rs-inpoint/src/media_receiver.rs
+          # (checked by test-integrity "Verify the late-join gate's log markers
+          # and resume safety (#367)").
+          $stallMarker = 'No frames received -- stream stalled'
+          $streamName = 'ci-e2e-test'
           Remove-Item $snapDir -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $snapDir | Out-Null
-          $startTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+          Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue
+          $inv = [Globalization.CultureInfo]::InvariantCulture
+          $stepStart = [DateTimeOffset]::UtcNow
+          $stepStartMs = $stepStart.ToUnixTimeMilliseconds()
+          $stepStartIso = $stepStart.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
 
           Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
           public static class LateJoin367 {
             [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);
+            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
           }
           "@
 
@@ -2225,29 +2327,107 @@ jobs:
               "-f", "lavfi", "-i", "testsrc=duration=${seconds}:size=320x240:rate=30",
               "-f", "lavfi", "-i", "sine=frequency=1000:duration=${seconds}",
               "-c:v", "libx264", "-preset", "ultrafast", "-g", "60", "-c:a", "aac",
-              "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
+              "-f", "flv", "rtmp://127.0.0.1:1234/live/$streamName"
             ) -NoNewWindow -PassThru
           }
 
+          function Read-LogTail([string]$path) {
+            # Restreamer rotates the file by renaming it: retry a read that
+            # lands in that instant.
+            for ($i = 1; $i -le 3; $i++) {
+              try { return @(Get-Content $path -Tail 20000 -Encoding utf8 -ErrorAction Stop) }
+              catch { if ($i -eq 3) { throw } ; Start-Sleep -Milliseconds 200 }
+            }
+          }
+
+          # restreamer.log entries at or after $sinceMs as {Ms, Text}, oldest
+          # first. Lines start "2026-10-05T20:33:29.387602Z  INFO ...". The
+          # rotated file is read too when it changed since then, so a rotation
+          # in the middle of the step loses nothing.
+          function Get-RestreamerLog([int64]$sinceMs) {
+            $since = [DateTimeOffset]::FromUnixTimeMilliseconds($sinceMs).UtcDateTime
+            $sinceIso = $since.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
+            $lines = @()
+            $old = "$logPath.old"
+            if ((Test-Path $old) -and (Get-Item $old).LastWriteTimeUtc -ge $since) { $lines += Read-LogTail $old }
+            $lines += Read-LogTail $logPath
+            foreach ($line in $lines) {
+              if ($line.Length -lt 28 -or [string]::CompareOrdinal($line, 0, $sinceIso, 0, 23) -lt 0) { continue }
+              if ($line -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z) ') {
+                $ms = [DateTimeOffset]::Parse($Matches[1], $inv).ToUnixTimeMilliseconds()
+                if ($ms -ge $sinceMs) { [pscustomobject]@{ Ms = $ms; Text = $line } }
+              }
+            }
+          }
+
+          function Show-Timeline($entries) {
+            $entries | Where-Object {
+              $_.Text -match 'NetStream\.Publish\.Start|Stream published|Stream ended|stream stalled|Subscribed to stream|Re-subscrib|superseding|Frame channel closed|start_new_session|RTMP session ended'
+            } | ForEach-Object { Write-Host "  $($_.Text.Substring(0, [Math]::Min(240, $_.Text.Length)))" }
+          }
+
+          $rs = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
+          if ($rs.Count -ne 1) { throw "FAILED: expected exactly one desktop-session Restreamer.exe, found $($rs.Count)" }
+          $rs = $rs[0]
+          $rsHandle = $rs.Handle
+          $rsSuspended = $false
           $p1 = $null
           $p2 = $null
+          $p2LaunchMs = $null
           try {
-            $p1 = Start-Publisher 120
+            $p1 = Start-Publisher 150
             Start-Sleep -Seconds 15
             if ($p1.HasExited) { throw "FAILED: publisher 1 exited early (code $($p1.ExitCode))" }
 
-            # Freeze the publisher past FRAME_TIMEOUT (30 s) -> the inpoint stalls.
+            # Freeze publisher 1, let Restreamer drain its socket for 0.3 s,
+            # then freeze Restreamer. The marker is written BEFORE the suspend
+            # call, so no exit path can leave an unmarked suspended Restreamer.
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
-            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess returned $rc" }
-            Write-Host "Publisher 1 (PID $($p1.Id)) suspended; waiting 31.5 s for the inpoint stall"
-            Start-Sleep -Milliseconds 31500
+            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(publisher 1) returned $rc" }
+            Start-Sleep -Milliseconds 300
+            Set-Content -Path $suspendMarker -Value $rs.Id -Encoding ascii
+            $rsSuspendMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $rsSuspended = $true
+            $rc = [LateJoin367]::NtSuspendProcess($rsHandle)
+            $gapMs = $sw.ElapsedMilliseconds
+            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(Restreamer) returned $rc" }
+            Write-Host "Publisher 1 (PID $($p1.Id)) frozen, Restreamer (PID $($rs.Id)) suspended $gapMs ms later -- no API call until it is resumed"
+            Start-Sleep -Seconds 35
 
-            # Kill it and republish within ~1 s: the Thursday reconnect.
+            $rc = [LateJoin367]::NtResumeProcess($rsHandle)
+            if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer) returned $rc" }
+            $rsSuspended = $false
+            Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue
+            $resumeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            Write-Host "Restreamer resumed after $([math]::Round(($resumeMs - $rsSuspendMs) / 1000.0, 1)) s"
+            if ($gapMs -ge 1500) {
+              throw "FAILED: repro setup too slow: $gapMs ms between freezing publisher 1 and Restreamer (xiu drops a publisher idle >= 2 s, so the stall path is not guaranteed)"
+            }
+
+            # The repro must really have stalled the inpoint, or the gate proves
+            # nothing (a receiver without the #367 fix passes a run without a
+            # stall too). The line is logged at resume; allow 15 s.
+            $stallLine = $null
+            $deadline = (Get-Date).AddSeconds(15)
+            while (-not $stallLine) {
+              $stallLine = @(Get-RestreamerLog $rsSuspendMs) | Where-Object { $_.Text.Contains($stallMarker) } | Select-Object -First 1
+              if ($stallLine -or (Get-Date) -gt $deadline) { break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $stallLine) {
+              Write-Host "=== restreamer.log timeline since the step start ==="
+              Show-Timeline @(Get-RestreamerLog $stepStartMs)
+              throw "FAILED: no '$stallMarker' log line after the Restreamer freeze -- the repro did not exercise the #367 stall path"
+            }
+            Write-Host "Inpoint stall observed: $($stallLine.Text)"
+
+            # Kill publisher 1 and publish fresh within ~3 s: the reconnect
+            # lands while the receiver is in its re-subscribe retry ladder.
             Stop-Process -Id $p1.Id -Force
-            Start-Sleep -Milliseconds 500
-            $p2StartMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $p2LaunchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $p2 = Start-Publisher 60
-            Write-Host "Publisher 2 (PID $($p2.Id)) started at unix ms $p2StartMs"
+            Write-Host "Publisher 1 killed; publisher 2 (PID $($p2.Id)) started at unix ms $p2LaunchMs"
 
             # Snapshot the new session's chunks while they still exist on disk
             # (the uploader deletes each one right after its S3 upload). The
@@ -2260,7 +2440,7 @@ jobs:
                 if ($_.Name -match '^chunk_(\d+)_\d+\.bin$') {
                   $writtenMs = [int64]$Matches[1]
                   $dest = Join-Path $snapDir $_.Name
-                  if ($writtenMs -gt ($p2StartMs + 1500) -and -not (Test-Path $dest)) {
+                  if ($writtenMs -gt ($p2LaunchMs + 1500) -and -not (Test-Path $dest)) {
                     $len = $_.Length
                     if ($len -gt 0 -and $seen[$_.Name] -eq $len) {
                       try {
@@ -2278,25 +2458,63 @@ jobs:
               Start-Sleep -Milliseconds 30
             }
           } finally {
+            if ($rsSuspended) {
+              $rc = [LateJoin367]::NtResumeProcess($rsHandle)
+              Write-Host "finally: resumed Restreamer (NtResumeProcess returned $rc)"
+              if ($rc -eq 0) { Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue }
+            }
             foreach ($p in @($p1, $p2)) {
               if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
           }
 
-          # The repro must really have stalled the inpoint, or the gate proves
-          # nothing (old code passes a run without a stall too).
-          $stalls = @(Get-Content 'C:\ProgramData\Restreamer\restreamer.log' -Tail 20000 | Where-Object {
-            $_ -match 'No frames received -- stream stalled' -and $_.Length -ge 19 -and $_.Substring(0, 19) -ge $startTs.Substring(0, 19)
-          })
-          if ($stalls.Count -lt 1) {
-            throw "FAILED: no 'stream stalled' log line since $startTs -- the repro did not exercise the #367 stall path"
-          }
-          Write-Host "Inpoint stall observed: $($stalls[0])"
+          # A receiver that kept a Publish queued consumes it only once the
+          # current stream ends: give such a stale event time to reach the log.
+          Start-Sleep -Seconds 3
+          $log = @(Get-RestreamerLog $stepStartMs)
+          Write-Host "=== restreamer.log timeline since the step start ==="
+          Show-Timeline $log
+          $problems = @()
 
+          # a) Every "Stream published" must answer its own xiu Publish.Start
+          # (logged just before the hub broadcasts the Publish) within 1 s. A
+          # leftover or late one is the stale-event signature of 2026-10-01.
+          $starts = @{}
+          foreach ($e in $log) {
+            if ($e.Text -match '\[NetStream\.Publish\.Start\]\s+app_name: [^,]*, stream_name: (\S+)') {
+              if (-not $starts.ContainsKey($Matches[1])) { $starts[$Matches[1]] = New-Object System.Collections.Generic.Queue[int64] }
+              $starts[$Matches[1]].Enqueue($e.Ms)
+            } elseif ($e.Text -match 'Stream published: ') {
+              $name = if ($e.Text -match 'stream_name: (\S+)') { $Matches[1] } else { '?' }
+              $q = $starts[$name]
+              if (-not $q -or $q.Count -eq 0) {
+                $problems += "a) stale hub event: '$($e.Text)' has no NetStream.Publish.Start of its own"
+              } else {
+                $lagMs = $e.Ms - $q.Dequeue()
+                if ($lagMs -gt 1000) { $problems += "a) stale hub event: 'Stream published' $lagMs ms after its NetStream.Publish.Start: $($e.Text)" }
+              }
+            }
+          }
+
+          # b) Publisher 2 must be subscribed at once, not joined late through
+          # the GOP cache.
+          $p2Start = $log | Where-Object { $_.Ms -ge $p2LaunchMs -and $_.Text -match ('\[NetStream\.Publish\.Start\].*stream_name: ' + [regex]::Escape($streamName) + '(\s|$)') } | Select-Object -First 1
+          if (-not $p2Start) {
+            $problems += "b) publisher 2's NetStream.Publish.Start is not in restreamer.log"
+          } else {
+            $sub = $log | Where-Object { $_.Ms -ge $p2Start.Ms -and $_.Text.Contains('Subscribed to stream, processing frames') } | Select-Object -First 1
+            if (-not $sub) {
+              $problems += "b) Restreamer never subscribed to publisher 2"
+            } else {
+              $subLagMs = $sub.Ms - $p2Start.Ms
+              Write-Host "Publisher 2 subscribed $subLagMs ms after its NetStream.Publish.Start"
+              if ($subLagMs -gt 1000) { $problems += "b) subscribed $subLagMs ms after publisher 2's NetStream.Publish.Start (> 1000 ms): a GOP-cache late join" }
+            }
+          }
+
+          # c) Chunk A/V relation of the republished session vs the source.
           $snaps = @(Get-ChildItem $snapDir -File | Sort-Object Name)
           Write-Host "Captured $($snaps.Count) chunk(s) of the republished session"
-
-          $failures = @()
           $analysed = 0
           $skipped = 0
           foreach ($snap in $snaps) {
@@ -2323,22 +2541,64 @@ jobs:
             $analysed++
             $deltaMs = [math]::Round(($aMax - $vMax) * 1000.0)
             Write-Host "$($snap.Name): last audio pts $aMax s, last video pts $vMax s, audio-minus-video $deltaMs ms"
-            if ([math]::Abs($deltaMs) -gt 100) { $failures += "$($snap.Name): $deltaMs ms" }
+            if ([math]::Abs($deltaMs) -gt 100) { $problems += "c) $($snap.Name): audio-minus-video $deltaMs ms (> 100 ms from the source relation)" }
           }
-          if ($analysed -lt 3) { throw "FAILED: only $analysed analysable post-republish chunks, need >= 3" }
+          if ($analysed -lt 3) { $problems += "c) only $analysed analysable post-republish chunks, need >= 3" }
           # One unanalysable snapshot (a chunk caught at the end of the window)
           # is tolerated; more means the chunks themselves are broken.
-          if ($skipped -gt 1) { throw "FAILED: $skipped post-republish chunks could not be analysed (ffprobe error or a missing track), at most 1 is tolerated" }
-          if ($failures.Count -gt 0) {
-            throw "FAILED: chunk A/V relation drifted from the source relation after a late-join republish (#367): $($failures -join '; ')"
-          }
+          if ($skipped -gt 1) { $problems += "c) $skipped post-republish chunks could not be analysed (ffprobe error or a missing track), at most 1 is tolerated" }
 
-          $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=av_invariant_violated&since=$startTs&limit=100" -TimeoutSec 10
-          $rows = if ($audit.rows) { @($audit.rows) } else { @() }
-          if ($rows.Count -gt 0) {
-            throw "FAILED: $($rows.Count) av_invariant_violated audit row(s) during the late-join repro: $($rows | ConvertTo-Json -Compress -Depth 4)"
+          # d) No invariant violation. Restreamer was frozen 35 s, so this
+          # first API call after the resume gets a generous timeout + retries.
+          $audit = $null
+          for ($i = 1; $i -le 3 -and $null -eq $audit; $i++) {
+            try {
+              $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=av_invariant_violated&since=$($stepStartIso)Z&limit=100" -TimeoutSec 30
+            } catch {
+              if ($i -eq 3) { throw "FAILED: the audit API did not answer after the Restreamer freeze: $_" }
+              Write-Host "Audit query attempt $i failed ($_), retrying in 5 s"
+              Start-Sleep -Seconds 5
+            }
           }
-          Write-Host "=== Late-join republish GATE PASSED: $analysed chunks within 100 ms, 0 invariant violations ==="
+          $rows = if ($audit.rows) { @($audit.rows) } else { @() }
+          if ($rows.Count -gt 0) { $problems += "d) $($rows.Count) av_invariant_violated audit row(s): $($rows | ConvertTo-Json -Compress -Depth 4)" }
+
+          if ($problems.Count -gt 0) {
+            throw "FAILED: late-join republish after a Restreamer freeze (#367): $($problems -join ' | ')"
+          }
+          Write-Host "=== Late-join republish GATE PASSED: stall reproduced, subscribed $subLagMs ms after the republish, $analysed chunks within 100 ms, 0 invariant violations ==="
+
+      - name: Resume Restreamer if the late-join gate left it suspended (#367)
+        if: always()
+        shell: powershell
+        run: |
+          # The late-join gate suspends Restreamer.exe for 35 s and resumes it
+          # in its own finally block. A step killed before that ran (a timeout,
+          # a cancel) leaves its PID marker behind: resume that process here, or
+          # the rest of the job and the box keep a frozen Restreamer.
+          $ErrorActionPreference = 'Stop'
+          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
+          if (-not (Test-Path $suspendMarker)) {
+            Write-Host "The late-join gate left no suspended Restreamer"
+            exit 0
+          }
+          $procId = [int]((Get-Content $suspendMarker -Raw).Trim())
+          $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+          if ($proc -and $proc.ProcessName -eq 'Restreamer') {
+            Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LateJoin367Resume {
+            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
+          }
+          "@
+            $rc = [LateJoin367Resume]::NtResumeProcess($proc.Handle)
+            if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer PID $procId) returned $rc -- Restreamer may still be suspended" }
+            Write-Host "Resumed Restreamer PID $procId, left suspended by the late-join gate"
+          } else {
+            Write-Host "PID $procId is no longer Restreamer; nothing to resume"
+          }
+          Remove-Item $suspendMarker -Force
 
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell

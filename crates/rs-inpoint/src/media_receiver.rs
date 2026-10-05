@@ -88,6 +88,12 @@ use crate::frame_stats::FrameStats;
 /// during normal streaming.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Stable text of the stall log line (`Wake::Stalled`). The CI step "GATE
+/// late-join republish keeps chunk A/V aligned (#367)" finds the stall in
+/// restreamer.log by this substring, and a test-integrity step fails when its
+/// `$stallMarker` literal differs from this one: change both together.
+const STALL_LOG_MARKER: &str = "No frames received -- stream stalled";
+
 /// Timeout for hub subscription response.
 const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -332,7 +338,7 @@ impl MediaReceiver {
                     error!(
                         total_frames = total,
                         timeout_secs = FRAME_TIMEOUT.as_secs(),
-                        "No frames received -- stream stalled, will re-subscribe"
+                        "{STALL_LOG_MARKER}, will re-subscribe"
                     );
                     self.drop_subscription();
                     self.flv_chunk_sink.flush().await;
