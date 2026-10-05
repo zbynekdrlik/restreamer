@@ -86,3 +86,83 @@ impl SrcTrack {
         *self = Self::default();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(points: &[u32]) -> SrcTrack {
+        let mut t = SrcTrack::default();
+        for &p in points {
+            let step = t.classify(p);
+            t.record(p, step);
+        }
+        t
+    }
+
+    #[test]
+    fn forward_and_equal_steps_continue() {
+        let t = track(&[100, 140]);
+        assert_eq!(t.classify(140), SrcStep::Continue);
+        assert_eq!(t.classify(180), SrcStep::Continue);
+        assert_eq!(SrcTrack::default().classify(5), SrcStep::Continue);
+    }
+
+    #[test]
+    fn tiny_backward_step_clamps_to_last_and_keeps_history() {
+        let mut t = track(&[1_480, 1_520]);
+        assert_eq!(t.classify(1_519), SrcStep::ClampTiny { to: 1_520 });
+        assert_eq!(
+            t.classify(1_520 - TINY_BACKWARD_MS),
+            SrcStep::ClampTiny { to: 1_520 },
+            "the tolerance is inclusive"
+        );
+        t.record(1_519, SrcStep::ClampTiny { to: 1_520 });
+        assert_eq!(
+            t.classify(1_519),
+            SrcStep::ClampTiny { to: 1_520 },
+            "the history kept 1_520"
+        );
+    }
+
+    #[test]
+    fn a_large_backward_jump_is_a_new_timeline() {
+        let mut t = track(&[601_960, 602_000]);
+        assert_eq!(
+            t.classify(602_000 - TINY_BACKWARD_MS - 1),
+            SrcStep::NewTimeline { prev: 602_000 }
+        );
+        assert_eq!(t.classify(0), SrcStep::NewTimeline { prev: 602_000 });
+        t.record(0, SrcStep::NewTimeline { prev: 602_000 });
+        assert_eq!(t.classify(40), SrcStep::Continue);
+    }
+
+    #[test]
+    fn the_successor_of_a_lone_forward_glitch_is_after_glitch() {
+        let mut t = track(&[360, 400 + 40_000]);
+        assert_eq!(t.classify(440), SrcStep::AfterGlitch { glitch: 40_400 });
+        t.record(440, SrcStep::AfterGlitch { glitch: 40_400 });
+        assert_eq!(t.classify(480), SrcStep::Continue, "back on the timeline");
+    }
+
+    #[test]
+    fn a_forward_step_within_the_glitch_bound_is_not_a_glitch() {
+        // 360 -> 360 + GLITCH_JUMP_MS is a (large) normal step; walking back
+        // more than the jitter tolerance from it is a new timeline.
+        let t = track(&[360, 360 + GLITCH_JUMP_MS]);
+        assert_eq!(t.classify(400), SrcStep::NewTimeline { prev: 30_360 });
+    }
+
+    #[test]
+    fn going_below_the_pre_glitch_ts_is_a_new_timeline() {
+        let t = track(&[360, 400 + 40_000]);
+        assert_eq!(t.classify(100), SrcStep::NewTimeline { prev: 40_400 });
+    }
+
+    #[test]
+    fn clear_forgets_everything() {
+        let mut t = track(&[1_000, 2_000]);
+        t.clear();
+        assert_eq!(t.classify(0), SrcStep::Continue);
+    }
+}
