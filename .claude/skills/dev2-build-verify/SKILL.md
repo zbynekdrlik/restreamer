@@ -226,7 +226,7 @@ cargo test --workspace --locked                                  # Test integrit
 cargo build --release -p rs-delivery --locked                     # Build rs-delivery
 ```
 
-Bumping the 4 version files changes the 11 local member versions, so the lock no
+Bumping the 4 version files changes the 12 local member versions, so the lock no
 longer matches and cargo refuses to fix it:
 
 ```
@@ -249,17 +249,31 @@ scp -q newlevel@dev2:~/restreamer-buildcheck/Cargo.lock ./Cargo.lock
 grep -A1 '^name = "rs-core"$' Cargo.lock     # must show the NEW version
 ```
 
-The diff must be exactly the 11 local member versions (`rs-api`, `rs-cloud`,
-`rs-core`, `rs-delivery`, `rs-endpoint`, `rs-ffmpeg`, `rs-inpoint`,
-`rs-rtmp-push`, `rs-runtime`, `rs-service`, `rs-youtube`) and nothing else — any
+The diff must be exactly the 12 local member versions (`rs-api`, `rs-cloud`,
+`rs-core`, `rs-delivery`, `rs-endpoint`, `rs-facebook`, `rs-ffmpeg`,
+`rs-inpoint`, `rs-rtmp-push`, `rs-runtime`, `rs-service`, `rs-youtube`) and
+nothing else — any
 transitive-dependency churn means you resolved online; redo it `--offline`.
 
 **Then re-verify WITH `--locked`**, since a plain `cargo test`/`clippy` on dev2
 silently self-heals the lock and hides exactly this failure.
 
-`src-tauri/Cargo.lock` and `leptos-ui/Cargo.lock` are separate and ARE stale
-(they carry unrelated old versions); no `--locked` command touches them, so
-leave them alone.
+`src-tauri/Cargo.lock` and `leptos-ui/Cargo.lock` are separate, and no
+`--locked` command touches them. A version bump does not need them. **But
+`Restreamer.exe` is built from `src-tauri/Cargo.lock`**, by CI's non-`--locked`
+Tauri build, and `cargo audit` scans only the root lock. So a SECURITY bump in
+the root lock must be repeated there too, or the shipped exe keeps the
+vulnerable crate. In #367, rustls 0.23.36 with RUSTSEC-2026-0285 was still in
+the release build after the root lock was fixed. Do it on dev2 (the dev1
+worktree is nested in the main checkout, and cargo then picks the wrong
+workspace root):
+1. `cd src-tauri && cargo metadata --format-version 1 >/dev/null`. This is
+   the same minimal sync CI's build does.
+2. `cargo update -p <crate>@<old> --precise <new>`.
+3. Diff the lock against step 1 and revert stray edge moves. In #367,
+   tempfile's getrandom edge moved from 0.4.1 to 0.3.4.
+4. Check with `cargo metadata --locked`, then `cargo check --locked` using the
+   src-tauri recipe above.
 
 ## Frontend E2E (CI-equivalent) on dev2
 
