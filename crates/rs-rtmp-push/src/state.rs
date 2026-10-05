@@ -158,3 +158,129 @@ impl Default for PusherConfig {
         Self { timeout_ms: 30_000 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Symmetric re-anchor (#257) with one shared transform (#367): when
+    /// AUDIO trips, the ONE shared base moves to `max(last outputs) + 1`, the
+    /// shared origin clears, and so do both per-track jump trackers.
+    #[test]
+    fn reanchor_moves_shared_base_to_max_plus_one_and_clears_origin() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 630_000,
+            last_video_output_ts_ms: 600_000,
+            base_ms: 1,
+            origin_ts: Some(42),
+            last_audio_xiu_ts: Some(630_000),
+            last_video_xiu_ts: Some(600_000),
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Audio);
+        assert_eq!(state.base_ms, 630_001, "shared base = max + 1");
+        assert!(state.origin_ts.is_none(), "shared origin must re-pin");
+        assert!(state.last_audio_xiu_ts.is_none());
+        assert!(
+            state.last_video_xiu_ts.is_none(),
+            "the OTHER track's jump tracker must clear too, or its first new tag \
+             trips a second re-anchor"
+        );
+        assert_eq!(state.regression_reanchor_count, 1);
+    }
+
+    /// Same when VIDEO trips: video is the higher track here, so max + 1
+    /// derives from it.
+    #[test]
+    fn reanchor_on_video_uses_the_same_shared_base() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 500_000,
+            last_video_output_ts_ms: 800_000,
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Video);
+        assert_eq!(state.base_ms, 800_001);
+        assert_eq!(state.regression_reanchor_count, 1);
+    }
+
+    /// The shared base is `max + 1` (NOT `min + 1`) so neither track's wire
+    /// timeline can step backward past a timestamp already sent.
+    #[test]
+    fn reanchor_uses_max_not_min_for_monotonicity() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 100,
+            last_video_output_ts_ms: 999_999,
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Audio);
+        assert_eq!(
+            state.base_ms, 1_000_000,
+            "must use the LARGER of the two last-outputs + 1, never the smaller"
+        );
+    }
+
+    /// A new mapping (reconnect) does not count as a re-anchor.
+    #[test]
+    fn begin_new_mapping_does_not_count_as_reanchor() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 60_000,
+            last_video_output_ts_ms: 60_033,
+            origin_ts: Some(40_000),
+            ..PusherState::default()
+        };
+        state.begin_new_mapping();
+        assert_eq!(state.base_ms, 60_034);
+        assert!(state.origin_ts.is_none());
+        assert_eq!(state.regression_reanchor_count, 0);
+    }
+
+    /// #367: ONE origin for both tracks. A mapping pinned at the chunk's
+    /// minimum (the keyframe at 1_000) keeps audio 700 ms after it on the
+    /// wire -- the per-track origins mapped both first tags to the base.
+    #[test]
+    fn wire_ts_maps_both_tracks_through_one_origin() {
+        let mut state = PusherState {
+            base_ms: 5_000,
+            ..PusherState::default()
+        };
+        let v = state.wire_ts(1_000, 1_000);
+        let a = state.wire_ts(1_700, 1_000);
+        assert_eq!(v, 5_000);
+        assert_eq!(a, 5_700, "wire relation must equal the content relation");
+        assert_eq!(state.origin_ts, Some(1_000));
+    }
+
+    /// The origin is per MAPPING, never per chunk: consecutive chunks keep a
+    /// continuous wire timeline per track (the #103 click fix), even though a
+    /// later chunk's pin would be different.
+    #[test]
+    fn wire_ts_is_continuous_across_chunks() {
+        let mut state = PusherState::default();
+        let chunk_n: Vec<u64> = [40_000_u32, 40_021, 41_979]
+            .iter()
+            .map(|&ts| state.wire_ts(ts, 40_000))
+            .collect();
+        let chunk_n1: Vec<u64> = [42_000_u32, 42_021]
+            .iter()
+            .map(|&ts| state.wire_ts(ts, 42_000))
+            .collect();
+        assert_eq!(chunk_n, vec![0, 21, 1_979]);
+        assert_eq!(
+            chunk_n1,
+            vec![2_000, 2_021],
+            "the next chunk must continue the same mapping (no per-chunk rebase)"
+        );
+    }
+
+    /// A codec sequence header (ts 0 in every chunk) must never pin the
+    /// shared origin.
+    #[test]
+    fn wire_ts_unpinned_never_pins_the_origin() {
+        let state = PusherState {
+            base_ms: 10,
+            ..PusherState::default()
+        };
+        assert_eq!(state.wire_ts_unpinned(0, 5_000), 10);
+        assert!(state.origin_ts.is_none());
+    }
+}

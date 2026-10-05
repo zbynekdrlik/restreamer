@@ -364,3 +364,42 @@ async fn stall_flushes_the_partial_chunk() {
     );
     drop(tx);
 }
+
+/// #367 (A): a CLOSED hub broadcast channel is a failure, not a clean stop:
+/// `run()` returns `Err`, so `RtmpServer::run` propagates it and the
+/// orchestrator restarts the server. Before, `run()` just returned and the
+/// server read that as a clean shutdown.
+#[tokio::test(start_paused = true)]
+async fn closed_hub_channel_ends_run_with_error() {
+    let state = InpointState::new();
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receiver = MediaReceiver::new(
+        event_rx,
+        hub_tx,
+        Arc::new(FlvChunkSink::new_null()),
+        state.clone(),
+    );
+    let (slot, mut log_rx) = spawn_programmable_hub(hub_rx);
+    let run = tokio::spawn(receiver.run());
+
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+
+    drop(event_tx);
+    let result = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("run() must end when the hub channel closes")
+        .expect("run() must not panic");
+    assert!(
+        matches!(result, Err(InpointError::Protocol(_))),
+        "a closed hub channel must surface as an error, got {result:?}"
+    );
+    assert!(
+        !state.is_connected(),
+        "the active session must be ended on the way out"
+    );
+    drop(tx);
+}

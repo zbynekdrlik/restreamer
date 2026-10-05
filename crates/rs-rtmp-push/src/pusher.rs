@@ -688,4 +688,51 @@ mod tests {
         assert_eq!(chunk_pacing_sleep_ms(0, 0, 120), 0);
         assert_eq!(chunk_pacing_sleep_ms(0, 100, 120), 0);
     }
+
+    // --- media_pin_suffix (#367 shared-origin pin) ---
+
+    fn tag(tag_type: u8, timestamp_ms: u32, body: &'static [u8]) -> crate::flv::FlvTag<'static> {
+        crate::flv::FlvTag {
+            tag_type,
+            timestamp_ms,
+            body,
+        }
+    }
+
+    #[test]
+    fn media_pin_suffix_is_the_min_of_the_remaining_media_tags() {
+        use crate::flv::{FLV_TAG_AUDIO, FLV_TAG_SCRIPT, FLV_TAG_VIDEO};
+        let tags = [
+            tag(FLV_TAG_SCRIPT, 0, &[0x02, 0x00]),
+            tag(FLV_TAG_VIDEO, 0, &[0x17, 0x00]), // AVC seq header: ignored
+            tag(FLV_TAG_AUDIO, 0, &[0xAF, 0x00]), // AAC seq header: ignored
+            tag(FLV_TAG_VIDEO, 1_000, &[0x17, 0x01]),
+            tag(FLV_TAG_AUDIO, 990, &[0xAF, 0x01]),
+            tag(FLV_TAG_VIDEO, 1_040, &[0x27, 0x01]),
+        ];
+        let pins = media_pin_suffix(&tags);
+        assert_eq!(
+            pins,
+            vec![
+                Some(990),
+                Some(990),
+                Some(990),
+                Some(990),
+                Some(990),
+                Some(1_040)
+            ],
+            "the pin is the minimum MEDIA ts at or after each index; seq headers \
+             and script tags never pin"
+        );
+    }
+
+    #[test]
+    fn media_pin_suffix_is_none_without_media() {
+        use crate::flv::{FLV_TAG_SCRIPT, FLV_TAG_VIDEO};
+        let tags = [
+            tag(FLV_TAG_SCRIPT, 0, &[0x02, 0x00]),
+            tag(FLV_TAG_VIDEO, 0, &[0x17, 0x00]),
+        ];
+        assert_eq!(media_pin_suffix(&tags), vec![None, None]);
+    }
 }

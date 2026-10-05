@@ -449,7 +449,8 @@ async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
 /// baked into the session-2 chunk bytes.
 ///
 /// Session 1: write seq headers + keyframe, then interleave audio while
-/// ~600ms of wall-clock elapses (video `current_session_ts` advances). flush.
+/// ~600ms of wall-clock elapses (the #255-era video stamping advanced with
+/// the wall clock; since #367 video is source-ts stamped). flush.
 /// `start_new_session()` (the republish boundary).
 /// Session 2: keyframe + audio at xiu ts 0/21/43. Read the session-2 chunk
 /// and assert the first real video tag and first real audio tag are within
