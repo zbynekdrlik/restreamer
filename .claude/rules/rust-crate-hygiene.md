@@ -105,3 +105,20 @@ git commit -F msg.txt  # airuleset:secret-ok <why this literal is not a secret>
 
 The marker must sit OUTSIDE any quoted string in the command, so use `-F file`
 for the message rather than an inline `-m "…"`.
+
+## cargo-mutants: an "idle = pending()" helper becomes a TIMEOUT, and a hang fails the gate
+
+A `select!` loop branch built from a helper like
+`async fn next(rx: &mut Option<Rx>) -> Option<T> { match rx { Some(r) => r.recv().await, None => pending().await } }`
+is a trap: cargo-mutants mutates the helper to `-> None`, the branch is then
+ALWAYS ready, the task never yields, a `current_thread` test runtime starves,
+and the mutant ends as a 300 s TIMEOUT (a non-zero exit that fails the PR
+gate). Gate the branch with a `select!` precondition instead
+(`frame = async { .. }, if rx.is_some() =>`). Note that the branch's future is
+still BUILT when the branch is disabled, so it must not `unwrap()`. Seen on
+#192 (`test_file_sink.rs`).
+
+A "stop" function whose only observable effect is releasing a port or socket
+"sooner" survives as `-> ()` when the `Drop` impl also aborts the task. Pin it
+with a SYNCHRONOUS rebind right after the stop returns, with no await in
+between: `drop(std::net::TcpListener::bind(addr).expect(..))`.

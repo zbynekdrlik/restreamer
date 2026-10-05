@@ -33,6 +33,11 @@ reqwest.workspace = true
 rs-core = { path = "../rs-core" }
 rs-ffmpeg = { path = "../rs-ffmpeg" }
 rs-rtmp-push = { path = "../rs-rtmp-push" }
+# xiu RTMP server session + hub-event types for the TEST_FILE loopback sink
+# (#192). Already in this crate's graph via rs-rtmp-push -> rtmp -> streamhub,
+# so these add no new crate to the delivery binary.
+rtmp = { workspace = true }
+streamhub = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

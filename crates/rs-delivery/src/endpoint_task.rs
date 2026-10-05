@@ -88,7 +88,7 @@ pub use endpoint_handle::EndpointHandle;
 
 use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
-pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url_pub;
+pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url as build_rtmp_url_pub;
 
 // `producer_task` was extracted to `crate::endpoint_producer` so this file
 // stays under the 1000-line CI cap while `consumer_task` keeps room to grow.

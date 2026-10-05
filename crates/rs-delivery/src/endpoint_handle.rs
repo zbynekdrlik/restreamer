@@ -145,12 +145,6 @@ impl EndpointHandle {
     /// Used by api_update_start_tests to seed AppState without a real DiskCache.
     #[cfg(test)]
     pub fn stub_for_test(start_chunk_id: i64) -> Self {
-        let (stop_tx, _stop_rx) = watch::channel(false);
-        let task = tokio::spawn(async {});
-        let stats = Arc::new(Mutex::new(crate::endpoint_stats::initial_endpoint_stats(
-            start_chunk_id,
-            "normal".to_string(),
-        )));
         let cfg = crate::api::EndpointConfig {
             alias: "stub".to_string(),
             service_type: "TEST_FILE".to_string(),
@@ -160,6 +154,21 @@ impl EndpointHandle {
             start_chunk_id: None,
             pusher: Default::default(),
         };
+        Self::stub_with_config_for_test(cfg, start_chunk_id)
+    }
+
+    /// Test-only stub carrying a caller-chosen config (#192: the TEST_FILE
+    /// sink lifecycle keys off `config().service_type`, and the test-path
+    /// `update_start` respawn must keep the endpoint's real config, exactly
+    /// like the production respawn does).
+    #[cfg(test)]
+    pub fn stub_with_config_for_test(cfg: crate::api::EndpointConfig, start_chunk_id: i64) -> Self {
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let task = tokio::spawn(async {});
+        let stats = Arc::new(Mutex::new(crate::endpoint_stats::initial_endpoint_stats(
+            start_chunk_id,
+            "normal".to_string(),
+        )));
         Self {
             task,
             stop_tx,

@@ -176,6 +176,28 @@ echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-Local
   `requestType = "(StartRecord|ToggleRecord)"` because the ERE group needs
   `StartRecord`/`ToggleRecord` right after the quote, not a literal `(`).
 
+### `echo "$BLOCK" | grep -q` lies under pipefail — use a here-string (#192)
+
+A `run:` with no `shell:` runs `bash -e {0}`; an explicit `shell: bash` runs
+`bash --noprofile --norc -eo pipefail {0}`. Under pipefail, `grep -q` exits at
+the first match, `echo` dies of SIGPIPE (141), and the pipeline FAILS — so
+`if echo "$YT_BLOCK" | grep -qF 'x'` reads a real match as "no match". Write
+`grep -qF 'x' <<<"$YT_BLOCK"` (correct under both shells). End extraction
+pipelines (`grep -oE ... | sed`) with `|| true` so a no-match cannot abort the
+step before your own error message. Test a new self-check locally by
+extracting its `run:` with `yaml.safe_load` and running it with
+`bash --noprofile --norc -eo pipefail` (the stricter shell) against the real
+file AND hand-made regressed copies (it must go red).
+
+### Endpoint aliases in the OBS-to-YouTube job must be CI-seeded (#192)
+
+`Verify every strict-gate endpoint alias is seeded by CI` extracts every
+`.alias -eq '<x>'` / `.endpoint -eq '<x>'` literal in `e2e-obs-youtube-test`
+and requires it to be in `$needAttach` AND created by an `alias = '<x>'`
+find-or-create body in the job (`e2e rtmp` is accepted because its key is
+synced from `YOUTUBE_STREAM_KEY`). Adding a gate on a new alias = seed it in
+the pin step first.
+
 ## Syntax-check inline PowerShell before pushing (dev1 is Tier-0, no local pwsh)
 
 A PowerShell PARSE error in a `shell: powershell` step is NOT caught by an inner

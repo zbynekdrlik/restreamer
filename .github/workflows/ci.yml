@@ -1072,6 +1072,67 @@ jobs:
           fi
           echo "OK: mutation step captures the real cargo-mutants exit and passes no --jobs."
 
+      - name: "Verify every strict-gate endpoint alias is seeded by CI (#192)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # #192: the OBS-to-YouTube job's strict fast-endpoint gate looked up
+          # a YT_HLS fixture that migration v21 had deleted in April, so the
+          # gate could never run and blocked the release train. Two rules, so
+          # a strict gate never again depends on an alias the box may lack:
+          # (1) the deleted fixture alias never comes back in this file;
+          # (2) every endpoint alias e2e-obs-youtube-test looks up by literal
+          #     is ATTACHED by that job ($needAttach) AND SEEDED by it: created
+          #     by a find-or-create (an `alias = '<x>'` create body), or, for
+          #     the OAuth-linked 'e2e rtmp' YouTube endpoint, key-synced from
+          #     the YOUTUBE_STREAM_KEY secret. $ciOwnedAliases must be attached.
+          # The job block is sed-extracted (it lies after test-integrity), so
+          # this step can never match its own lines (#325); the rule-(1)
+          # pattern uses a [ ] class, so it cannot match its own source line.
+          if grep -nE "e2e[ ]hls" "$WORKFLOW_FILE"; then
+            echo "ERROR: the deleted YT_HLS fixture alias is referenced again (#192)."
+            exit 1
+          fi
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          looked_up=$( { echo "$YT_BLOCK" | grep -oE "\.(alias|endpoint) -eq '[^']+'" | sed -E "s/.*-eq '([^']+)'/\1/" || true; echo "$YT_BLOCK" | grep -oE '\.(alias|endpoint) -eq "[^"]+"' | sed -E 's/.*-eq "([^"]+)"/\1/' || true; } | sort -u)
+          attached=$(echo "$YT_BLOCK" | grep -E '^\s*\$needAttach = @\(' | grep -oE '"[^"]+"' | tr -d '"' || true)
+          owned=$(echo "$YT_BLOCK" | grep -E '^\s*\$ciOwnedAliases = @\(' | grep -oE '"[^"]+"' | tr -d '"' || true)
+          created=$(echo "$YT_BLOCK" | grep -oE "^\s*alias = '[^']+'" | sed -E "s/.*alias = '([^']+)'/\1/" || true)
+          if [ -z "$looked_up" ] || [ -z "$attached" ] || [ -z "$owned" ]; then
+            echo "ERROR: could not extract the job's alias lookups / \$needAttach / \$ciOwnedAliases (#192 self-check anchors moved)."
+            exit 1
+          fi
+          fail=0
+          while IFS= read -r a; do
+            [ -z "$a" ] && continue
+            if ! grep -qxF "$a" <<<"$attached"; then
+              echo "ERROR: e2e-obs-youtube-test looks up endpoint '$a' but never attaches it (\$needAttach)."
+              fail=1
+            fi
+            if grep -qxF "$a" <<<"$created"; then
+              continue
+            fi
+            # (here-string, not `echo | grep -q`: if this step ever runs with
+            # pipefail -- e.g. an explicit `shell: bash` -- an early grep -q exit
+            # SIGPIPEs echo and reads as "no match")
+            if [ "$a" = "e2e rtmp" ] && grep -qF 'stream_key = $env:YOUTUBE_STREAM_KEY' <<<"$YT_BLOCK"; then
+              continue
+            fi
+            echo "ERROR: e2e-obs-youtube-test looks up endpoint '$a' but never seeds it (no find-or-create with alias = '$a')."
+            fail=1
+          done <<<"$looked_up"
+          while IFS= read -r a; do
+            [ -z "$a" ] && continue
+            if ! grep -qxF "$a" <<<"$attached"; then
+              echo "ERROR: \$ciOwnedAliases lists '$a' but \$needAttach never attaches it."
+              fail=1
+            fi
+          done <<<"$owned"
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK: every endpoint alias e2e-obs-youtube-test looks up is attached and seeded by CI:"
+          echo "$looked_up"
+
   frontend-e2e:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
@@ -3136,15 +3197,23 @@ jobs:
       - name: "Pin fast-endpoint classes (#192)"
         shell: powershell
         run: |
-          # #192: exercise the fast-endpoint audit path end-to-end. Pin the
-          # SECONDARY 'e2e hls' endpoint to is_fast=true (and 'e2e rtmp'
-          # explicitly to is_fast=false, so the run is deterministic even after
-          # a leaked prior cleanup) BEFORE start-stream -- the host-side
-          # FastEndpointJumpedToLiveEdge audit fires only ONCE, at the VPS
-          # delivering transition, for is_fast=true endpoints. Kept fast for the
-          # whole delivery (host + VPS must agree) and restored in the always()
-          # cleanup below. 'e2e rtmp' (the OAuth-linked YouTube path the job's
-          # primary assertions depend on) is deliberately left non-fast.
+          # #192: exercise the fast-endpoint audit path end-to-end on a CI-OWNED,
+          # self-seeded, credential-free fast endpoint 'e2e fast'
+          # (service_type TEST_FILE). A TEST_FILE endpoint pushes to the
+          # delivery VPS's own loopback RTMP accept-and-discard sink
+          # (rs-delivery test_file_sink, 127.0.0.1:1935), so it needs no
+          # operator setup and no secret. This step FINDS-OR-CREATES it
+          # (idempotent across runs) and pins 'e2e rtmp' explicitly to
+          # is_fast=false (deterministic even after a leaked prior cleanup),
+          # BEFORE start-stream -- the host-side FastEndpointJumpedToLiveEdge
+          # audit fires only ONCE, at the VPS delivering transition, for
+          # is_fast=true endpoints. Kept fast for the whole delivery (host + VPS
+          # must agree) and restored in the always() cleanup below. 'e2e rtmp'
+          # (the OAuth-linked YouTube path the job's primary assertions depend
+          # on) is deliberately left non-fast. The previous fixture ('e2e' +
+          # ' hls', a YT_HLS endpoint) was deleted by migration v21 and could
+          # never exist again: every alias a strict gate looks up must be
+          # SEEDED by CI itself (enforced in test-integrity).
           $ErrorActionPreference = "Stop"
           # Lower bound for THIS run's audit query. The E2E-Test event PERSISTS
           # across CI runs, so its audit_log accumulates -- without a `since`
@@ -3154,27 +3223,46 @@ jobs:
           "FAST192_SINCE=$since" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "#192 audit-window since=$since"
           $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
-          $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+          $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
           $rtmp = $eps | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
-          if (-not $hls) {
-            throw "FAILED (#192): endpoint 'e2e hls' not present in /endpoints -- the E2E-Test event's fast-audit endpoint is missing; #192 cannot run (strict gate, CLAUDE.md 'a CI test that can't run must FAIL')"
+          if (-not $fast) {
+            $createBody = @{
+              alias = 'e2e fast'
+              service_type = 'TEST_FILE'
+              stream_key = 'ci-fast'
+              is_fast = $true
+            } | ConvertTo-Json
+            $created = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method POST `
+              -Body $createBody -ContentType "application/json" -TimeoutSec 10
+            Write-Host "#192: created CI-owned endpoint 'e2e fast' (id=$($created.id), TEST_FILE, is_fast=true)"
+          } else {
+            # Self-heal the canonical shape (a prior run's restore, or any edit).
+            $fastBody = @{ service_type = 'TEST_FILE'; stream_key = 'ci-fast'; enabled = $true; is_fast = $true } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($fast.id)" -Method PUT `
+              -Body $fastBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+            Write-Host "#192: re-pinned CI-owned endpoint 'e2e fast' (id=$($fast.id)): TEST_FILE, enabled, is_fast=true"
           }
-          $rtmpBody = @{ is_fast = $false } | ConvertTo-Json
-          $hlsBody = @{ is_fast = $true } | ConvertTo-Json
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($hls.id)" -Method PUT `
-            -Body $hlsBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
           if ($rtmp) {
+            $rtmpBody = @{ is_fast = $false } | ConvertTo-Json
             Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($rtmp.id)" -Method PUT `
               -Body $rtmpBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
           }
-          # Read back and assert the flags -- a PUT merge-semantics regression
-          # fails HERE, clearly, not 40 minutes later in a confusing step.
+          # Read back and assert the shape -- a create/PUT regression fails
+          # HERE, clearly, not 40 minutes later in a confusing step.
           $eps2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
-          $hls2 = $eps2 | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
+          $fast2 = $eps2 | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
           $rtmp2 = $eps2 | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
-          if (-not $hls2.is_fast) { throw "FAILED (#192): 'e2e hls' is_fast did not stick after PUT (got $($hls2.is_fast))" }
+          if (-not $fast2) {
+            throw "FAILED (#192): CI-owned endpoint 'e2e fast' not present in /endpoints after find-or-create -- the fast-endpoint audit gate cannot run (strict gate, CLAUDE.md 'a CI test that can't run must FAIL')"
+          }
+          if ($fast2.service_type -ne 'TEST_FILE') { throw "FAILED (#192): 'e2e fast' must be service_type TEST_FILE (got '$($fast2.service_type)')" }
+          if (-not $fast2.enabled) { throw "FAILED (#192): 'e2e fast' must be enabled (got $($fast2.enabled))" }
+          if (-not $fast2.is_fast) { throw "FAILED (#192): 'e2e fast' is_fast did not stick (got $($fast2.is_fast))" }
+          # The API cannot set the pusher; only the Rust pusher dials the VPS
+          # loopback sink (the ffmpeg TEST_FILE path writes a file instead).
+          if ($fast2.pusher -ne 'rust') { throw "FAILED (#192): 'e2e fast' must use the Rust pusher (got '$($fast2.pusher)')" }
           if ($rtmp2 -and $rtmp2.is_fast) { throw "FAILED (#192): 'e2e rtmp' should be is_fast=false (got $($rtmp2.is_fast))" }
-          Write-Host "OK (#192): pinned 'e2e hls' is_fast=true, 'e2e rtmp' is_fast=false"
+          Write-Host "OK (#192): 'e2e fast' (TEST_FILE, id=$($fast2.id)) is_fast=true, 'e2e rtmp' is_fast=false"
 
       - name: Start stream (activate + delivery VPS)
         shell: powershell
@@ -3204,13 +3292,14 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
-          # Ensure 'e2e rtmp' and 'e2e hls' endpoints are attached. The
+          # Ensure 'e2e rtmp' and 'e2e fast' endpoints are attached. The
           # event row may exist but have zero attachments if it was
           # recreated after the original was deleted (the OBS-to-YouTube
           # buffering test depends on these two endpoints showing up in
-          # the dashboard).
+          # the dashboard). 'e2e fast' is the CI-owned TEST_FILE fast
+          # endpoint the pin step find-or-creates (#192).
           $allEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
-          $needAttach = @("e2e rtmp", "e2e hls")
+          $needAttach = @("e2e rtmp", "e2e fast")
           $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10
           $attachedAliases = @($eventEndpoints | ForEach-Object { $_.alias })
           foreach ($alias in $needAttach) {
@@ -3228,6 +3317,13 @@ jobs:
                 Write-Host "WARNING: Endpoint config '$alias' not found in /endpoints list"
               }
             }
+          }
+          # #192: 'e2e fast' is created by CI itself (pin step), so a missing
+          # attachment is a real fault, not box drift -- the fast-endpoint
+          # audit gate would otherwise degrade into a silent zero-gap warning.
+          $attachedNow = @(Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10 | ForEach-Object { $_.alias })
+          if ($attachedNow -notcontains 'e2e fast') {
+            throw "FAILED (#192): CI-owned endpoint 'e2e fast' is not attached to event $($targetEvent.id) (attached: $($attachedNow -join ', '))"
           }
 
           # Use the event's REAL cache_delay_secs (120s from production config).
@@ -3833,20 +3929,20 @@ jobs:
       - name: "Assert fast-endpoint audit (#192)"
         shell: powershell
         run: |
-          # #192: with 'e2e hls' pinned is_fast=true before start-stream, the
-          # VPS delivering transition must have emitted the host-side
-          # fast_endpoint_jumped_to_live_edge audit (exactly once) and the
-          # VPS-side endpoint_start_chunk_updated (mirrored to the host
-          # audit_log with event_id backfilled). This step runs BEFORE any
-          # crash/republish test, so the jump has fired exactly once. Bounded
-          # poll (the VPS->host mirror lags). If 'e2e hls' was not pinned fast
-          # (pin skipped on a box missing it), skip with a warning rather than
-          # newly-fail the shared job.
+          # #192: with the CI-owned 'e2e fast' (TEST_FILE) pinned is_fast=true
+          # before start-stream, the VPS delivering transition must have
+          # emitted the host-side fast_endpoint_jumped_to_live_edge audit
+          # (exactly once) and the VPS-side endpoint_start_chunk_updated
+          # (mirrored to the host audit_log with event_id backfilled). This
+          # step runs BEFORE any crash/republish test, so the jump has fired
+          # at most once. Bounded poll (the VPS->host mirror lags). The pin
+          # step seeds 'e2e fast' itself, so a missing/non-fast endpoint here
+          # is a hard failure, never a skip.
           $ErrorActionPreference = "Stop"
           $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
-          $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
-          if (-not $hls -or -not $hls.is_fast) {
-            throw "FAILED (#192): 'e2e hls' is not is_fast=true at assert time -- the pin step did not take effect"
+          $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+          if (-not $fast -or -not $fast.is_fast) {
+            throw "FAILED (#192): 'e2e fast' is not is_fast=true at assert time -- the pin step did not take effect"
           }
           $since = $env:FAST192_SINCE
           if (-not $since) { throw "FAILED (#192): FAST192_SINCE was not set by the pin step" }
@@ -3860,21 +3956,21 @@ jobs:
             # since-scoped to THIS run only (the E2E-Test event persists across runs).
             $a = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=1000" -TimeoutSec 10
             $rows = $a.rows
-            $jump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e hls' })
-            $upd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e hls' })
+            $jump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e fast' })
+            $upd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e fast' })
             $rtmpJump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e rtmp' })
             $rtmpUpd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e rtmp' })
             if ($jump.Count -ge 1 -and $upd.Count -ge 1) { break }
             Start-Sleep -Seconds 5
           }
-          Write-Host "#192 audit counts (since=$since): hls jump=$($jump.Count) upd=$($upd.Count) | rtmp jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)"
+          Write-Host "#192 audit counts (since=$since): fast jump=$($jump.Count) upd=$($upd.Count) | rtmp jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)"
           # ALWAYS enforced: the is_fast gating (non-fast 'e2e rtmp' emits neither
           # fast action) and no spurious re-fire in this run's window.
           if ($rtmpJump.Count -ne 0 -or $rtmpUpd.Count -ne 0) {
             throw "FAILED (#192): non-fast 'e2e rtmp' must NOT emit fast-endpoint audits (jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)) -- the is_fast gating is broken"
           }
           if ($jump.Count -gt 1) {
-            throw "FAILED (#192): unexpected re-fire -- $($jump.Count) fast_endpoint_jumped_to_live_edge rows for 'e2e hls' in this run's window (expected <=1 before any crash/republish test)"
+            throw "FAILED (#192): unexpected re-fire -- $($jump.Count) fast_endpoint_jumped_to_live_edge rows for 'e2e fast' in this run's window (expected <=1 before any crash/republish test)"
           }
           if ($jump.Count -eq 1) {
             # Full fast path exercised: the host jumped, so the VPS-side mirror
@@ -3883,9 +3979,9 @@ jobs:
               $dump = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=50" -TimeoutSec 10
               Write-Host "AUDIT DUMP (this run, event $eid):"
               $dump.rows | ForEach-Object { Write-Host "  $($_.ts) src=$($_.source) $($_.action) ep=$($_.endpoint)" }
-              throw "FAILED (#192): host emitted fast_endpoint_jumped_to_live_edge but NO endpoint_start_chunk_updated (VPS-side, mirrored) followed for 'e2e hls' -- the VPS->host audit mirror or the VPS update_start handler is broken"
+              throw "FAILED (#192): host emitted fast_endpoint_jumped_to_live_edge but NO endpoint_start_chunk_updated (VPS-side, mirrored) followed for 'e2e fast' -- the VPS->host audit mirror or the VPS update_start handler is broken"
             }
-            Write-Host "OK (#192): full fast-endpoint audit path verified -- jump=1, start_chunk_updated=$($upd.Count) for 'e2e hls', 0/0 for non-fast 'e2e rtmp'"
+            Write-Host "OK (#192): full fast-endpoint audit path verified -- jump=1, start_chunk_updated=$($upd.Count) for 'e2e fast', 0/0 for non-fast 'e2e rtmp'"
           } else {
             # jump.Count == 0: a legitimate ZERO-GAP this run -- no chunks were
             # marked sent between the original-start computation and the
@@ -3894,10 +3990,43 @@ jobs:
             # absent (both gated on gap>0). The is_fast gating is still verified
             # above (rtmp emitted nothing).
             if ($upd.Count -ne 0) {
-              throw "FAILED (#192): inconsistent -- 0 jump rows but $($upd.Count) endpoint_start_chunk_updated for 'e2e hls'"
+              throw "FAILED (#192): inconsistent -- 0 jump rows but $($upd.Count) endpoint_start_chunk_updated for 'e2e fast'"
             }
             Write-Host "::warning::#192: zero-gap this run -- fast_endpoint_jumped_to_live_edge did not fire (no chunks accrued in the pre-transition window). Fast-jump path not exercised this run; is_fast gating still verified."
           }
+
+          # #192: POSITIVE proof that 'e2e fast' really DELIVERS. Host `alive`
+          # only means the endpoint task has not finished -- the blind spot
+          # that hid the dead 127.0.0.1:1935 socket for months. Read the VPS
+          # /api/status directly (bearer token from the host DB, like the
+          # crash-exhaustion gate): its TEST_FILE loopback sink must have
+          # accepted a publish and its byte counter must RISE (bounded: up to
+          # 6 samples 10 s apart, so one reconnect gap cannot red the step).
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+          if (-not $instances -or @($instances).Count -lt 1) { throw "FAILED (#192): no delivery instance for the TEST_FILE sink check" }
+          $vpsBase = "http://$($instances[0].ipv4):8000"
+          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
+          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $token) { throw "FAILED (#192): could not read the VPS auth_token from the host DB" }
+          $vpsHeaders = @{ Authorization = "Bearer $token" }
+          $sink0 = (Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10).test_file_sink
+          if (-not $sink0) {
+            throw "FAILED (#192): VPS /api/status has no test_file_sink -- the TEST_FILE loopback sink is not running although 'e2e fast' is attached"
+          }
+          Write-Host "#192 sink: $($sink0.local_addr) publishes=$($sink0.counters.publishes) active=$($sink0.counters.active_connections) bytes=$($sink0.counters.bytes_received)"
+          $rose = $false
+          for ($i = 1; $i -le 6 -and -not $rose; $i++) {
+            Start-Sleep -Seconds 10
+            $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            $sink = $st.test_file_sink
+            $fastEp = $st.endpoints | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+            Write-Host "#192 sink sample ${i}: publishes=$($sink.counters.publishes) active=$($sink.counters.active_connections) bytes=$($sink.counters.bytes_received) | e2e fast chunks=$($fastEp.chunks_processed) push_age_ms=$($fastEp.last_push_ok_age_ms) mode=$($fastEp.delivery_mode)"
+            if ($sink -and [int64]$sink.counters.publishes -ge 1 -and [int64]$sink.counters.bytes_received -gt [int64]$sink0.counters.bytes_received) { $rose = $true }
+          }
+          if (-not $rose) {
+            throw "FAILED (#192): the VPS TEST_FILE sink received no new bytes in 60 s -- 'e2e fast' is not delivering"
+          }
+          Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
 
       - name: Verify delivery progression
         shell: powershell
@@ -3954,8 +4083,8 @@ jobs:
           # whole run on state the CI does not own (2026-05-20: a leftover
           # 'e2e fb' soak endpoint at 157.4s > 156s init cap hard-failed YT
           # e2e even though the CI's own endpoints were fine). The CI attaches
-          # exactly 'e2e rtmp' + 'e2e hls' (see the seed step's $needAttach).
-          $ciOwnedAliases = @("e2e rtmp", "e2e hls")
+          # exactly 'e2e rtmp' + 'e2e fast' (see the seed step's $needAttach).
+          $ciOwnedAliases = @("e2e rtmp", "e2e fast")
 
           # Phase 2: Initialization-phase overshoot + jump detection.
           # The 172s->120s jump bug happens in the FIRST 60s after warmup ends.
@@ -4046,7 +4175,7 @@ jobs:
           }
 
           if ($epReadings.Count -eq 0) {
-            throw "FAILED: No CI-owned non-fast endpoints (e2e rtmp / e2e hls) found in delivery status"
+            throw "FAILED: No CI-owned non-fast endpoint (e2e rtmp) found in delivery status ('e2e fast' is fast and skipped here)"
           }
 
           # Assert EACH endpoint advanced >= 3 chunks over 45s
@@ -5808,30 +5937,31 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # #192: undo the pin so the next run starts clean. The pin step also
-          # re-pins deterministically at the START of the next run, so this is
-          # best-effort: on failure emit a VISIBLE ::warning:: (a leaked fast
-          # flag must never be silently tolerated) rather than red an otherwise
-          # green job on a transient app-down during teardown.
+          # #192: undo the pin so the persistent E2E-Test event does not carry
+          # a fast endpoint between runs. The pin step find-or-creates and
+          # re-pins 'e2e fast' deterministically at the START of the next run,
+          # so this is best-effort: on failure emit a VISIBLE ::warning:: (a
+          # leaked fast flag must never be silently tolerated) rather than red
+          # an otherwise green job on a transient app-down during teardown.
           try {
             $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
-            $hls = $eps | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
-            if ($hls -and $hls.is_fast) {
+            $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+            if ($fast -and $fast.is_fast) {
               $body = @{ is_fast = $false } | ConvertTo-Json
-              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($hls.id)" -Method PUT `
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($fast.id)" -Method PUT `
                 -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
               $chk = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
-              $hls2 = $chk | Where-Object { $_.alias -eq 'e2e hls' } | Select-Object -First 1
-              if ($hls2.is_fast) {
-                Write-Host "::warning::#192: could not restore 'e2e hls' is_fast=false (still fast); next run's pin step will self-heal"
+              $fast2 = $chk | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+              if ($fast2.is_fast) {
+                Write-Host "::warning::#192: could not restore 'e2e fast' is_fast=false (still fast); next run's pin step will self-heal"
               } else {
-                Write-Host "OK (#192): restored 'e2e hls' is_fast=false"
+                Write-Host "OK (#192): restored 'e2e fast' is_fast=false"
               }
             } else {
-              Write-Host "#192: 'e2e hls' already non-fast (nothing to restore)"
+              Write-Host "#192: 'e2e fast' already non-fast (nothing to restore)"
             }
           } catch {
-            Write-Host "::warning::#192: restore of 'e2e hls' is_fast=false failed ($_); next run's pin step will self-heal"
+            Write-Host "::warning::#192: restore of 'e2e fast' is_fast=false failed ($_); next run's pin step will self-heal"
           }
 
       - name: Deactivate streaming event
