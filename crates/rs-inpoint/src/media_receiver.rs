@@ -19,16 +19,21 @@
 //!   subscribing, retrying) supersedes the current subscription, re-anchors
 //!   the chunker session (`start_new_session`) and subscribes immediately. A
 //!   Publish of a DIFFERENT stream supersedes only a session that is not
-//!   streaming. While one is streaming, the other Publish is remembered and
-//!   picked up when the live stream ends; it never orphans the live
-//!   publisher.
+//!   streaming. While one is streaming, the other Publish is deferred and
+//!   taken over the moment the live stream stops streaming (it stalls, ends
+//!   or is given up); it never orphans the live publisher.
+//! - Taking over a deferred Publish, and looking for a Publish a broadcast
+//!   lag may have swallowed, are PROBES: a Subscribe the hub accepts starts
+//!   the session, a rejection just leaves the receiver Idle (no "connected"
+//!   inpoint, no retry ladder against a publisher that is gone).
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
-//! - `Lagged` is logged and survived. While Idle, the receiver probes the
-//!   last known stream, because the lag may have swallowed its Publish. A
-//!   `Closed` hub channel is an error, so the orchestrator restarts the RTMP
-//!   server.
+//! - `Lagged` is logged and survived. The lag is remembered until the
+//!   receiver is next Idle with no session, and then the last known stream
+//!   is probed: the lag may have swallowed its Publish, even the live
+//!   stream's own reconnect. A `Closed` hub channel is an error, so the
+//!   orchestrator restarts the RTMP server.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -53,6 +58,7 @@ use rs_core::models::InpointState;
 
 use crate::InpointError;
 use crate::flv_chunker::FlvChunkSink;
+use crate::frame_stats::FrameStats;
 
 /// If no frames arrive for this long, assume the stream stalled and re-subscribe.
 /// 30s is well above the ~33ms frame interval at 30fps, so this won't trigger
@@ -61,9 +67,6 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout for hub subscription response.
 const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Interval for frame processing heartbeat log.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Maximum consecutive failed/stalled subscriptions before giving up on a
 /// published stream (a new Publish always starts over).
@@ -77,18 +80,26 @@ fn retry_delay(retry: u32) -> Duration {
 /// The hub's answer to a Subscribe request.
 type SubscribeReply = Result<(DataReceiver, Option<StatisticDataSender>), StreamHubError>;
 
+/// A Subscribe sent with no session behind it yet (#367): a deferred
+/// Publish taken over, or a stream a broadcast lag may have hidden.
+/// Acceptance starts the session (audited with `trigger`); a rejection just
+/// returns to Idle.
+struct Probe {
+    identifier: StreamIdentifier,
+    trigger: &'static str,
+}
+
 /// What the receiver is doing for the current publisher.
 enum Phase {
     /// No publisher, or gave up on it. Only a hub event moves us on.
     Idle,
-    /// A Subscribe request is in flight. `probe` is set for a lost-Publish
-    /// probe (no session yet): success starts the session, failure just
-    /// returns to Idle.
+    /// A Subscribe request is in flight; `probe` is set when no session
+    /// stands behind it yet.
     Subscribing {
         reply: oneshot::Receiver<SubscribeReply>,
         info: SubscriberInfo,
         deadline: Instant,
-        probe: Option<StreamIdentifier>,
+        probe: Option<Probe>,
     },
     /// Subscribed: frames are flowing, or stalled until FRAME_TIMEOUT.
     Streaming {
@@ -161,9 +172,25 @@ struct Session {
     /// Frames were written since the last `start_new_session` -- the next
     /// successful subscribe must re-anchor.
     dirty: bool,
-    total_frames: u64,
-    frames_since_heartbeat: u64,
-    last_heartbeat: Instant,
+    stats: FrameStats,
+}
+
+impl Session {
+    fn new(identifier: StreamIdentifier) -> Self {
+        Self {
+            identifier,
+            retries: 0,
+            dirty: false,
+            stats: FrameStats::new(Instant::now()),
+        }
+    }
+
+    /// A frame arrived, so the re-subscribe ladder starts over. Returns how
+    /// many retries it took to get frames flowing again, if any.
+    fn frames_resumed(&mut self) -> Option<u32> {
+        let retries = std::mem::take(&mut self.retries);
+        (retries > 0).then_some(retries)
+    }
 }
 
 /// Receives media data from the xiu StreamsHub and processes it into FLV chunks.
@@ -175,10 +202,13 @@ pub struct MediaReceiver {
     session: Option<Session>,
     phase: Phase,
     /// A Publish of a different stream that arrived while the current one
-    /// was streaming; picked up when the current session ends.
+    /// was live; taken over the moment the current one stops streaming.
     pending_publish: Option<StreamIdentifier>,
     /// The last stream that published (target of a lost-Publish probe).
     last_identifier: Option<StreamIdentifier>,
+    /// A broadcast lag happened that no probe has covered yet: the next time
+    /// the receiver is Idle with no session, it probes `last_identifier`.
+    lag_unprobed: bool,
 }
 
 impl MediaReceiver {
@@ -197,6 +227,7 @@ impl MediaReceiver {
             phase: Phase::Idle,
             pending_publish: None,
             last_identifier: None,
+            lag_unprobed: false,
         }
     }
 
@@ -219,9 +250,10 @@ impl MediaReceiver {
                     warn!(
                         skipped,
                         phase = self.phase.name(),
-                        "Media receiver lagged behind the hub broadcast channel -- continuing (#367)"
+                        "Media receiver lagged behind the hub broadcast channel -- continuing; \
+                         the last stream is probed once the receiver is idle (#367)"
                     );
-                    self.probe_after_lag().await;
+                    self.lag_unprobed = true;
                 }
                 Wake::Hub(Err(RecvError::Closed)) => {
                     error!("Hub broadcast event channel closed -- media receiver cannot continue");
@@ -243,7 +275,7 @@ impl MediaReceiver {
                 Wake::Frame(Some(frame)) => self.on_frame(frame).await,
                 Wake::Frame(None) => {
                     // Channel closed -- publisher disconnected normally.
-                    let total = self.session.as_ref().map_or(0, |s| s.total_frames);
+                    let total = self.session.as_ref().map_or(0, |s| s.stats.total());
                     info!(
                         total_frames = total,
                         "Frame channel closed, flushing remaining data"
@@ -253,7 +285,7 @@ impl MediaReceiver {
                     self.end_session("publisher_closed").await;
                 }
                 Wake::Stalled => {
-                    let total = self.session.as_ref().map_or(0, |s| s.total_frames);
+                    let total = self.session.as_ref().map_or(0, |s| s.stats.total());
                     error!(
                         total_frames = total,
                         timeout_secs = FRAME_TIMEOUT.as_secs(),
@@ -265,13 +297,34 @@ impl MediaReceiver {
                 }
                 Wake::RetryDue => self.subscribe().await,
             }
-            // A Publish deferred while another stream was live is picked up
-            // the moment no session is left.
-            if self.session.is_none() && matches!(self.phase, Phase::Idle) {
-                if let Some(next) = self.pending_publish.take() {
-                    info!("Picking up the Publish deferred while another stream was live: {next}");
-                    self.on_publish(next).await;
-                }
+            self.settle().await;
+        }
+    }
+
+    /// Run after every wakeup (#367). A Publish deferred behind a live
+    /// stream is taken over the moment that stream is no longer live
+    /// (stalled, retrying, given up or ended). An unprobed broadcast lag is
+    /// covered once the receiver is Idle with no session. Both are probes.
+    async fn settle(&mut self) {
+        if matches!(self.phase, Phase::Idle | Phase::RetryWait { .. }) {
+            if let Some(next) = self.pending_publish.take() {
+                info!(
+                    phase = self.phase.name(),
+                    "The live stream stopped streaming -- taking over the Publish deferred \
+                     behind it, as a probe: {next} (#367)"
+                );
+                self.end_session("superseded_by_deferred_publish").await;
+                self.send_subscribe(next, Some("deferred_publish")).await;
+                return;
+            }
+        }
+        if self.lag_unprobed && self.session.is_none() && matches!(self.phase, Phase::Idle) {
+            self.lag_unprobed = false;
+            if let Some(identifier) = self.last_identifier.clone() {
+                warn!(
+                    "Idle after a lagged broadcast -- probing the last stream {identifier} (#367)"
+                );
+                self.send_subscribe(identifier, Some("lagged_probe")).await;
             }
         }
     }
@@ -285,7 +338,7 @@ impl MediaReceiver {
                 if busy_with_other {
                     warn!(
                         "Publish of a different stream ({identifier}) while another one is \
-                         streaming -- deferred until the live stream ends (#367)"
+                         streaming -- deferred until the live stream stops streaming (#367)"
                     );
                     self.pending_publish = Some(identifier);
                 } else {
@@ -319,7 +372,7 @@ impl MediaReceiver {
                  subscription and subscribing immediately (#367)"
             );
         }
-        // Also leaves a pending lost-Publish probe (no session behind it).
+        // Also abandons a probe in flight (no session behind it).
         self.drop_subscription();
         self.end_session("superseded_by_publish").await;
 
@@ -344,29 +397,7 @@ impl MediaReceiver {
             }),
         );
         self.flv_chunk_sink.start_new_session().await;
-        self.session = Some(Session {
-            identifier,
-            retries: 0,
-            dirty: false,
-            total_frames: 0,
-            frames_since_heartbeat: 0,
-            last_heartbeat: Instant::now(),
-        });
-    }
-
-    /// A broadcast lag may have swallowed a Publish (#367). While Idle,
-    /// probe the last known stream: a Subscribe the hub accepts starts the
-    /// session, and a rejection (nothing is publishing) just returns to Idle,
-    /// with no session, no "connected" flag and no retry ladder.
-    async fn probe_after_lag(&mut self) {
-        if self.session.is_some() || !matches!(self.phase, Phase::Idle) {
-            return;
-        }
-        let Some(identifier) = self.last_identifier.clone() else {
-            return;
-        };
-        warn!("Idle after a lagged broadcast -- probing the last stream {identifier} (#367)");
-        self.send_subscribe(identifier, true).await;
+        self.session = Some(Session::new(identifier));
     }
 
     /// Send a Subscribe request for the current session's stream.
@@ -375,13 +406,17 @@ impl MediaReceiver {
             self.phase = Phase::Idle;
             return;
         };
-        self.send_subscribe(identifier, false).await;
+        self.send_subscribe(identifier, None).await;
     }
 
-    /// Send a Subscribe for `identifier`. `probe`: a lost-Publish probe with
-    /// no session behind it yet.
-    async fn send_subscribe(&mut self, identifier: StreamIdentifier, probe: bool) {
-        let probe_id = probe.then(|| identifier.clone());
+    /// Send a Subscribe for `identifier`. `probe`: the trigger of a probe
+    /// with no session behind it yet (see [`Probe`]); `None` subscribes for
+    /// the current session.
+    async fn send_subscribe(&mut self, identifier: StreamIdentifier, probe: Option<&'static str>) {
+        let probe = probe.map(|trigger| Probe {
+            identifier: identifier.clone(),
+            trigger,
+        });
         let info = SubscriberInfo {
             id: Uuid::new(RandomDigitCount::Six),
             sub_type: SubscribeType::RtmpPull,
@@ -403,17 +438,21 @@ impl MediaReceiver {
         {
             warn!("Failed to send subscribe request to hub");
             self.phase = Phase::Idle;
-            if !probe {
+            if probe.is_none() {
                 self.schedule_retry("hub_unreachable").await;
             }
             return;
         }
-        debug!(subscriber_id = %info.id, probe, "Subscribe request sent to hub");
+        debug!(
+            subscriber_id = %info.id,
+            probe = probe.as_ref().map(|p| p.trigger),
+            "Subscribe request sent to hub"
+        );
         self.phase = Phase::Subscribing {
             reply: result_rx,
             info,
             deadline: Instant::now() + SUBSCRIPTION_TIMEOUT,
-            probe: probe_id,
+            probe,
         };
     }
 
@@ -442,16 +481,22 @@ impl MediaReceiver {
         };
         let Some(frames) = frames else {
             match probe {
-                Some(id) => {
-                    info!("Lost-Publish probe found nothing publishing on {id} -- staying idle")
-                }
+                Some(p) => info!(
+                    trigger = p.trigger,
+                    "Probe found nothing publishing on {} -- staying idle (#367)", p.identifier
+                ),
                 None => self.schedule_retry("subscription_failed").await,
             }
             return;
         };
-        if let Some(id) = probe {
-            info!("Lost-Publish probe found {id} publishing -- starting its session (#367)");
-            self.begin_session(id, "lagged_probe").await;
+        // Attached again: a Publish an earlier lag may have hidden is moot.
+        self.lag_unprobed = false;
+        if let Some(p) = probe {
+            info!(
+                trigger = p.trigger,
+                "Probe found {} publishing -- starting its session (#367)", p.identifier
+            );
+            self.begin_session(p.identifier, p.trigger).await;
         }
 
         // #367: xiu gives no session id, so ANY successful re-subscribe after
@@ -479,20 +524,15 @@ impl MediaReceiver {
             *last_frame = Instant::now();
         }
         if let Some(s) = self.session.as_mut() {
-            if s.retries > 0 {
-                info!(after_retries = s.retries, "Frames flowing again");
-                s.retries = 0;
+            if let Some(retries) = s.frames_resumed() {
+                info!(after_retries = retries, "Frames flowing again");
             }
-            s.total_frames += 1;
-            s.frames_since_heartbeat += 1;
-            if s.last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            if let Some(beat) = s.stats.count(Instant::now()) {
                 info!(
-                    frames_last_60s = s.frames_since_heartbeat,
-                    total_frames = s.total_frames,
+                    frames_last_60s = beat.frames_since_last,
+                    total_frames = beat.total_frames,
                     "Frame processing heartbeat"
                 );
-                s.frames_since_heartbeat = 0;
-                s.last_heartbeat = Instant::now();
             }
         }
         match frame {
@@ -554,7 +594,7 @@ impl MediaReceiver {
     fn drop_subscription(&mut self) {
         let (info, probe) = match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Streaming { info, .. } => (info, None),
-            Phase::Subscribing { info, probe, .. } => (info, probe),
+            Phase::Subscribing { info, probe, .. } => (info, probe.map(|p| p.identifier)),
             Phase::Idle | Phase::RetryWait { .. } => return,
         };
         let Some(identifier) = self
