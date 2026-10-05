@@ -157,3 +157,105 @@ async fn an_accepted_probe_does_not_swallow_a_lag_of_another_stream() {
     );
     drop(frames_a);
 }
+
+/// Seventh review (#367): a pending lag belongs to the LAST stream; ANY
+/// session start of another stream must keep it (as a remembered stream),
+/// not only an accepted probe. Here a Publish abandons a remembered probe
+/// and starts its stream's session directly.
+#[tokio::test(start_paused = true)]
+async fn a_session_start_of_another_stream_keeps_a_pending_lag() {
+    let _wd = watchdog("a_session_start_of_another_stream_keeps_a_pending_lag");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    // B streams and stalls; A publishes and supersedes it (B remembered).
+    let frames_b = stream(&event_tx, &mut requests, &other).await;
+    tokio::time::sleep(FRAME_TIMEOUT + Duration::from_secs(1)).await;
+    let frames_a = stream(&event_tx, &mut requests, &live).await;
+
+    // A lag while A streams, then A's connection closes.
+    overflow(&event_tx);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(frames_a);
+    let (probed, b_reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the remembered B is probed")
+        .unwrap();
+    assert_eq!(probed, other);
+    // B publishes while that probe is in flight: its own session starts.
+    let frames_b2 = stream(&event_tx, &mut requests, &other).await;
+    drop(b_reply);
+
+    // B ends: the lag that could hide A's reconnect is still probed.
+    drop(frames_b2);
+    assert_eq!(
+        rejected_probes(&mut requests, Duration::from_secs(60)).await,
+        vec![live],
+        "the pending lag of A survives B's session start"
+    );
+    drop(frames_b);
+}
+
+/// Seventh review (#367): a probe of a remembered stream covers its entry;
+/// a stream just probed and found gone is not probed again.
+#[tokio::test(start_paused = true)]
+async fn a_probe_covers_its_remembered_entry() {
+    let _wd = watchdog("a_probe_covers_its_remembered_entry");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    // A streams and stalls; B supersedes it directly (A remembered).
+    let frames_a = stream(&event_tx, &mut requests, &live).await;
+    tokio::time::sleep(FRAME_TIMEOUT + Duration::from_secs(1)).await;
+    let frames_b = stream(&event_tx, &mut requests, &other).await;
+    // A publishes again while B streams: deferred.
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+
+    // B stalls: A is taken over (B remembered). Both are gone.
+    assert_eq!(
+        rejected_probes(&mut requests, Duration::from_secs(60)).await,
+        vec![live, other],
+        "the takeover probe of A covers A's remembered entry: A is not probed twice"
+    );
+    drop((frames_a, frames_b));
+}
+
+/// Seventh review (#367): a deferred Publish overwritten by a newer one of
+/// a third stream is remembered, not dropped.
+#[tokio::test(start_paused = true)]
+async fn an_overwritten_deferred_publish_is_remembered() {
+    let _wd = watchdog("an_overwritten_deferred_publish_is_remembered");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let third = identifier_named("third-c");
+
+    let frames_a = stream(&event_tx, &mut requests, &live).await;
+    for deferred in [&other, &third] {
+        event_tx
+            .send(BroadcastEvent::Publish {
+                identifier: deferred.clone(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // A's publisher closes (seen ending: not remembered): C is taken over,
+    // then the overwritten B is probed.
+    drop(frames_a);
+    assert_eq!(
+        rejected_probes(&mut requests, Duration::from_secs(60)).await,
+        vec![third, other],
+        "the newest deferred Publish first, then the one it overwrote"
+    );
+}

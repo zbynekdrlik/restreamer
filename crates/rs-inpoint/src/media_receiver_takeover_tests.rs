@@ -123,8 +123,8 @@ async fn deferred_publish_is_taken_over_when_the_live_stream_stalls() {
 
 /// Review finding (#367): a deferred Publish can be STALE by the time the
 /// live stream ends (that publisher already left). Taking it over must be a
-/// probe: the takeover probe and ONE probe of the ended live stream it
-/// superseded, both rejected, then Idle. Never an inpoint reported
+/// probe: ONE rejected probe, then Idle. The live stream ENDED (its
+/// publisher closed), so it is not remembered. Never an inpoint reported
 /// "connected" with a re-subscribe ladder behind a stream that is gone.
 #[tokio::test(start_paused = true)]
 async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
@@ -168,8 +168,8 @@ async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
     );
     assert_eq!(
         probed,
-        vec![other, live],
-        "the takeover probe, ONE remembered probe of the ended live stream, then silence"
+        vec![other],
+        "the takeover probe, then silence: the receiver SAW the live stream end"
     );
     assert!(
         !state.is_connected(),
