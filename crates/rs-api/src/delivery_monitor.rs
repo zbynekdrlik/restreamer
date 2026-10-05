@@ -159,6 +159,27 @@ impl DeliveryOrchestrator {
                         previous_failures = consecutive_failures,
                         "Delivery VPS health recovered"
                     );
+                    // #367 review: the paired recovery of `VpsUnreachable`.
+                    // Without it the outage notifier's VPS-reachability
+                    // episode stayed open for the rest of the delivery and a
+                    // later real VPS death was deduped away.
+                    if let Some(tx) = self.audit_tx() {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Info,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::VpsReachable,
+                                detail: serde_json::json!({
+                                    "recovered_after_failures": consecutive_failures,
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
                 }
                 consecutive_failures = 0;
                 db::update_delivery_instance_health(self.pool(), instance_id)

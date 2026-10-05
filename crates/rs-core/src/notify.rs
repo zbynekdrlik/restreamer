@@ -64,9 +64,9 @@ enum Signal {
 enum Family {
     /// Host internet egress (the #261 probe; paired with its recovery).
     HostInternet,
-    /// Host -> delivery VPS reachability (the delivery monitor). No
-    /// recovery row of its own: ended by `HostInternetRecovered` (the
-    /// monitor waits for the network) or a delivery boundary (a new VPS).
+    /// Host -> delivery VPS reachability (the delivery monitor). Ended by
+    /// the monitor's `VpsReachable`, by `HostInternetRecovered` (a network
+    /// outage is the usual cause) or by the end of the delivery.
     VpsReachability,
     /// Host -> S3 chunk upload, permanent failures. No recovery row of its
     /// own: ended by `HostInternetRecovered` or an event boundary.
@@ -96,6 +96,7 @@ fn classify(action: Action) -> Option<Signal> {
         Action::VpsUnreachable => Signal::Onset(action, Family::VpsReachability),
         Action::S3UploadFailed => Signal::Onset(action, Family::S3Upload),
         Action::HostInternetRecovered => Signal::Recovery(action, HOST_NETWORK_FAMILIES),
+        Action::VpsReachable => Signal::Recovery(action, &[Family::VpsReachability]),
         Action::RescueActivated => Signal::Onset(action, Family::Rescue),
         Action::RescueRecovered => Signal::Recovery(action, &[Family::Rescue]),
         // #354: the ingest-side A/V-skew banner exists BECAUSE the 2026-08-30
@@ -128,8 +129,8 @@ fn classify(action: Action) -> Option<Signal> {
 /// alert, but the next onset alerts again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
-    /// A delivery (VPS) began or ended: every VPS-side episode belongs to a
-    /// VPS that is gone or replaced.
+    /// A delivery (VPS) ended: every VPS-side episode belongs to a VPS that
+    /// is gone.
     Delivery,
     /// One endpoint (the row's alias) was added, removed or respawned: its
     /// VPS-side episodes belong to an endpoint task that is gone.
@@ -161,10 +162,10 @@ impl Scope {
 /// The lifecycle edge an audit action marks, if any.
 fn ends_scope(action: Action) -> Option<Scope> {
     match action {
-        Action::DeliveryStarted
-        | Action::DeliveryStopped
-        | Action::VpsReady
-        | Action::VpsDeleted => Some(Scope::Delivery),
+        // END edges only: a start request on a LIVE delivery reuses its
+        // instance yet still records DeliveryStarted and re-emits VpsReady,
+        // and must not close that delivery's episodes.
+        Action::DeliveryStopped | Action::VpsDeleted => Some(Scope::Delivery),
         Action::EndpointAdded | Action::EndpointRemoved | Action::EndpointStartChunkUpdated => {
             Some(Scope::Endpoint)
         }
@@ -256,6 +257,18 @@ fn onset_suppressed_by_detail(action: Action, detail: &serde_json::Value) -> boo
     }
 }
 
+/// A recovery row that ENDS its episode but claims nothing measured, so it
+/// must not send a "recovered" alert (#367 review round 2). The chunker's
+/// session reset clears a latched ingest skew (`IngestSkewRecovered`,
+/// `state: "reset"`), yet nobody measured the source back in sync: the
+/// re-baselined detector absorbs a persisting constant offset. Closing the
+/// episode silently re-arms the next desync alert without a false
+/// "znova zosynchronizované".
+fn recovery_unmeasured(action: Action, detail: &serde_json::Value) -> bool {
+    action == Action::IngestSkewRecovered
+        && detail.get("state").and_then(|v| v.as_str()) == Some("reset")
+}
+
 /// True when an event name belongs to the CI E2E test events, whose deliberate
 /// outage edges must never reach the operator's alert channel (#311). The two
 /// CI events are `E2E-Test` and `E2E-FB-Test` (ci.yml owns the names); the
@@ -282,6 +295,7 @@ fn slovak_text(action: Action) -> &'static str {
         }
         Action::RescueRecovered => "✅ Spojenie obnovené — vysielanie pokračuje normálne.",
         Action::HostInternetRecovered => "✅ Internet na streamovacom PC obnovený.",
+        Action::VpsReachable => "✅ Streamovací server (VPS) je znova dostupný.",
         Action::IngestSkewDetected => {
             "🔴 Zvuk a obraz z OBS sú rozídené — reštartuj stream v OBS. Delivery sa nedá spustiť, \
              kým to platí."
@@ -297,7 +311,7 @@ fn slovak_text(action: Action) -> &'static str {
         Action::AvInvariantRestored => {
             "✅ Synchronizácia zvuku a obrazu v Restreameri je znova v poriadku."
         }
-        // classify() only routes the eleven actions above into this function.
+        // classify() only routes the twelve actions above into this function.
         _ => "",
     }
 }
@@ -470,15 +484,7 @@ impl OutageNotifier {
             }
             Signal::Recovery(action, families) => {
                 let keys = families.iter().map(|&family| EpisodeKey::of(family, row));
-                if self.episodes.recover(keys) {
-                    tracing::info!(
-                        ?families,
-                        action = ?action,
-                        endpoint = ?row.endpoint,
-                        "outage notifier: episode recovered"
-                    );
-                    Some(build_alert(action, row))
-                } else {
+                if !self.episodes.recover(keys) {
                     // No spurious "recovered" when no such episode was open.
                     tracing::debug!(
                         ?families,
@@ -486,8 +492,24 @@ impl OutageNotifier {
                         endpoint = ?row.endpoint,
                         "outage notifier: recovery with no open episode -- no alert"
                     );
-                    None
+                    return None;
                 }
+                if recovery_unmeasured(action, &row.detail) {
+                    tracing::info!(
+                        ?families,
+                        action = ?action,
+                        detail = %row.detail,
+                        "outage notifier: episode closed by a reset, nothing measured -- no alert"
+                    );
+                    return None;
+                }
+                tracing::info!(
+                    ?families,
+                    action = ?action,
+                    endpoint = ?row.endpoint,
+                    "outage notifier: episode recovered"
+                );
+                Some(build_alert(action, row))
             }
             // #84: fire the heads-up without touching episode state. The
             // emitter (the long-stream monitor) already dedups to once per
