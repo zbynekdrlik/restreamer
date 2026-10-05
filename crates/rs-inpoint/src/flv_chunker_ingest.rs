@@ -17,14 +17,14 @@
 //! new timeline. A session re-anchor (`clear_session_epoch`) drops it.
 
 use bytes::BytesMut;
-use rs_rtmp_push::AvInvariantEvent;
+
 use tracing::{debug, warn};
 
 use super::{
     FLV_TAG_AUDIO, FLV_TAG_VIDEO, FlvChunkSink, FlvChunkSinkInner, MAX_BUFFER_SIZE,
     PendingChunkWrite,
 };
-use crate::ingest_report::{BoundaryReport, publish_boundary, publish_reanchor};
+use crate::ingest_report::{BoundaryReport, ReanchorEdges, publish_boundary, publish_reanchor};
 use crate::src_track::{SrcStep, Track};
 
 /// A far-backward tag waiting for the next tag to decide what it was.
@@ -41,8 +41,8 @@ pub(super) struct HeldTag {
 pub(super) struct Reanchored {
     /// The old session's partial chunk, if it had any data.
     flushed: Option<PendingChunkWrite>,
-    /// A latched invariant violation of the old session, now closed.
-    invariant: Option<AvInvariantEvent>,
+    /// The old session's latched guards, now closed.
+    edges: ReanchorEdges,
 }
 
 /// What ingesting one tag left to finish outside the lock.
@@ -143,7 +143,7 @@ impl FlvChunkSink {
             if let Some(pending) = r.flushed {
                 self.commit_chunk(pending).await;
             }
-            publish_reanchor(self.ingest_state.as_ref(), r.invariant);
+            publish_reanchor(self.ingest_state.as_ref(), self.skew_threshold_ms, r.edges);
         }
         for boundary in fx.boundaries {
             publish_boundary(self.ingest_state.as_ref(), self.skew_threshold_ms, boundary);
@@ -297,7 +297,7 @@ impl FlvChunkSink {
     ) -> Reanchored {
         let flushed = Self::extract_chunk(inner);
         let old_origin = inner.session_origin_src;
-        let invariant = Self::clear_session_epoch(inner);
+        let edges = Self::clear_session_epoch(inner);
         warn!(
             ?track,
             prev_src_ts = prev,
@@ -308,6 +308,6 @@ impl FlvChunkSink {
             "flv_chunker: source ts stayed far behind -- a new publisher on the same identifier; \
              re-anchoring BOTH tracks on a new shared session origin (#367)"
         );
-        Reanchored { flushed, invariant }
+        Reanchored { flushed, edges }
     }
 }

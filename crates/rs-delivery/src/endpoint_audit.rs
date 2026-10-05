@@ -399,14 +399,14 @@ pub fn emit_av_invariant_event(
     let Some(ring) = audit_ring else { return };
     let (severity, action, detail) = match event {
         rs_rtmp_push::AvInvariantEvent::Violated(v) => rs_core::audit::av_invariant_violated_row(
-            "push",
+            rs_core::audit::AV_STAGE_PUSH,
             v.a_rel_ms,
             v.v_rel_ms,
             v.delta_ms,
             rs_rtmp_push::AV_INVARIANT_TOLERANCE_MS,
         ),
         rs_rtmp_push::AvInvariantEvent::Restored { delta_ms } => {
-            rs_core::audit::av_invariant_restored_row("push", *delta_ms)
+            rs_core::audit::av_invariant_restored_row(rs_core::audit::AV_STAGE_PUSH, *delta_ms)
         }
     };
     ring.push(

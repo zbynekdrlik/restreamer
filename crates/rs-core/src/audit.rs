@@ -399,6 +399,13 @@ pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
     }
 }
 
+/// #367: `detail.stage` of an A/V invariant row written by the ingest chunker.
+pub const AV_STAGE_INGEST: &str = "ingest";
+/// #367: `detail.stage` of an A/V invariant row written by a VPS pusher. The
+/// outage notifier scopes push-stage episodes to the live pusher, the
+/// endpoint and the delivery (`notify::Scope`), so both sides must use this.
+pub const AV_STAGE_PUSH: &str = "push";
+
 /// #367: the ONE audit-row shape of an absolute A/V invariant VIOLATION
 /// edge, shared by the ingest chunker (`stage: "ingest"`) and every VPS
 /// pusher (`stage: "push"`). Primitives only, so rs-core needs no

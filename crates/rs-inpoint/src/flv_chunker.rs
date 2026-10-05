@@ -9,11 +9,11 @@ use tracing::{debug, info};
 
 use rs_core::models::InpointState;
 
-use crate::ingest_report::{BoundaryReport, publish_boundary, publish_reanchor};
+use crate::ingest_report::{BoundaryReport, ReanchorEdges, publish_boundary, publish_reanchor};
 use crate::ingest_skew::IngestSkewMonitor;
 use crate::src_track::{SrcTrack, Track};
 use crate::wall_clock::{WallClock, system_clock};
-use rs_rtmp_push::{AvInvariantEvent, AvInvariantGuard};
+use rs_rtmp_push::AvInvariantGuard;
 
 #[path = "flv_chunker_ingest.rs"]
 mod ingest;
@@ -353,7 +353,7 @@ impl FlvChunkSink {
 
         let mut inner = self.inner.lock().await;
         let old_origin = inner.session_origin_src;
-        let invariant = Self::clear_session_epoch(&mut inner);
+        let edges = Self::clear_session_epoch(&mut inner);
         info!(
             chunk_index = inner.chunk_index,
             old_session_origin_src = ?old_origin,
@@ -361,7 +361,7 @@ impl FlvChunkSink {
              keyframe re-anchors audio+video together (#255, #367)"
         );
         drop(inner);
-        publish_reanchor(self.ingest_state.as_ref(), invariant);
+        publish_reanchor(self.ingest_state.as_ref(), self.skew_threshold_ms, edges);
     }
 
     /// Reset the chunker state.
@@ -372,9 +372,9 @@ impl FlvChunkSink {
     pub async fn reset(&self) {
         let mut inner = self.inner.lock().await;
         inner.buffer.clear();
-        let invariant = Self::clear_session_epoch(&mut inner);
+        let edges = Self::clear_session_epoch(&mut inner);
         drop(inner);
-        publish_reanchor(self.ingest_state.as_ref(), invariant);
+        publish_reanchor(self.ingest_state.as_ref(), self.skew_threshold_ms, edges);
     }
 
     /// Evaluate both A/V guards at a chunk boundary (under the lock).
@@ -391,9 +391,10 @@ impl FlvChunkSink {
 
     /// Re-zero the per-session time state: the shared source origin, the
     /// last source ts of BOTH tracks, the skew monitor and the invariant
-    /// guard. Keeps `chunk_index` and the saved sequence headers. Returns the
-    /// guard's `Restored` edge if a violation was latched.
-    fn clear_session_epoch(inner: &mut FlvChunkSinkInner) -> Option<AvInvariantEvent> {
+    /// guard. Keeps `chunk_index` and the saved sequence headers. Returns
+    /// the edges of the guards that were latched: the skew monitor's cleared
+    /// skew and the invariant guard's `Restored`.
+    fn clear_session_epoch(inner: &mut FlvChunkSinkInner) -> ReanchorEdges {
         inner.chunk_start = None;
         inner.chunk_first_ts = 0;
         inner.chunk_last_ts = 0;
@@ -405,9 +406,13 @@ impl FlvChunkSink {
         inner.held = None;
         // #354: a new session is a new common origin, and the operator banner
         // must clear on it.
-        inner.skew_monitor.reset();
+        let skew_cleared_at = inner.skew_monitor.reset();
         // #367: a new session is a new transform.
-        inner.av_invariant.reset()
+        let invariant = inner.av_invariant.reset();
+        ReanchorEdges {
+            skew_cleared_at,
+            invariant,
+        }
     }
 
     /// Hand an extracted chunk to the background writer, and commit the

@@ -137,11 +137,19 @@ impl IngestSkewMonitor {
     /// chunker's `start_new_session`): both tracks, the debounce, the baseline
     /// AND the operator latch are cleared, so skew re-measures from the new
     /// common origin and the banner clears.
-    pub fn reset(&mut self) {
+    ///
+    /// Returns the skew the latch was holding when this reset CLEARED an
+    /// active latch, so the caller records the recovery (#367 review B1:
+    /// a latch cleared without an `IngestSkewRecovered` row left the outage
+    /// notifier's episode open, and the next desync was never alerted).
+    /// `None` when no latch was set.
+    pub fn reset(&mut self) -> Option<i64> {
+        let cleared = self.active.then_some(self.last_skew_ms);
         self.tracker.reset_tracks();
         self.consecutive_over = 0;
         self.active = false;
         self.last_skew_ms = 0;
+        cleared
     }
 
     /// Evaluate at the END of one chunk. Advances the tracker, reads the

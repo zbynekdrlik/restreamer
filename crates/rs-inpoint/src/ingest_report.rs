@@ -14,7 +14,8 @@
 //! chunker's inner lock.
 
 use rs_core::audit::{
-    Action, AuditRow, Severity, Source, av_invariant_restored_row, av_invariant_violated_row,
+    AV_STAGE_INGEST, Action, AuditRow, Severity, Source, av_invariant_restored_row,
+    av_invariant_violated_row,
 };
 use rs_core::models::InpointState;
 use rs_rtmp_push::{AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantGuard};
@@ -81,15 +82,45 @@ pub(crate) fn publish_boundary(state: Option<&InpointState>, threshold_ms: i64, 
     }
 }
 
+/// What a session re-anchor (both guards reset) left to publish.
+#[derive(Debug, Default)]
+pub(crate) struct ReanchorEdges {
+    /// The skew a latched ingest skew monitor was holding when the reset
+    /// cleared it (`IngestSkewMonitor::reset`).
+    pub(crate) skew_cleared_at: Option<i64>,
+    /// A latched invariant violation of the old session, now closed.
+    pub(crate) invariant: Option<AvInvariantEvent>,
+}
+
 /// Publish a session re-anchor: both guards were reset, so the banner
-/// clears; a latched invariant violation closes with one Restored row.
-pub(crate) fn publish_reanchor(state: Option<&InpointState>, invariant: Option<AvInvariantEvent>) {
-    let invariant_row = invariant.as_ref().map(invariant_edge);
+/// clears. Each guard that was latched closes with ONE row: the invariant
+/// guard's `AvInvariantRestored`, and the skew monitor's
+/// `IngestSkewRecovered` (`state: "reset"`). Without the latter the outage
+/// notifier's IngestSkew episode never closed after the OBS restart the
+/// alert asked for, and the next desync was never alerted (#367 review B1).
+pub(crate) fn publish_reanchor(state: Option<&InpointState>, threshold_ms: i64, e: ReanchorEdges) {
+    let invariant_row = e.invariant.as_ref().map(invariant_edge);
     let Some(state) = state else {
         return;
     };
     state.set_ingest_skew_active(false);
     state.set_ingest_skew_ms(0);
+    if let Some(skew_ms) = e.skew_cleared_at {
+        tracing::info!(
+            skew_ms,
+            "ingest A/V skew CLEARED by a session reset -- new publisher session"
+        );
+        audit(
+            state,
+            Severity::Info,
+            Action::IngestSkewRecovered,
+            serde_json::json!({
+                "skew_ms": skew_ms,
+                "threshold_ms": threshold_ms,
+                "state": "reset",
+            }),
+        );
+    }
     if let Some((severity, action, detail)) = invariant_row {
         audit(state, severity, action, detail);
     }
@@ -112,7 +143,7 @@ fn invariant_edge(ev: &AvInvariantEvent) -> (Severity, Action, serde_json::Value
                  publisher's source relation (#367)"
             );
             av_invariant_violated_row(
-                "ingest",
+                AV_STAGE_INGEST,
                 v.a_rel_ms,
                 v.v_rel_ms,
                 v.delta_ms,
@@ -125,7 +156,7 @@ fn invariant_edge(ev: &AvInvariantEvent) -> (Severity, Action, serde_json::Value
                 delta_ms,
                 "flv_chunker: A/V invariant restored (#367)"
             );
-            av_invariant_restored_row("ingest", *delta_ms)
+            av_invariant_restored_row(AV_STAGE_INGEST, *delta_ms)
         }
     }
 }

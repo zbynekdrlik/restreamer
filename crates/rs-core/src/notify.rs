@@ -44,9 +44,10 @@ pub struct DiscordAlert {
 enum Signal {
     /// Outage onset — one alert per distinct onset action per episode.
     Onset(Action, Family),
-    /// Recovery / all-clear — ends its own family's episode (on the row's
-    /// stage + endpoint) and re-arms that episode's onset alerts.
-    Recovery(Action, Family),
+    /// Recovery / all-clear — ends the episode(s) of the listed families on
+    /// the row's stage + endpoint, re-arming their onset alerts. ONE alert
+    /// when any of them was open.
+    Recovery(Action, &'static [Family]),
     /// #84: a standalone operator heads-up that is NOT part of outage-episode
     /// semantics — it fires an alert but never opens or ends an episode, so
     /// it cannot flip the notifier into a fake outage (which would make a
@@ -57,14 +58,19 @@ enum Signal {
 }
 
 /// The outage condition an onset / recovery belongs to (#367). A recovery
-/// ends only the episodes of its own family.
+/// ends only the episodes of its own families, and a lifecycle [`Scope`]
+/// end closes only the episodes of the subject it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Family {
-    /// Host-level connectivity: internet egress, S3 upload, host -> VPS
-    /// reachability. `VpsUnreachable` and `S3UploadFailed` have no recovery
-    /// action of their own (the delivery monitor waits for the network), so
-    /// `HostInternetRecovered` ends the whole family's episode.
-    HostConnectivity,
+    /// Host internet egress (the #261 probe; paired with its recovery).
+    HostInternet,
+    /// Host -> delivery VPS reachability (the delivery monitor). No
+    /// recovery row of its own: ended by `HostInternetRecovered` (the
+    /// monitor waits for the network) or a delivery boundary (a new VPS).
+    VpsReachability,
+    /// Host -> S3 chunk upload, permanent failures. No recovery row of its
+    /// own: ended by `HostInternetRecovered` or an event boundary.
+    S3Upload,
     /// A VPS endpoint playing the rescue clip (per endpoint).
     Rescue,
     /// The source (OBS) A/V skew seen at ingest (#354).
@@ -74,33 +80,98 @@ enum Family {
     AvInvariant,
 }
 
+/// What `HostInternetRecovered` ends: the internet episode and the
+/// host-level failures a network outage causes.
+const HOST_NETWORK_FAMILIES: &[Family] = &[
+    Family::HostInternet,
+    Family::VpsReachability,
+    Family::S3Upload,
+];
+
 /// Route an audit action to an outage signal, or `None` if it is not
 /// outage-relevant. Keep in sync with the emission sites verified for #261.
 fn classify(action: Action) -> Option<Signal> {
     let signal = match action {
-        Action::VpsUnreachable | Action::S3UploadFailed | Action::HostInternetUnreachable => {
-            Signal::Onset(action, Family::HostConnectivity)
-        }
-        Action::HostInternetRecovered => Signal::Recovery(action, Family::HostConnectivity),
+        Action::HostInternetUnreachable => Signal::Onset(action, Family::HostInternet),
+        Action::VpsUnreachable => Signal::Onset(action, Family::VpsReachability),
+        Action::S3UploadFailed => Signal::Onset(action, Family::S3Upload),
+        Action::HostInternetRecovered => Signal::Recovery(action, HOST_NETWORK_FAMILIES),
         Action::RescueActivated => Signal::Onset(action, Family::Rescue),
-        Action::RescueRecovered => Signal::Recovery(action, Family::Rescue),
+        Action::RescueRecovered => Signal::Recovery(action, &[Family::Rescue]),
         // #354: the ingest-side A/V-skew banner exists BECAUSE the 2026-08-30
         // incidents alerted no one ("žiadny alert nikam nešiel") — the source
         // (OBS) desync was only ever visible on the dashboard. Route it
         // through the SAME onset/recovery pairing as HostInternetUnreachable.
         Action::IngestSkewDetected => Signal::Onset(action, Family::IngestSkew),
-        Action::IngestSkewRecovered => Signal::Recovery(action, Family::IngestSkew),
+        Action::IngestSkewRecovered => Signal::Recovery(action, &[Family::IngestSkew]),
         // #367: an absolute A/V invariant violation at ANY stage (ingest
         // chunker or VPS pusher) is a desync the audience hears/sees -- the
         // 2026-10-01 incident alerted no one because every guard was
         // baseline-relative.
         Action::AvInvariantViolated => Signal::Onset(action, Family::AvInvariant),
-        Action::AvInvariantRestored => Signal::Recovery(action, Family::AvInvariant),
+        Action::AvInvariantRestored => Signal::Recovery(action, &[Family::AvInvariant]),
         // #84: standalone heads-up, deliberately OUTSIDE the outage episode.
         Action::LongStreamWarning => Signal::Standalone(action),
         _ => return None,
     };
     Some(signal)
+}
+
+/// A subject whose end closes episodes WITHOUT a recovery (#367 review B1).
+/// Keyed episodes end only on their own paired recovery, and several onsets
+/// have none on some exit path: a rescue stopped without `RescueRecovered`,
+/// a live pusher dropped for the rescue clip while its invariant guard is
+/// latched, a delivery or endpoint that went away, the recovery-less
+/// `VpsUnreachable` / `S3UploadFailed`. Left open, such an episode dedups
+/// every later onset on its key for the process lifetime. When its subject
+/// ends, the episode closes SILENTLY: nothing recovered, so no "recovered"
+/// alert, but the next onset alerts again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// A delivery (VPS) began or ended: every VPS-side episode belongs to a
+    /// VPS that is gone or replaced.
+    Delivery,
+    /// One endpoint (the row's alias) was added, removed or respawned: its
+    /// VPS-side episodes belong to an endpoint task that is gone.
+    Endpoint,
+    /// The endpoint entered rescue: its live pusher was dropped for the
+    /// rescue clip (`rescue::run_outage_rescue` / `run_defensive_rescue`),
+    /// so the push-stage invariant episode of that pusher is over.
+    LivePusher,
+    /// A streaming event began or ended: its chunk uploads are a new subject.
+    Event,
+}
+
+impl Scope {
+    /// Whether ending this scope (for the row's `endpoint`) closes `key`.
+    fn ends(self, key: &EpisodeKey, endpoint: Option<&str>) -> bool {
+        let push_invariant = key.family == Family::AvInvariant
+            && key.stage.as_deref() == Some(crate::audit::AV_STAGE_PUSH);
+        let vps_side = push_invariant || key.family == Family::Rescue;
+        let same_endpoint = key.endpoint.as_deref() == endpoint;
+        match self {
+            Scope::Delivery => vps_side || key.family == Family::VpsReachability,
+            Scope::Endpoint => vps_side && same_endpoint,
+            Scope::LivePusher => push_invariant && same_endpoint,
+            Scope::Event => key.family == Family::S3Upload,
+        }
+    }
+}
+
+/// The lifecycle edge an audit action marks, if any.
+fn ends_scope(action: Action) -> Option<Scope> {
+    match action {
+        Action::DeliveryStarted
+        | Action::DeliveryStopped
+        | Action::VpsReady
+        | Action::VpsDeleted => Some(Scope::Delivery),
+        Action::EndpointAdded | Action::EndpointRemoved | Action::EndpointStartChunkUpdated => {
+            Some(Scope::Endpoint)
+        }
+        Action::RescueActivated => Some(Scope::LivePusher),
+        Action::EventStarted | Action::EventStopped => Some(Scope::Event),
+        _ => None,
+    }
 }
 
 /// One outage episode (#367): the family plus the row's `detail.stage` and
@@ -168,6 +239,16 @@ fn onset_suppressed_by_detail(action: Action, detail: &serde_json::Value) -> boo
             // genuinely sustained internet outage is still covered by the
             // HostInternetUnreachable / RescueActivated signals.
             detail.get("permanent").and_then(|v| v.as_bool()) == Some(false)
+        }
+        // #367 review B2: the operator's force-start override re-records
+        // IngestSkewDetected with `state: "override"` -- an audit record of a
+        // BYPASS, not a new onset. Since #367 it can be written while only the
+        // ingest INVARIANT guard is latched (the banner/gate is either guard),
+        // so as an onset it would open an IngestSkew episode nothing closes and
+        // send "restart OBS" for a Restreamer-side fault. Whichever guard
+        // really latched has already alerted on its own row.
+        Action::IngestSkewDetected => {
+            detail.get("state").and_then(|v| v.as_str()) == Some("override")
         }
         // Other onsets (HostInternetUnreachable, RescueActivated) carry no
         // detail-based discriminator and always alert.
@@ -259,11 +340,21 @@ impl Episodes {
         self.open.entry(key).or_default().insert(action)
     }
 
-    /// End the episode `key`; every other episode stays open. True when it
-    /// was open: only then is a recovery alert due (no spurious "recovered"
-    /// when nothing was flagged as down).
-    fn recover(&mut self, key: &EpisodeKey) -> bool {
-        self.open.remove(key).is_some()
+    /// End the episodes `keys`; every other episode stays open. True when
+    /// any of them was open: only then is a recovery alert due (no spurious
+    /// "recovered" when nothing was flagged as down).
+    fn recover(&mut self, keys: impl IntoIterator<Item = EpisodeKey>) -> bool {
+        let mut any_open = false;
+        for key in keys {
+            any_open |= self.open.remove(&key).is_some();
+        }
+        any_open
+    }
+
+    /// Close, silently, every episode whose subject `scope` ended (for the
+    /// row's `endpoint`).
+    fn end_scope(&mut self, scope: Scope, endpoint: Option<&str>) {
+        self.open.retain(|key, _| !scope.ends(key, endpoint));
     }
 
     /// No outage episode is open.
@@ -308,7 +399,7 @@ impl OutageNotifier {
     /// on? The audit writer uses it to gate the (rare) event-name DB lookup that
     /// drives #311 CI-event suppression, so non-outage rows cost nothing.
     pub fn is_outage_relevant(&self, row: &AuditRow) -> bool {
-        classify(row.action).is_some()
+        classify(row.action).is_some() || ends_scope(row.action).is_some()
     }
 
     /// Pure edge-trigger / dedup core. Returns `Some(alert)` when this row is a
@@ -320,7 +411,9 @@ impl OutageNotifier {
     /// tied to a named event (e.g. host-level internet signals) and is never
     /// suppressed on that basis.
     pub fn observe(&mut self, row: &AuditRow, event_name: Option<&str>) -> Option<DiscordAlert> {
-        let signal = classify(row.action)?;
+        if !self.is_outage_relevant(row) {
+            return None;
+        }
         // #311: never alert for CI test events. The two CI events are E2E-Test
         // and E2E-FB-Test, whose OBS-disconnect / rescue-gate / network-drop
         // steps deliberately trigger outage edges several times per run; without
@@ -337,7 +430,20 @@ impl OutageNotifier {
                 return None;
             }
         }
-        match signal {
+        // #367 review B1: a lifecycle edge closes the episodes of the subject
+        // it ended, silently (after the #311 gate, so a CI delivery never
+        // closes a real one's episodes).
+        if let Some(scope) = ends_scope(row.action) {
+            tracing::info!(
+                ?scope,
+                action = ?row.action,
+                endpoint = ?row.endpoint,
+                "outage notifier: lifecycle edge -- closing the episodes of the subject it ended \
+                 (no alert)"
+            );
+            self.episodes.end_scope(scope, row.endpoint.as_deref());
+        }
+        match classify(row.action)? {
             Signal::Onset(action, family) => {
                 // #315: the SAME onset action can be a real outage or telemetry /
                 // transient noise depending on its detail payload. Suppress the
@@ -362,20 +468,22 @@ impl OutageNotifier {
                     None
                 }
             }
-            Signal::Recovery(action, family) => {
-                let key = EpisodeKey::of(family, row);
-                if self.episodes.recover(&key) {
+            Signal::Recovery(action, families) => {
+                let keys = families.iter().map(|&family| EpisodeKey::of(family, row));
+                if self.episodes.recover(keys) {
                     tracing::info!(
-                        episode = ?key,
+                        ?families,
                         action = ?action,
+                        endpoint = ?row.endpoint,
                         "outage notifier: episode recovered"
                     );
                     Some(build_alert(action, row))
                 } else {
-                    // No spurious "recovered" when this episode was not open.
+                    // No spurious "recovered" when no such episode was open.
                     tracing::debug!(
-                        episode = ?key,
+                        ?families,
                         action = ?action,
+                        endpoint = ?row.endpoint,
                         "outage notifier: recovery with no open episode -- no alert"
                     );
                     None

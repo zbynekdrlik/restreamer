@@ -107,14 +107,13 @@ pub async fn delivery_start(
         ));
     }
     if skew_active && req.force {
-        // Re-fires the SAME onset action the chunker already emitted when the
-        // skew was first detected (`IngestSkewDetected`) — an operator
-        // override during an already-active episode is a duplicate onset by
-        // construction (the gate only reaches here while `skew_active` is
-        // true), which `notify::OutageNotifier`'s per-episode dedup correctly
-        // suppresses as a repeat alert. `state: "override"` in the detail is
-        // what distinguishes this row from the chunker's own Detected row
-        // when an operator later reads the audit log (#354).
+        // Records the operator's BYPASS of the ingest A/V gate as
+        // `IngestSkewDetected` with `state: "override"` (#354). The gate is
+        // either ingest guard (skew monitor or, since #367, the invariant
+        // guard), and that guard already alerted on its own row, so
+        // `notify::OutageNotifier` never treats an override row as an onset
+        // (#367 review B2). `state: "override"` is also what distinguishes
+        // this row from the chunker's own Detected row in the audit log.
         rs_core::audit::record(
             &state.audit_tx,
             rs_core::audit::AuditRow {
