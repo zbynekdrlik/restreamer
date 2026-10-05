@@ -23,6 +23,11 @@ use crate::endpoint_stats::Stats;
 /// type is unknown.
 pub(crate) const UNKNOWN_SERVICE_TYPE_STALL: &str = "unknown_service_type";
 
+/// `delivery_mode` of a refused endpoint. It replaces the seeded "warmup"
+/// so the dashboard never shows a WARMUP badge next to `alive: false`; the
+/// UI renders no badge for it and shows the `stall_reason` instead.
+pub(crate) const REFUSED_DELIVERY_MODE: &str = "refused";
+
 /// Parse the endpoint's service type, or refuse the start loudly and return
 /// `None` (the caller returns without fetching or pushing anything).
 pub(crate) async fn service_type_or_refuse(
@@ -43,6 +48,7 @@ pub(crate) async fn service_type_or_refuse(
         let mut s = stats.lock().await;
         s.last_error = Some(format!("endpoint not started: {err}"));
         s.stall_reason = Some(UNKNOWN_SERVICE_TYPE_STALL.to_string());
+        s.delivery_mode = REFUSED_DELIVERY_MODE.to_string();
     }
     endpoint_audit::emit_unknown_service_type(
         audit_ring,
