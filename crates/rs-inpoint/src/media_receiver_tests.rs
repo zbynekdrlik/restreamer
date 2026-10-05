@@ -12,10 +12,12 @@ use streamhub::define::DataReceiver;
 // ---------------------------------------------------------------------------
 
 /// One Subscribe request the programmable hub answered.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SubRecord {
     at: tokio::time::Instant,
     accepted: bool,
+    /// The stream the Subscribe asked for.
+    identifier: StreamIdentifier,
 }
 
 type PublisherSlot = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<FrameData>>>>;
@@ -34,7 +36,12 @@ fn spawn_programmable_hub(
     let hub_slot = Arc::clone(&slot);
     tokio::spawn(async move {
         while let Some(event) = hub_rx.recv().await {
-            if let StreamHubEvent::Subscribe { result_sender, .. } = event {
+            if let StreamHubEvent::Subscribe {
+                identifier,
+                result_sender,
+                ..
+            } = event
+            {
                 let frames = hub_slot.lock().unwrap().take();
                 let accepted = frames.is_some();
                 let reply = match frames {
@@ -53,6 +60,7 @@ fn spawn_programmable_hub(
                 let _ = log_tx.send(SubRecord {
                     at: tokio::time::Instant::now(),
                     accepted,
+                    identifier,
                 });
             }
         }
@@ -402,4 +410,88 @@ async fn closed_hub_channel_ends_run_with_error() {
         "the active session must be ended on the way out"
     );
     drop(tx);
+}
+
+fn identifier_named(stream_name: &str) -> StreamIdentifier {
+    StreamIdentifier::Rtmp {
+        app_name: "live".to_string(),
+        stream_name: stream_name.to_string(),
+    }
+}
+
+/// Review finding (#367): a Publish of a DIFFERENT stream must not preempt a
+/// healthy live stream. That would leave the live publisher orphaned once
+/// the other one leaves. It is remembered instead, and picked up when the
+/// current stream ends.
+#[tokio::test(start_paused = true)]
+async fn other_stream_publish_waits_for_the_live_stream_to_end() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    let tx_a = publish(&slot, &event_tx, &live);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("the live stream must be subscribed");
+    tx_a.send(FrameData::Video {
+        timestamp: 0,
+        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]),
+    })
+    .unwrap();
+
+    // Another stream starts publishing while A is healthy.
+    let _tx_b = publish(&slot, &event_tx, &other);
+    assert!(
+        next_accepted(&mut log_rx, Duration::from_secs(1))
+            .await
+            .is_none(),
+        "a different stream's Publish must not preempt the healthy live stream"
+    );
+
+    // A ends: the remembered Publish of B is picked up right away.
+    drop(tx_a);
+    let ended_at = tokio::time::Instant::now();
+    let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("the pending stream must be subscribed once the live one ends");
+    assert_eq!(sub.identifier, other);
+    assert!(sub.at.duration_since(ended_at) <= Duration::from_millis(100));
+}
+
+/// Review finding (#367): a `Lagged` broadcast can swallow a Publish. While
+/// Idle, the receiver must probe the last known stream instead of waiting
+/// forever for an event that was dropped.
+#[tokio::test(start_paused = true)]
+async fn lagged_while_idle_probes_the_last_stream() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let id = test_identifier();
+
+    // First session, then the publisher leaves: the receiver is Idle.
+    let tx1 = publish(&slot, &event_tx, &id);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("first publish must be subscribed");
+    drop(tx1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The publisher comes back, but its Publish is lost in a broadcast lag:
+    // the Publish is sent FIRST, then 40 noise events overflow the 16-slot ring.
+    let _tx2 = publish(&slot, &event_tx, &id);
+    for i in 0..40 {
+        event_tx
+            .send(BroadcastEvent::UnSubscribe {
+                id: format!("noise-{i}"),
+                result_sender: None,
+            })
+            .unwrap();
+    }
+    let sub = next_accepted(&mut log_rx, Duration::from_secs(5)).await;
+    assert!(
+        sub.is_some(),
+        "after a Lagged broadcast while Idle the receiver must probe the last stream"
+    );
 }

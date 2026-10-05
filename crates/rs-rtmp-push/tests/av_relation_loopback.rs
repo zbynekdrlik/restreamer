@@ -15,70 +15,13 @@
 mod common;
 use common::*;
 
+#[path = "common/av_flv.rs"]
+mod av_flv;
+use av_flv::*;
+
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use std::time::Duration;
 use tokio::net::TcpListener;
-
-const FLV_AUDIO: u8 = 8;
-const FLV_VIDEO: u8 = 9;
-
-/// Tag body tagged with a session marker and the tag's content ts, so the
-/// recording can be searched for the exact tag of a content instant.
-fn body(tag_type: u8, keyframe: bool, session: u8, ts: u32) -> Vec<u8> {
-    let t = ts.to_be_bytes();
-    match tag_type {
-        FLV_VIDEO => {
-            let frame = if keyframe { 0x17 } else { 0x27 };
-            vec![frame, 0x01, 0, 0, 0, session, t[0], t[1], t[2], t[3]]
-        }
-        _ => vec![0xAF, 0x01, session, t[0], t[1], t[2], t[3]],
-    }
-}
-
-/// One FLV chunk as the chunker produces it: video every 40 ms from
-/// `video_from` (the first one a keyframe) and audio every 20 ms from
-/// `audio_from`, both up to `to`, interleaved in content order.
-fn av_chunk(video_from: u32, audio_from: u32, to: u32, session: u8) -> Vec<u8> {
-    let mut tags: Vec<(u32, u8, Vec<u8>)> = Vec::new();
-    let mut v = video_from;
-    while v <= to {
-        tags.push((v, FLV_VIDEO, body(FLV_VIDEO, v == video_from, session, v)));
-        v += 40;
-    }
-    let mut a = audio_from;
-    while a <= to {
-        tags.push((a, FLV_AUDIO, body(FLV_AUDIO, false, session, a)));
-        a += 20;
-    }
-    // Content order; video first at equal ts (the keyframe opens the chunk).
-    tags.sort_by_key(|(ts, ty, _)| (*ts, if *ty == FLV_AUDIO { 1 } else { 0 }));
-
-    let mut out = vec![b'F', b'L', b'V', 1, 0x05, 0, 0, 0, 9, 0, 0, 0, 0];
-    for (ts, tag_type, body) in tags {
-        let size = body.len() as u32;
-        out.push(tag_type);
-        out.extend_from_slice(&size.to_be_bytes()[1..]);
-        out.extend_from_slice(&(ts & 0x00FF_FFFF).to_be_bytes()[1..]);
-        out.push((ts >> 24) as u8);
-        out.extend_from_slice(&[0, 0, 0]);
-        out.extend_from_slice(&body);
-        out.extend_from_slice(&(11 + size).to_be_bytes());
-    }
-    out
-}
-
-/// Wire ts of the recorded tag carrying content ts `ts` of `session`.
-fn wire_ts(recorded: &[RecordedTag], tag_type: u8, session: u8, ts: u32) -> u32 {
-    let t = ts.to_be_bytes();
-    recorded
-        .iter()
-        .find(|r| {
-            let tail = &r.body[r.body.len().saturating_sub(5)..];
-            r.tag_type == tag_type && tail == [session, t[0], t[1], t[2], t[3]]
-        })
-        .map(|r| r.timestamp_ms)
-        .unwrap_or_else(|| panic!("tag type {tag_type} session {session} ts {ts} not recorded"))
-}
 
 /// Re-anchor path: same RTMP session, the chunker starts a new session
 /// (backward content ts). The new chunk opens with a video keyframe at 0 and
@@ -205,29 +148,6 @@ async fn reconnect_keeps_wire_av_relation_equal_to_content_relation() {
     );
 }
 
-/// `av_chunk` with ONE video tag's timestamp corrupted to `glitch_ts`
-/// (its body still names its real content ts `at`).
-fn av_chunk_with_video_glitch(to: u32, session: u8, at: u32, glitch_ts: u32) -> Vec<u8> {
-    let mut out = av_chunk(0, 0, to, session);
-    let marker = body(FLV_VIDEO, false, session, at);
-    // Walk the tags and rewrite the matching tag's 24+8-bit timestamp.
-    let mut off = 13;
-    while off + 11 <= out.len() {
-        let size = (usize::from(out[off + 1]) << 16)
-            | (usize::from(out[off + 2]) << 8)
-            | usize::from(out[off + 3]);
-        let body_start = off + 11;
-        if out[off] == FLV_VIDEO && out[body_start..body_start + size] == marker[..] {
-            let low = (glitch_ts & 0x00FF_FFFF).to_be_bytes();
-            out[off + 4..off + 7].copy_from_slice(&low[1..]);
-            out[off + 7] = (glitch_ts >> 24) as u8;
-            return out;
-        }
-        off = body_start + size + 4;
-    }
-    panic!("video tag at {at} not found");
-}
-
 /// #367 robustness of the shared mapping: ONE corrupt tag whose ts jumped
 /// 720 s ahead (the #176/#178 shape) while the rest of the chunk stays on
 /// the old timeline is an isolated outlier. It must not move the shared
@@ -245,7 +165,9 @@ async fn isolated_forward_glitch_does_not_move_the_shared_mapping() {
         .expect("subscriber did not signal within 5s")
         .expect("sub_ready channel dropped");
 
-    let chunk = av_chunk_with_video_glitch(1_000, 0x0C, 400, 400 + 720_000);
+    let mut tags = av_tags(0, 0, 1_000, 0x0C);
+    glitch(&mut tags, FLV_VIDEO, 400, 400 + 720_000);
+    let chunk = to_flv(&tags);
     tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&chunk))
         .await
         .expect("an isolated ts glitch must not freeze the pusher in pacing")

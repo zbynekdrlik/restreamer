@@ -387,3 +387,85 @@ async fn constructed_ingest_violation_raises_banner_audit_and_restores_on_reanch
         "the banner clears on re-anchor"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review findings (#367): a single odd source ts must not re-anchor a session.
+// ---------------------------------------------------------------------------
+
+/// Feed `frames` except the video frame of content `skip_video_at`.
+fn without_video_at(frames: &[Frame], skip_video_at: u32) -> Vec<Frame> {
+    frames
+        .iter()
+        .copied()
+        .filter(|f| f.kind == Kind::Audio || f.src_ts != skip_video_at)
+        .collect()
+}
+
+/// A video frame stamped 1 ms BEFORE its predecessor (timestamp jitter, not
+/// a new publisher) must not re-anchor the session. A re-anchor flushes the
+/// chunk and drops everything until the next keyframe.
+#[tokio::test]
+async fn tiny_backward_step_does_not_reanchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let frames = without_video_at(&av_frames(0, 1_000, |src| T0 + i64::from(src)), 560);
+    let (before, after): (Vec<Frame>, Vec<Frame>) =
+        frames.into_iter().partition(|f| f.src_ts < 560);
+    feed(&sink, &clock, &before).await;
+    // Content 560's video frame arrives stamped 519, 1 ms before 520.
+    clock.set(T0 + 560);
+    sink.write_video(519, &body(Kind::InterFrame, 560)).await;
+    feed(&sink, &clock, &after).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(
+        chunks.len(),
+        1,
+        "a 1 ms backward step must not re-anchor (flush) the session"
+    );
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 800),
+        800,
+        "origin unchanged"
+    );
+    assert_eq!(out_ts(&chunks, Kind::Audio, 800), 800);
+}
+
+/// ONE video frame whose source ts jumped 40 s ahead (a corrupt ts), with
+/// its successors back on the original timeline, is an isolated outlier.
+/// The successor must not be read as a backward jump that re-anchors the
+/// session.
+#[tokio::test]
+async fn isolated_forward_glitch_does_not_reanchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let frames = without_video_at(&av_frames(0, 1_000, |src| T0 + i64::from(src)), 400);
+    let (before, after): (Vec<Frame>, Vec<Frame>) =
+        frames.into_iter().partition(|f| f.src_ts < 400);
+    feed(&sink, &clock, &before).await;
+    clock.set(T0 + 400);
+    sink.write_video(400 + 40_000, &body(Kind::InterFrame, 400))
+        .await;
+    feed(&sink, &clock, &after).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(
+        chunks.len(),
+        1,
+        "an isolated glitch must not re-anchor the session"
+    );
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 800),
+        800,
+        "origin unchanged"
+    );
+    assert_eq!(out_ts(&chunks, Kind::Audio, 800), 800);
+}

@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(chunk_pacing_sleep_ms(0, 100, 120), 0);
     }
 
-    // --- media_pin_suffix (#367 shared-origin pin) ---
+    // --- local window / robust pin (#367 shared-origin pin) ---
 
     fn tag(tag_type: u8, timestamp_ms: u32, body: &'static [u8]) -> crate::flv::FlvTag<'static> {
         crate::flv::FlvTag {
@@ -777,41 +777,64 @@ mod tests {
         }
     }
 
+    /// Media tags at the given ts (alternating video / audio), no headers.
+    fn media(ts: &[u32]) -> Vec<crate::flv::FlvTag<'static>> {
+        use crate::flv::{FLV_TAG_AUDIO, FLV_TAG_VIDEO};
+        ts.iter()
+            .enumerate()
+            .map(|(k, &t)| {
+                if k % 2 == 0 {
+                    tag(FLV_TAG_VIDEO, t, &[0x27, 0x01])
+                } else {
+                    tag(FLV_TAG_AUDIO, t, &[0xAF, 0x01])
+                }
+            })
+            .collect()
+    }
+
     #[test]
-    fn media_pin_suffix_is_the_min_of_the_remaining_media_tags() {
+    fn local_median_ignores_headers_and_script_tags() {
         use crate::flv::{FLV_TAG_AUDIO, FLV_TAG_SCRIPT, FLV_TAG_VIDEO};
         let tags = [
             tag(FLV_TAG_SCRIPT, 0, &[0x02, 0x00]),
-            tag(FLV_TAG_VIDEO, 0, &[0x17, 0x00]), // AVC seq header: ignored
-            tag(FLV_TAG_AUDIO, 0, &[0xAF, 0x00]), // AAC seq header: ignored
+            tag(FLV_TAG_VIDEO, 0, &[0x17, 0x00]), // AVC seq header
+            tag(FLV_TAG_AUDIO, 0, &[0xAF, 0x00]), // AAC seq header
             tag(FLV_TAG_VIDEO, 1_000, &[0x17, 0x01]),
             tag(FLV_TAG_AUDIO, 990, &[0xAF, 0x01]),
             tag(FLV_TAG_VIDEO, 1_040, &[0x27, 0x01]),
         ];
-        let pins = media_pin_suffix(&tags);
+        assert_eq!(local_median(&tags, 0), Some(1_000));
+        assert_eq!(local_median(&tags, 5), Some(1_040));
         assert_eq!(
-            pins,
-            vec![
-                Some(990),
-                Some(990),
-                Some(990),
-                Some(990),
-                Some(990),
-                Some(1_040)
-            ],
-            "the pin is the minimum MEDIA ts at or after each index; seq headers \
-             and script tags never pin"
+            local_median(&tags[..3], 0),
+            None,
+            "no media tag -> no median"
         );
     }
 
     #[test]
-    fn media_pin_suffix_is_none_without_media() {
-        use crate::flv::{FLV_TAG_SCRIPT, FLV_TAG_VIDEO};
-        let tags = [
-            tag(FLV_TAG_SCRIPT, 0, &[0x02, 0x00]),
-            tag(FLV_TAG_VIDEO, 0, &[0x17, 0x00]),
-        ];
-        assert_eq!(media_pin_suffix(&tags), vec![None, None]);
+    fn local_median_is_robust_to_one_glitch() {
+        let tags = media(&[600_000, 5, 600_020, 600_040, 600_060]);
+        assert_eq!(local_median(&tags, 0), Some(600_020));
+    }
+
+    #[test]
+    fn robust_pin_ignores_a_low_glitch_and_keeps_interleave() {
+        // 599_990: audio interleaved slightly before the keyframe -> kept;
+        // 5: corrupt -> excluded from the pin.
+        let tags = media(&[600_000, 599_990, 600_040, 5, 600_080, 600_060]);
+        assert_eq!(robust_pin(&tags, 0), Some(599_990));
+    }
+
+    #[test]
+    fn robust_pin_of_a_two_cluster_chunk_follows_the_local_cluster() {
+        // A genuine 39 s gap inside the chunk: the pin at the head belongs to
+        // the head's cluster, never to the later one.
+        let mut ts: Vec<u32> = (0..10).map(|k| k * 20).collect();
+        ts.extend((0..10).map(|k| 40_000 + k * 20));
+        let tags = media(&ts);
+        assert_eq!(robust_pin(&tags, 0), Some(0));
+        assert_eq!(robust_pin(&tags, 10), Some(40_000));
     }
 
     // --- #367 push-side absolute A/V invariant guard ---
@@ -858,8 +881,8 @@ mod tests {
     #[test]
     fn isolated_backward_outlier_keeps_the_mapping() {
         let mut p = pusher_at(600_000, 600_010);
-        let outlier = p.track_input_ts(Track::Video, 5, 5, Some(600_020));
-        assert!(outlier);
+        let tags = media(&[5, 600_020, 600_040, 600_060]);
+        assert!(p.track_input_ts(Track::Video, &tags, 0));
         assert_eq!(p.regression_reanchor_count(), 0);
         assert_eq!(p.state.origin_ts, Some(0), "mapping unchanged");
         assert_eq!(
@@ -874,8 +897,8 @@ mod tests {
     #[test]
     fn followed_backward_step_starts_a_new_mapping() {
         let mut p = pusher_at(600_000, 600_010);
-        let outlier = p.track_input_ts(Track::Video, 0, 0, Some(20));
-        assert!(!outlier);
+        let tags = media(&[0, 0, 40, 20]);
+        assert!(!p.track_input_ts(Track::Video, &tags, 0));
         assert_eq!(p.regression_reanchor_count(), 1);
         assert!(
             p.state.origin_ts.is_none(),
@@ -893,7 +916,23 @@ mod tests {
     #[test]
     fn anomalous_last_tag_reanchors() {
         let mut p = pusher_at(1_000, 1_000);
-        assert!(!p.track_input_ts(Track::Audio, 900_000, 900_000, None));
+        let tags = media(&[900_000]);
+        assert!(!p.track_input_ts(Track::Video, &tags, 0));
         assert_eq!(p.regression_reanchor_count(), 1);
+    }
+
+    /// The HEAD tag of a track in a new mapping (no tracker yet) that its
+    /// neighbourhood disagrees with is an outlier, not a pin source.
+    #[test]
+    fn head_tag_outlier_is_detected_without_a_tracker() {
+        let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+        let tags = media(&[720_020, 0, 40, 20, 80, 60]);
+        assert!(p.track_input_ts(Track::Video, &tags, 0));
+        assert!(p.state.last_video_xiu_ts.is_none());
+        assert!(
+            !p.track_input_ts(Track::Audio, &tags, 1),
+            "a normal head tag maps"
+        );
+        assert_eq!(p.state.last_audio_xiu_ts, Some(0));
     }
 }
