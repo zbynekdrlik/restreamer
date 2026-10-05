@@ -40,9 +40,10 @@ pub struct PusherState {
     /// by both tracks. Every media tag goes through ONE common transform:
     /// `wire = base_ms + (tag.ts - origin_ts)`, so the wire A/V relation is
     /// exactly the content relation the chunker produced. `None` after a
-    /// reconnect / re-anchor; the next tag re-pins it to the minimum ts of the
-    /// chunk's remaining media tags, so no tag of that chunk maps below
-    /// `base_ms`.
+    /// reconnect / re-anchor; the next tag re-pins it with `robust_pin`: the
+    /// minimum ts of the chunk's remaining media tags ON the local timeline,
+    /// so no tag of that chunk maps below `base_ms` and one corrupt ts can
+    /// never drag the origin.
     ///
     /// Before #367 each track re-pinned its OWN origin on its first tag, so a
     /// chunk whose audio started 700 ms after its keyframe sent both at the
@@ -131,8 +132,10 @@ impl PusherState {
 
     /// Map one media tag's INPUT ts onto the wire with the shared transform,
     /// pinning the shared origin to `pin_ts` if no mapping is active.
-    /// `pin_ts` must be the minimum input ts of the media tags still to be
-    /// sent from this chunk, so none of them maps below `base_ms`.
+    /// `pin_ts` is the pusher's `robust_pin`: the minimum input ts of the
+    /// chunk's remaining media tags on the local timeline, so none of them
+    /// maps below `base_ms`. (An off-timeline outlier is clamped by the
+    /// pusher and never reaches this.)
     pub fn wire_ts(&mut self, input_ts: u32, pin_ts: u32) -> u64 {
         let origin = *self.origin_ts.get_or_insert(pin_ts);
         self.base_ms + u64::from(input_ts.saturating_sub(origin))
@@ -282,5 +285,18 @@ mod tests {
         };
         assert_eq!(state.wire_ts_unpinned(0, 5_000), 10);
         assert!(state.origin_ts.is_none());
+    }
+
+    /// With a mapping active, an unpinned tag goes through the SAME shared
+    /// transform as any media tag.
+    #[test]
+    fn wire_ts_unpinned_uses_the_active_mapping() {
+        let state = PusherState {
+            base_ms: 10,
+            origin_ts: Some(1_000),
+            ..PusherState::default()
+        };
+        assert_eq!(state.wire_ts_unpinned(1_500, 5_000), 510);
+        assert_eq!(state.origin_ts, Some(1_000), "unchanged");
     }
 }

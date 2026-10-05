@@ -52,11 +52,39 @@ fn tolerance_boundary() {
     g.observe_video(0, 0);
     g.observe_audio(0, AV_INVARIANT_TOLERANCE_MS);
     assert_eq!(g.check(), None, "exactly the tolerance is still OK");
+    assert_eq!(g.evaluate(), None, "and does not latch");
+    assert!(!g.is_violated());
     g.observe_audio(0, AV_INVARIANT_TOLERANCE_MS + 1);
     assert!(
         g.check().is_some(),
         "one ms past the tolerance is a violation"
     );
+    assert!(matches!(g.evaluate(), Some(AvInvariantEvent::Violated(_))));
+}
+
+/// The banner value of a latched violation: its CURRENT delta, and nothing
+/// once restored.
+#[test]
+fn latched_delta_follows_the_latest_samples() {
+    let mut g = AvInvariantGuard::default();
+    g.observe_video(0, 0);
+    g.observe_audio(0, 700);
+    assert_eq!(
+        g.latched_delta_ms(),
+        None,
+        "not latched before an evaluation"
+    );
+    g.evaluate();
+    assert_eq!(g.latched_delta_ms(), Some(700));
+    g.observe_audio(20, 820);
+    assert_eq!(
+        g.latched_delta_ms(),
+        Some(800),
+        "the latest delta, not the first"
+    );
+    g.observe_audio(40, 40);
+    g.evaluate();
+    assert_eq!(g.latched_delta_ms(), None, "restored");
 }
 
 /// Once the relation is back within tolerance the latch clears with ONE

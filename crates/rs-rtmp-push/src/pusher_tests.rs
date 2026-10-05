@@ -321,3 +321,159 @@ fn head_tag_outlier_is_detected_without_a_tracker() {
     );
     assert_eq!(p.state.last_audio_xiu_ts, Some(0));
 }
+
+/// Two tags of one track with the SAME input ts are not a backward step.
+#[test]
+fn an_equal_ts_on_the_same_track_is_no_jump() {
+    let mut p = pusher_at(1_000, 1_000);
+    let tags = media(&[1_000, 1_020]);
+    assert!(!p.track_input_ts(Track::Video, &tags, 0));
+    assert_eq!(p.regression_reanchor_count(), 0);
+    assert_eq!(p.state.origin_ts, Some(0), "mapping unchanged");
+}
+
+/// A forward step of exactly MAX_TAG_TS_JUMP_MS is still a normal step;
+/// only a larger one is a jump.
+#[test]
+fn a_forward_step_of_exactly_the_jump_limit_is_no_jump() {
+    let mut p = pusher_at(1_000, 1_000);
+    let tags = media(&[1_000 + MAX_TAG_TS_JUMP_MS]);
+    assert!(!p.track_input_ts(Track::Video, &tags, 0));
+    assert_eq!(p.regression_reanchor_count(), 0);
+    let tags = media(&[1_000 + 2 * MAX_TAG_TS_JUMP_MS + 1]);
+    assert!(!p.track_input_ts(Track::Video, &tags, 0));
+    assert_eq!(p.regression_reanchor_count(), 1, "one ms more is a jump");
+}
+
+/// A jumped tag is judged by the tags AFTER it, never by itself: with one
+/// normal tag left in the chunk, a forward glitch is an outlier.
+#[test]
+fn a_jumped_tag_is_judged_by_the_tags_after_it() {
+    let mut p = pusher_at(1_000, 1_000);
+    // video 1_020, audio 1_040, video 900_000 (glitch), audio 1_060
+    let tags = media(&[1_020, 1_040, 900_000, 1_060]);
+    assert!(
+        p.track_input_ts(Track::Video, &tags, 2),
+        "the glitch is an outlier: the only tag after it is on the old timeline"
+    );
+    assert_eq!(p.regression_reanchor_count(), 0);
+}
+
+/// A clamped outlier lands on ITS OWN track's wire timeline.
+#[test]
+fn an_outlier_is_clamped_onto_its_own_track() {
+    use crate::flv::{FLV_TAG_AUDIO, FLV_TAG_VIDEO};
+    let mut p = pusher_at(600_000, 600_000);
+    p.state.last_audio_output_ts_ms = 5_000;
+    p.state.last_video_output_ts_ms = 7_000;
+    let tags = [
+        tag(FLV_TAG_AUDIO, 5, &[0xAF, 0x01]),
+        tag(FLV_TAG_VIDEO, 6, &[0x27, 0x01]),
+        tag(FLV_TAG_VIDEO, 600_020, &[0x27, 0x01]),
+        tag(FLV_TAG_AUDIO, 600_040, &[0xAF, 0x01]),
+        tag(FLV_TAG_VIDEO, 600_060, &[0x27, 0x01]),
+    ];
+    assert_eq!(p.map_media_tag(&tags, 0, false), 5_001, "audio outlier");
+    assert_eq!(p.map_media_tag(&tags, 1, false), 7_001, "video outlier");
+}
+
+/// A fresh RTMP session starts a NEW shared mapping (#367): codec config is
+/// re-sent, the base moves past everything already sent, the origin re-pins,
+/// and no old-mapping guard sample is paired with a new one.
+#[test]
+fn a_fresh_session_starts_a_new_shared_mapping() {
+    let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+    p.state.avc_seq_header_sent = true;
+    p.state.aac_seq_header_sent = true;
+    p.state.last_audio_output_ts_ms = 9_000;
+    p.state.last_video_output_ts_ms = 9_040;
+    p.state.origin_ts = Some(1_000);
+    p.state.last_audio_xiu_ts = Some(10_000);
+    p.state.last_video_xiu_ts = Some(10_040);
+    p.av_guard.observe_audio(0, 900);
+    p.on_fresh_session();
+    assert!(p.state.connected);
+    assert!(
+        !p.state.avc_seq_header_sent && !p.state.aac_seq_header_sent,
+        "codec config is re-sent on every RTMP session"
+    );
+    assert_eq!(p.state.base_ms, 9_041);
+    assert!(p.state.origin_ts.is_none());
+    assert!(p.state.last_audio_xiu_ts.is_none() && p.state.last_video_xiu_ts.is_none());
+    p.av_guard.observe_video(0, 0);
+    assert_eq!(
+        p.av_guard.check(),
+        None,
+        "an old-mapping sample is never paired with a new one"
+    );
+}
+
+/// Codec sequence headers go out once per RTMP session, per codec (#103).
+#[test]
+fn codec_sequence_headers_go_out_once_per_session() {
+    use crate::flv::{FLV_TAG_AUDIO, FLV_TAG_SCRIPT, FLV_TAG_VIDEO};
+    let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+    assert!(
+        !p.skip_repeated_seq_header(FLV_TAG_VIDEO, false),
+        "media is never skipped"
+    );
+    assert!(
+        !p.skip_repeated_seq_header(FLV_TAG_VIDEO, true),
+        "first AVC header"
+    );
+    assert!(
+        p.skip_repeated_seq_header(FLV_TAG_VIDEO, true),
+        "repeated AVC header"
+    );
+    assert!(
+        !p.skip_repeated_seq_header(FLV_TAG_AUDIO, true),
+        "AAC is separate"
+    );
+    assert!(
+        p.skip_repeated_seq_header(FLV_TAG_AUDIO, true),
+        "repeated AAC header"
+    );
+    assert!(
+        !p.skip_repeated_seq_header(FLV_TAG_SCRIPT, true),
+        "never other tags"
+    );
+}
+
+/// Per-tag pacing (#176/#178): nothing when the tag is due, the residual
+/// otherwise, capped at 5 s; 2 s or more is a LONG sleep.
+#[test]
+fn tag_sleep_is_the_capped_residual() {
+    assert_eq!(tag_sleep(1_000, 1_000), None, "due");
+    assert_eq!(tag_sleep(1_001, 1_000), None, "overdue");
+    let short = tag_sleep(1_000, 2_999).expect("ahead of wall");
+    assert_eq!((short.raw_ms, short.sleep_ms), (1_999, 1_999));
+    assert!(!short.is_long());
+    let long = tag_sleep(1_000, 3_000).expect("ahead of wall");
+    assert!(long.is_long(), "2 s is a LONG sleep");
+    let corrupt = tag_sleep(0, 600_000).expect("far ahead");
+    assert_eq!(
+        (corrupt.raw_ms, corrupt.sleep_ms),
+        (600_000, PACING_SLEEP_CAP_MS)
+    );
+}
+
+/// `pace_tag` really waits for wall-clock (paused clock), capped.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn pace_tag_sleeps_until_the_tag_is_due() {
+    let p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+    let anchor = Instant::now();
+    p.pace_tag(anchor, crate::flv::FLV_TAG_VIDEO, 1_500).await;
+    assert_eq!(anchor.elapsed(), Duration::from_millis(1_500));
+    p.pace_tag(anchor, crate::flv::FLV_TAG_VIDEO, 1_000).await;
+    assert_eq!(
+        anchor.elapsed(),
+        Duration::from_millis(1_500),
+        "already due"
+    );
+    p.pace_tag(anchor, crate::flv::FLV_TAG_VIDEO, 600_000).await;
+    assert_eq!(
+        anchor.elapsed(),
+        Duration::from_millis(1_500 + PACING_SLEEP_CAP_MS),
+        "a corrupt far-future ts sleeps the cap only"
+    );
+}
