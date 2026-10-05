@@ -129,7 +129,7 @@ The `stream-lan-box` concurrency group (`queue: max`, `cancel-in-progress: false
 gh api repos/zbynekdrlik/restreamer/actions/runs/<id>/force-cancel -X POST
 ```
 
-It reaches terminal `cancelled` within seconds and lets the successor start. **Then, before the successor's E2E begins, verify shared box state is clean**: no active event, no lingering delivery instance, no orphan Hetzner VPS (the force-killed run may have left an event activated or a VPS running). Observed twice (runs 29807113362, 29864817389) where a normal cancel had no effect and force-cancel was the only thing that worked.
+It reaches terminal `cancelled` within seconds and lets the successor start. **Then, before the successor's E2E begins, verify shared box state is clean**: no active event, no lingering delivery instance, no orphan Hetzner VPS (the force-killed run may have left an event activated or a VPS running). A force-cancel during the #367 late-join gate's 35 s freeze leaves Restreamer suspended for up to ~75 s, until the gate's dead-man resumes it: wait that out before you judge the box. Observed twice (runs 29807113362, 29864817389) where a normal cancel had no effect and force-cancel was the only thing that worked.
 
 ## CI/CD Pipelines
 

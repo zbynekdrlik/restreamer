@@ -1208,15 +1208,17 @@ jobs:
           #     call uses that const, and the other two markers still exist in
           #     the receiver and in the gate;
           # (2) Restreamer is resumed on every exit path: in the gate's finally
-          #     block, and by an if: always() step reading the same PID marker;
+          #     block, by the if: always() step DIRECTLY after the gate (same
+          #     $env:TEMP PID markers), and by a dead-man process armed before
+          #     the suspend (a force-cancel skips finally AND always() steps);
           # (3) the gate never touches OBS (ffmpeg publisher only).
           # Both sed ranges are anchored on whole 6-space step-name lines of a
           # job that lies after test-integrity, so they never open on this
           # guard's own lines (#325).
           GATE=$(sed -n '/^      - name: GATE late-join republish keeps chunk A\/V aligned (#367)$/,/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/p' "$WORKFLOW_FILE")
           SAFETY=$(sed -n '/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/,/^      - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget$/p' "$WORKFLOW_FILE")
-          if [ -z "$GATE" ] || [ -z "$SAFETY" ]; then
-            echo "ERROR: the late-join gate must be followed directly by the step 'Resume Restreamer if the late-join gate left it suspended (#367)' (#367)."
+          if [ -z "$GATE" ] || [ -z "$SAFETY" ] || [ "$(grep -c '^      - name: ' <<<"$GATE")" -ne 2 ] || [ "$(grep -c '^      - name: ' <<<"$SAFETY")" -ne 2 ]; then
+            echo "ERROR: the late-join gate must be followed directly by the step 'Resume Restreamer if the late-join gate left it suspended (#367)', and that by 'GATE clear-s3 endpoint ...' (#367)."
             exit 1
           fi
           MARKER=$(sed -nE 's/^const STALL_LOG_MARKER: &str = "([^"]+)";$/\1/p' "$RX")
@@ -1254,16 +1256,30 @@ jobs:
             exit 1
           fi
           for s in "$GATE" "$SAFETY"; do
-            if ! grep -qF 'latejoin-367-restreamer-suspended.txt' <<<"$s"; then
-              echo "ERROR: the late-join gate and the resume step must share the PID marker latejoin-367-restreamer-suspended.txt (#367)."
-              exit 1
-            fi
+            for f in latejoin-367-restreamer-suspended.txt latejoin-367-publisher1.txt; do
+              if ! grep -qF "Join-Path \$env:TEMP \"$f\"" <<<"$s"; then
+                echo "ERROR: the late-join gate and the resume step must share the PID marker Join-Path \$env:TEMP \"$f\" (#367)."
+                exit 1
+              fi
+            done
           done
+          if ! grep -qF 'Stop-Process' <<<"$SAFETY"; then
+            echo "ERROR: the resume step must also kill a frozen publisher 1 left behind (#367)."
+            exit 1
+          fi
+          # The dead-man must be created through WMI (outside the runner's
+          # process tree) and armed BEFORE Restreamer is suspended.
+          ARM=$(grep -nE '^\s*Start-DeadMan\s*$' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          SUSPEND=$(grep -nF 'NtSuspendProcess($rsHandle)' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          if ! grep -qF 'Invoke-CimMethod -ClassName Win32_Process -MethodName Create' <<<"$GATE" || [ -z "$ARM" ] || [ -z "$SUSPEND" ] || [ "$ARM" -ge "$SUSPEND" ]; then
+            echo "ERROR: the late-join gate must arm its WMI-created dead-man (Start-DeadMan) before NtSuspendProcess(\$rsHandle) (#367)."
+            exit 1
+          fi
           if grep -nE 'ws://|:4455|obs-e2e-test|/obs/' <<<"$GATE"; then
             echo "ERROR: the late-join gate must never touch OBS; it uses the ffmpeg publisher only (#367)."
             exit 1
           fi
-          echo "OK: the late-join gate matches '$MARKER' from $RX and resumes Restreamer on every exit path."
+          echo "OK: the late-join gate matches '$MARKER' from $RX and resumes Restreamer on every exit path (finally, always() step, dead-man)."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
@@ -2269,7 +2285,7 @@ jobs:
           # itself for 35 s. Suspending only the PUBLISHER can never reach the
           # stall path: xiu's session drops a publisher idle >= 2 s
           # (read_timeout), so the receiver sees a closed channel instead.
-          # Publisher 1 is frozen 0.3 s BEFORE Restreamer (far below xiu's 2 s
+          # Publisher 1 is frozen 0.8 s BEFORE Restreamer (below xiu's 2 s
           # cut, which cannot run while Restreamer is suspended): Restreamer
           # drains the socket, so at resume nothing is deliverable. A publisher
           # that keeps sending through the freeze leaves a backlog whose frames
@@ -2286,9 +2302,11 @@ jobs:
           #   c)     every analysable chunk of publisher 2 keeps the source A/V
           #          relation within 100 ms (ffmpeg lavfi A+V start together);
           #   d)     0 av_invariant_violated audit rows.
-          # No API call while Restreamer is suspended; Restreamer is resumed on
-          # every exit path (finally + the always() step after this one). The
-          # YouTube VOD-measured gate stays camera-box #357. Never touches OBS.
+          # No API call while Restreamer is suspended. Restreamer is resumed on
+          # every exit path: the finally block, the always() step after this
+          # one, and a dead-man process outside the runner's process tree for a
+          # force-cancel (which skips both). The YouTube VOD-measured gate stays
+          # camera-box #357. Never touches OBS.
           $ErrorActionPreference = 'Stop'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
           $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
@@ -2296,9 +2314,11 @@ jobs:
           $chunkDir = "C:\ProgramData\Restreamer\chunks"
           $logPath = "C:\ProgramData\Restreamer\restreamer.log"
           $snapDir = Join-Path $env:TEMP "latejoin-367"
-          # Holds the PID of a Restreamer this step suspended and has not resumed
-          # yet; the always() step after this one resumes it if it is left over.
+          # PID + start time (UTC ticks) of a Restreamer this step suspended and
+          # has not resumed yet, and of a publisher 1 not killed yet. The
+          # always() step after this one and the dead-man act on what is left.
           $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
+          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
           # MUST equal STALL_LOG_MARKER in crates/rs-inpoint/src/media_receiver.rs
           # (checked by test-integrity "Verify the late-join gate's log markers
           # and resume safety (#367)").
@@ -2306,7 +2326,7 @@ jobs:
           $streamName = 'ci-e2e-test'
           Remove-Item $snapDir -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $snapDir | Out-Null
-          Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue
+          Remove-Item $suspendMarker, $p1Marker -Force -ErrorAction SilentlyContinue
           $inv = [Globalization.CultureInfo]::InvariantCulture
           $stepStart = [DateTimeOffset]::UtcNow
           $stepStartMs = $stepStart.ToUnixTimeMilliseconds()
@@ -2366,6 +2386,46 @@ jobs:
             } | ForEach-Object { Write-Host "  $($_.Text.Substring(0, [Math]::Min(240, $_.Text.Length)))" }
           }
 
+          function Write-ProcMarker([string]$path, $proc) {
+            Set-Content -Path $path -Value @($proc.Id, $proc.StartTime.ToUniversalTime().Ticks) -Encoding ascii
+          }
+
+          # Dead-man switch. A force-cancel (or a runner death) kills this step
+          # without running its finally AND skips if: always() steps, which
+          # would leave Restreamer frozen until the next deploy. A process
+          # created through WMI is parented to WmiPrvSE, outside the runner's
+          # process tree, so it survives that kill. 75 s from now (the freeze
+          # is over after ~36 s) it resumes Restreamer if the suspend marker is
+          # still there, and kills a publisher 1 whose marker is still there.
+          # The gate deletes each marker once it resumed / killed the process
+          # itself, so on a normal run it does nothing. A marker's PID only
+          # counts while the process name and start time still match.
+          function Start-DeadMan {
+            $script = @'
+          $ErrorActionPreference = 'Continue'
+          Start-Sleep -Seconds 75
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LateJoin367DeadMan { [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle); }'
+          function Get-Marked([string]$path, [string]$name) {
+            $m = @(Get-Content $path -ErrorAction SilentlyContinue)
+            if ($m.Count -lt 2) { return }
+            $p = Get-Process -Id ([int]$m[0]) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -eq $name -and [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$m[1]) -lt 10000000) { $p }
+          }
+          $rs = Get-Marked '__RS_MARKER__' 'Restreamer'
+          if ($rs) { [void][LateJoin367DeadMan]::NtResumeProcess($rs.Handle) }
+          Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue
+          $p1 = Get-Marked '__P1_MARKER__' 'ffmpeg'
+          if ($p1) { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue }
+          Remove-Item '__P1_MARKER__' -Force -ErrorAction SilentlyContinue
+          '@
+            $script = $script.Replace('__RS_MARKER__', $suspendMarker.Replace("'", "''")).Replace('__P1_MARKER__', $p1Marker.Replace("'", "''"))
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+            $cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+            $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
+            if ($r.ReturnValue -ne 0) { throw "FAILED: could not start the dead-man process (Win32_Process.Create returned $($r.ReturnValue))" }
+            Write-Host "Dead-man process PID $($r.ProcessId) armed (75 s)"
+          }
+
           $rs = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
           if ($rs.Count -ne 1) { throw "FAILED: expected exactly one desktop-session Restreamer.exe, found $($rs.Count)" }
           $rs = $rs[0]
@@ -2376,17 +2436,20 @@ jobs:
           $p2LaunchMs = $null
           try {
             $p1 = Start-Publisher 150
+            Write-ProcMarker $p1Marker $p1
             Start-Sleep -Seconds 15
             if ($p1.HasExited) { throw "FAILED: publisher 1 exited early (code $($p1.ExitCode))" }
 
-            # Freeze publisher 1, let Restreamer drain its socket for 0.3 s,
-            # then freeze Restreamer. The marker is written BEFORE the suspend
-            # call, so no exit path can leave an unmarked suspended Restreamer.
+            # Arm the dead-man, freeze publisher 1, let Restreamer drain its
+            # socket for 0.8 s, then freeze Restreamer. Each marker is written
+            # BEFORE its suspend call, so no exit path leaves an unmarked
+            # suspended process.
+            Start-DeadMan
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
             if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(publisher 1) returned $rc" }
-            Start-Sleep -Milliseconds 300
-            Set-Content -Path $suspendMarker -Value $rs.Id -Encoding ascii
+            Start-Sleep -Milliseconds 800
+            Write-ProcMarker $suspendMarker $rs
             $rsSuspendMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $rsSuspended = $true
             $rc = [LateJoin367]::NtSuspendProcess($rsHandle)
@@ -2425,6 +2488,7 @@ jobs:
             # Kill publisher 1 and publish fresh within ~3 s: the reconnect
             # lands while the receiver is in its re-subscribe retry ladder.
             Stop-Process -Id $p1.Id -Force
+            Remove-Item $p1Marker -Force -ErrorAction SilentlyContinue
             $p2LaunchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $p2 = Start-Publisher 60
             Write-Host "Publisher 1 killed; publisher 2 (PID $($p2.Id)) started at unix ms $p2LaunchMs"
@@ -2466,6 +2530,7 @@ jobs:
             foreach ($p in @($p1, $p2)) {
               if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
+            if ($p1 -and $p1.WaitForExit(5000)) { Remove-Item $p1Marker -Force -ErrorAction SilentlyContinue }
           }
 
           # A receiver that kept a Publish queued consumes it only once the
@@ -2560,45 +2625,70 @@ jobs:
               Start-Sleep -Seconds 5
             }
           }
-          $rows = if ($audit.rows) { @($audit.rows) } else { @() }
-          if ($rows.Count -gt 0) { $problems += "d) $($rows.Count) av_invariant_violated audit row(s): $($rows | ConvertTo-Json -Compress -Depth 4)" }
+          # An empty answer or one without "rows" proves nothing: fail it.
+          if ($null -eq $audit -or $audit.PSObject.Properties.Name -notcontains 'rows') {
+            $problems += "d) the audit query returned no 'rows' field, so the invariant check proves nothing: $($audit | ConvertTo-Json -Compress -Depth 3)"
+          } else {
+            $rows = @($audit.rows | Where-Object { $null -ne $_ })
+            if ($rows.Count -gt 0) { $problems += "d) $($rows.Count) av_invariant_violated audit row(s): $($rows | ConvertTo-Json -Compress -Depth 4)" }
+          }
 
           if ($problems.Count -gt 0) {
             throw "FAILED: late-join republish after a Restreamer freeze (#367): $($problems -join ' | ')"
           }
           Write-Host "=== Late-join republish GATE PASSED: stall reproduced, subscribed $subLagMs ms after the republish, $analysed chunks within 100 ms, 0 invariant violations ==="
+          # GitHub appends "exit $LASTEXITCODE" to powershell steps: a tolerated
+          # ffprobe failure on the last snapshot must not turn a pass into a fail.
+          $global:LASTEXITCODE = 0
 
       - name: Resume Restreamer if the late-join gate left it suspended (#367)
         if: always()
         shell: powershell
         run: |
-          # The late-join gate suspends Restreamer.exe for 35 s and resumes it
-          # in its own finally block. A step killed before that ran (a timeout,
-          # a cancel) leaves its PID marker behind: resume that process here, or
-          # the rest of the job and the box keep a frozen Restreamer.
+          # The late-join gate suspends Restreamer.exe for 35 s (and freezes
+          # ffmpeg publisher 1) and undoes both in its own finally block. A step
+          # killed before that ran (a timeout, a cancel) leaves its PID markers
+          # behind: resume / kill those processes here, or the rest of the job
+          # and the box keep a frozen Restreamer. A marker holds PID + start
+          # time (UTC ticks); a PID only counts while both still match.
+          # (A force-cancel skips this step too: the gate's dead-man covers it.)
           $ErrorActionPreference = 'Stop'
           $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
-          if (-not (Test-Path $suspendMarker)) {
-            Write-Host "The late-join gate left no suspended Restreamer"
-            exit 0
+          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
+          function Get-Marked([string]$path, [string]$name) {
+            $m = @(Get-Content $path)
+            if ($m.Count -lt 2) { return }
+            $p = Get-Process -Id ([int]$m[0]) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -eq $name -and [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$m[1]) -lt 10000000) { $p }
           }
-          $procId = [int]((Get-Content $suspendMarker -Raw).Trim())
-          $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-          if ($proc -and $proc.ProcessName -eq 'Restreamer') {
-            Add-Type -TypeDefinition @"
+          if (Test-Path $suspendMarker) {
+            $proc = Get-Marked $suspendMarker 'Restreamer'
+            if ($proc) {
+              Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
           public static class LateJoin367Resume {
             [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
           }
           "@
-            $rc = [LateJoin367Resume]::NtResumeProcess($proc.Handle)
-            if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer PID $procId) returned $rc -- Restreamer may still be suspended" }
-            Write-Host "Resumed Restreamer PID $procId, left suspended by the late-join gate"
+              $rc = [LateJoin367Resume]::NtResumeProcess($proc.Handle)
+              if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer PID $($proc.Id)) returned $rc -- Restreamer may still be suspended" }
+              Write-Host "Resumed Restreamer PID $($proc.Id), left suspended by the late-join gate"
+            } else {
+              Write-Host "The suspend marker's PID is no longer that Restreamer; nothing to resume"
+            }
+            Remove-Item $suspendMarker -Force
           } else {
-            Write-Host "PID $procId is no longer Restreamer; nothing to resume"
+            Write-Host "The late-join gate left no suspended Restreamer"
           }
-          Remove-Item $suspendMarker -Force
+          if (Test-Path $p1Marker) {
+            $proc = Get-Marked $p1Marker 'ffmpeg'
+            if ($proc) {
+              Stop-Process -Id $proc.Id -Force
+              Write-Host "Killed ffmpeg publisher 1 (PID $($proc.Id)), left behind by the late-join gate"
+            }
+            Remove-Item $p1Marker -Force
+          }
 
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell

@@ -201,19 +201,27 @@ Two rules, both learned the hard way on #367:
   The receiver's `biased` select then takes the frame over the expired stall
   timer ("a frame ready after a process freeze wins"), so there is no stall
   line. That is a race on a correct binary.
-  - The gate freezes the ffmpeg publisher **0.3 s before** Restreamer. In that
+  - The gate freezes the ffmpeg publisher **0.8 s before** Restreamer. In that
     window Restreamer drains the socket; xiu's 2 s cut cannot run while
     Restreamer is suspended.
   - At resume the receiver's channel is still open and empty. Only the hub (in
     the same serve-task poll) and then the frame task can close it. So
-    `Wake::Stalled` fires deterministically.
+    `Wake::Stalled` fires in practice. A lost race can only make the gate
+    fail loudly, never pass.
   - The baseline session got the same effect from OBS dropping its connection
     during the freeze: at resume, `RTMP session ended ... net io error` came
     just before the stall line.
 
 The gate finds the stall by `STALL_LOG_MARKER` (`media_receiver.rs`). A
-test-integrity step fails when the gate's `$stallMarker` differs from it, or
-when Restreamer is not resumed on every exit path: the gate's `finally` plus
-the `if: always()` step `Resume Restreamer if the late-join gate left it
-suspended (#367)`, which share a PID marker file in `$env:TEMP`. Never call
-the API while Restreamer is suspended.
+test-integrity step fails when the gate's `$stallMarker` differs from it. It
+also fails when Restreamer is not resumed on every exit path. There are three:
+- the gate's `finally`;
+- the `if: always()` step `Resume Restreamer if the late-join gate left it
+  suspended (#367)`, right after the gate;
+- a dead-man process the gate creates through WMI before the suspend. It
+  lives outside the runner's process tree, because a force-cancel skips both
+  `finally` and `always()` steps. After 75 s it resumes Restreamer, and kills
+  a frozen publisher 1, but only while their `$env:TEMP` markers still exist.
+
+The markers hold PID + start time, so a reused PID is never touched. Never
+call the API while Restreamer is suspended.
