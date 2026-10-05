@@ -145,6 +145,81 @@ impl RtmpPusher {
         self.av_guard.violation_count()
     }
 
+    /// Classify one media tag's INPUT ts against its track's previous one and
+    /// keep the trackers. Returns `true` when the tag is an isolated outlier
+    /// that must be clamped instead of mapped.
+    ///
+    /// A BACKWARD step (the chunker started a new session after a stream.lan
+    /// restart / republish, while the RTMP session to YouTube stays alive,
+    /// #103) or a FORWARD jump > `MAX_TAG_TS_JUMP_MS` (#176/#178: a 720 s jump
+    /// made pacing sleep 12 min and trip the 30 s write timeout) starts a NEW
+    /// shared mapping: both tracks re-anchor to one base (#257) and one origin
+    /// (#367), so the wire stays monotonic and the A/V relation stays the
+    /// content's.
+    ///
+    /// #367: with ONE origin for both tracks, a single corrupt tag must not be
+    /// taken for a new timeline. If the rest of the chunk does not follow it
+    /// (`rest_min` is more than `MAX_TAG_TS_JUMP_MS` away), it is an isolated
+    /// outlier: the mapping stays, the trackers keep the previous ts, and the
+    /// caller clamps it onto its track's wire timeline. Otherwise, re-pinning
+    /// the shared origin below it would put it far ahead on the wire and
+    /// freeze pacing. The old per-track re-pin hid this by accident.
+    fn track_input_ts(
+        &mut self,
+        track: Track,
+        input_ts: u32,
+        pin: u32,
+        rest_min: Option<u32>,
+    ) -> bool {
+        let prev = match track {
+            Track::Audio => self.state.last_audio_xiu_ts,
+            Track::Video => self.state.last_video_xiu_ts,
+        };
+        if let Some(prev) = prev {
+            let backward = input_ts < prev;
+            let forward_jump = input_ts.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
+            if backward || forward_jump {
+                if rest_min.is_some_and(|m| m.abs_diff(input_ts) > MAX_TAG_TS_JUMP_MS) {
+                    tracing::warn!(
+                        track = ?track,
+                        prev_xiu_ts = prev,
+                        outlier_xiu_ts = input_ts,
+                        rest_of_chunk_min_ts = rest_min,
+                        "rtmp_push: isolated tag.timestamp_ms outlier -- clamped onto the \
+                         current wire timeline, shared mapping unchanged (#367)"
+                    );
+                    return true;
+                }
+                self.state.reanchor(track);
+                self.skew.reset_tracks();
+                self.av_guard.begin_new_transform();
+                tracing::warn!(
+                    track = ?track,
+                    prev_xiu_ts = prev,
+                    new_xiu_ts = input_ts,
+                    direction = if backward { "backward" } else { "forward" },
+                    shared_base = self.state.base_ms,
+                    shared_origin_pin = pin,
+                    "rtmp_push: tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks \
+                     onto a new shared mapping"
+                );
+            }
+        }
+        // Feed the cross-track skew detector with the INPUT (chunker-stamped)
+        // PTS, before the wire mapping rewrites it (#257).
+        match track {
+            Track::Audio => {
+                self.state.last_audio_xiu_ts = Some(input_ts);
+                self.skew.observe_audio(input_ts);
+            }
+            Track::Video => {
+                self.state.last_video_xiu_ts = Some(input_ts);
+                self.skew.observe_video(input_ts);
+            }
+        }
+        false
+    }
+
     /// Chunk-end evaluation of the absolute A/V invariant (#367): log the
     /// edge loudly and queue it for the consumer's audit row.
     pub(crate) fn evaluate_av_invariant(&mut self) {
@@ -289,109 +364,42 @@ impl RtmpPusher {
             // would force the receiver to reset its decoder).
             let is_seq_header = tag.body.len() >= 2 && tag.body[1] == 0x00;
 
-            let (output_ts_u64, track_max) = match tag.tag_type {
+            // Tags after this one: an anomalous tag the rest of the chunk does
+            // not follow is an isolated outlier (#367).
+            let rest_min = pin_from.get(i + 1).copied().flatten();
+
+            let (output_ts_u64, track_max, outlier) = match tag.tag_type {
                 crate::flv::FLV_TAG_AUDIO => {
-                    if !is_seq_header {
-                        // Detect chunker-side timestamp regression (e.g.
-                        // stream.lan crash → fresh chunker session →
-                        // xiu_ts resets to ~0 even though our RTMP-to-
-                        // -YouTube session is still alive). When the new
-                        // tag's xiu_ts is strictly less than the previous
-                        // tag's, treat it as an upstream reset and re-
-                        // anchor: bump the per-track base to match wall
-                        // clock (so subsequent pacing doesn't overshoot
-                        // and freeze the pusher) while staying strictly
-                        // greater than the highest output_ts already
-                        // sent (so the wire timeline never goes
-                        // backwards). The previous "+ 1" formulation
-                        // froze the pusher in #103 resilience-test (the
-                        // pusher's catch-up burst would advance output_ts
-                        // by chunk_duration_ms × N chunks while
-                        // anchor.elapsed only advanced by N × ~200 ms,
-                        // and pacing then slept for the difference,
-                        // exceeding the 30 s consumer-task write
-                        // timeout).
-                        // Detect both BACKWARD (regression) and large
-                        // FORWARD jumps in tag.timestamp_ms. A forward
-                        // jump of more than MAX_TAG_TS_JUMP_MS is treated
-                        // as a chunker-side timestamp glitch (#176/#178:
-                        // observed 720s forward jump in a single video
-                        // tag → pacing slept 12min → 30s write timeout
-                        // → upstream connection reset). Re-anchor on the
-                        // wire timeline so output_ts steps by 1ms instead
-                        // of the bad delta, while preserving monotonicity.
-                        if let Some(prev) = self.state.last_audio_xiu_ts {
-                            let backward = tag.timestamp_ms < prev;
-                            let forward_jump =
-                                tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
-                            if backward || forward_jump {
-                                // Symmetric re-anchor (#257): re-anchor BOTH
-                                // tracks to a shared base so a republish /
-                                // reconnect boundary can't freeze an
-                                // inter-track offset into the wire timeline.
-                                self.state.reanchor(Track::Audio);
-                                self.skew.reset_tracks();
-                                self.av_guard.begin_new_transform();
-                                tracing::warn!(
-                                    prev_xiu_ts = prev,
-                                    new_xiu_ts = tag.timestamp_ms,
-                                    direction = if backward { "backward" } else { "forward" },
-                                    shared_base = self.state.base_ms,
-                                    shared_origin_pin = pin,
-                                    "rtmp_push: AUDIO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
-                                );
-                            }
-                        }
-                        self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
-                        // Feed the cross-track skew detector with the INPUT
-                        // (chunker-stamped) PTS, before the per-track output
-                        // re-anchor rewrites it (#257).
-                        self.skew.observe_audio(tag.timestamp_ms);
-                    }
+                    let outlier = !is_seq_header
+                        && self.track_input_ts(Track::Audio, tag.timestamp_ms, pin, rest_min);
                     // Never pin the shared origin on a codec sequence header
                     // (the chunker writes it with ts 0 in every chunk).
-                    let ts = if is_seq_header {
+                    let ts = if outlier {
+                        self.state
+                            .last_audio_output_ts_ms
+                            .max(max_audio_output_ts)
+                            .saturating_add(1)
+                    } else if is_seq_header {
                         self.state.wire_ts_unpinned(tag.timestamp_ms, pin)
                     } else {
                         self.state.wire_ts(tag.timestamp_ms, pin)
                     };
-                    (ts, &mut max_audio_output_ts)
+                    (ts, &mut max_audio_output_ts, outlier)
                 }
                 crate::flv::FLV_TAG_VIDEO => {
-                    if !is_seq_header {
-                        // Detect BACKWARD + large FORWARD jumps. See
-                        // matching audio block above for rationale.
-                        if let Some(prev) = self.state.last_video_xiu_ts {
-                            let backward = tag.timestamp_ms < prev;
-                            let forward_jump =
-                                tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
-                            if backward || forward_jump {
-                                // Symmetric re-anchor (#257): see matching
-                                // audio block above.
-                                self.state.reanchor(Track::Video);
-                                self.skew.reset_tracks();
-                                self.av_guard.begin_new_transform();
-                                tracing::warn!(
-                                    prev_xiu_ts = prev,
-                                    new_xiu_ts = tag.timestamp_ms,
-                                    direction = if backward { "backward" } else { "forward" },
-                                    shared_base = self.state.base_ms,
-                                    shared_origin_pin = pin,
-                                    "rtmp_push: VIDEO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
-                                );
-                            }
-                        }
-                        self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
-                        // Feed the cross-track skew detector with the INPUT PTS
-                        // (#257), pre per-track output re-anchor.
-                        self.skew.observe_video(tag.timestamp_ms);
-                    }
-                    let ts = if is_seq_header {
+                    let outlier = !is_seq_header
+                        && self.track_input_ts(Track::Video, tag.timestamp_ms, pin, rest_min);
+                    let ts = if outlier {
+                        self.state
+                            .last_video_output_ts_ms
+                            .max(max_video_output_ts)
+                            .saturating_add(1)
+                    } else if is_seq_header {
                         self.state.wire_ts_unpinned(tag.timestamp_ms, pin)
                     } else {
                         self.state.wire_ts(tag.timestamp_ms, pin)
                     };
-                    (ts, &mut max_video_output_ts)
+                    (ts, &mut max_video_output_ts, outlier)
                 }
                 crate::flv::FLV_TAG_SCRIPT => {
                     // Forward FLV script tag (typically `@setDataFrame onMetaData`)
@@ -421,8 +429,9 @@ impl RtmpPusher {
                 *track_max = output_ts_u64;
             }
             // #367: feed the absolute invariant guard with the ts that goes on
-            // the wire (the u32, so even a wrap would be caught).
-            if !is_seq_header {
+            // the wire (the u32, so even a wrap would be caught). A clamped
+            // outlier is deliberately off the transform: never a sample.
+            if !is_seq_header && !outlier {
                 match tag.tag_type {
                     crate::flv::FLV_TAG_AUDIO => self
                         .av_guard
