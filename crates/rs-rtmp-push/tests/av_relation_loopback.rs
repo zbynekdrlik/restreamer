@@ -204,3 +204,73 @@ async fn reconnect_keeps_wire_av_relation_equal_to_content_relation() {
         "the wire A/V invariant guard must stay silent across a reconnect"
     );
 }
+
+/// `av_chunk` with ONE video tag's timestamp corrupted to `glitch_ts`
+/// (its body still names its real content ts `at`).
+fn av_chunk_with_video_glitch(to: u32, session: u8, at: u32, glitch_ts: u32) -> Vec<u8> {
+    let mut out = av_chunk(0, 0, to, session);
+    let marker = body(FLV_VIDEO, false, session, at);
+    // Walk the tags and rewrite the matching tag's 24+8-bit timestamp.
+    let mut off = 13;
+    while off + 11 <= out.len() {
+        let size = (usize::from(out[off + 1]) << 16)
+            | (usize::from(out[off + 2]) << 8)
+            | usize::from(out[off + 3]);
+        let body_start = off + 11;
+        if out[off] == FLV_VIDEO && out[body_start..body_start + size] == marker[..] {
+            let low = (glitch_ts & 0x00FF_FFFF).to_be_bytes();
+            out[off + 4..off + 7].copy_from_slice(&low[1..]);
+            out[off + 7] = (glitch_ts >> 24) as u8;
+            return out;
+        }
+        off = body_start + size + 4;
+    }
+    panic!("video tag at {at} not found");
+}
+
+/// #367 robustness of the shared mapping: ONE corrupt tag whose ts jumped
+/// 720 s ahead (the #176/#178 shape) while the rest of the chunk stays on
+/// the old timeline is an isolated outlier. It must not move the shared
+/// mapping: with one origin for both tracks, a re-anchor pinned below it
+/// would put it 720 s ahead on the wire and freeze the pusher in pacing.
+/// The old per-track re-pin hid this by accident.
+#[tokio::test]
+async fn isolated_forward_glitch_does_not_move_the_shared_mapping() {
+    let (url, recorded, _server, sub_ready) = spawn_recording_xiu_server().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut pusher = RtmpPusher::new(url, PusherConfig::default());
+    pusher.push_flv_bytes(&[]).await.expect("handshake failed");
+    tokio::time::timeout(Duration::from_secs(5), sub_ready)
+        .await
+        .expect("subscriber did not signal within 5s")
+        .expect("sub_ready channel dropped");
+
+    let chunk = av_chunk_with_video_glitch(1_000, 0x0C, 400, 400 + 720_000);
+    tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&chunk))
+        .await
+        .expect("an isolated ts glitch must not freeze the pusher in pacing")
+        .expect("push failed");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let rec = recorded.lock().await;
+    let video: Vec<u32> = rec
+        .iter()
+        .filter(|r| r.tag_type == FLV_VIDEO)
+        .map(|r| r.timestamp_ms)
+        .collect();
+    assert!(
+        video.windows(2).all(|w| w[1] >= w[0]),
+        "video wire ts must stay monotonic: {video:?}"
+    );
+    assert!(
+        video.iter().all(|&ts| ts < 5_000),
+        "the glitch must not jump the wire timeline: {video:?}"
+    );
+    // The clean tags after the glitch keep the content relation (coincident).
+    let v = wire_ts(&rec, FLV_VIDEO, 0x0C, 800);
+    let a = wire_ts(&rec, FLV_AUDIO, 0x0C, 800);
+    assert_eq!(
+        v, a,
+        "coincident content after the glitch must stay coincident"
+    );
+}
