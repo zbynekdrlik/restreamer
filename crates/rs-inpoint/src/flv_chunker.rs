@@ -3,13 +3,14 @@ use md5::{Digest, Md5};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info};
 
 use rs_core::models::InpointState;
 
 use crate::ingest_skew::{IngestSkewMonitor, SkewEvent, SkewTransition};
+use crate::wall_clock::{WallClock, system_clock};
 
 /// Default ingest A/V-skew alert threshold (ms) when no `InpointState` /
 /// config-driven threshold is wired (tests, null sink). Mirrors
@@ -102,6 +103,37 @@ struct FlvChunkSinkInner {
     /// latches a sustained-over-threshold state at each chunk boundary. Reset
     /// on `start_new_session()` / `reset()` alongside the epoch fields.
     skew_monitor: IngestSkewMonitor,
+    /// Wall-clock seam (#367): every Unix-epoch read in the chunker goes
+    /// through here so tests can replay arrival bursts deterministically.
+    clock: Arc<dyn WallClock>,
+}
+
+impl FlvChunkSinkInner {
+    fn new(chunk_dir: PathBuf, chunk_duration: Duration, null_mode: bool) -> Self {
+        Self {
+            buffer: if null_mode {
+                Vec::new()
+            } else {
+                Vec::with_capacity(128 * 1024)
+            },
+            chunk_dir,
+            chunk_duration,
+            chunk_start: None,
+            chunk_index: 0,
+            null_mode,
+            video_sequence_header: None,
+            audio_sequence_header: None,
+            chunk_first_ts: 0,
+            chunk_last_ts: 0,
+            chunk_first_wall_clock_ms: 0,
+            session_start_wall_clock_ms: 0,
+            last_session_ts: 0,
+            audio_session_origin_xiu: None,
+            last_audio_xiu_ts: None,
+            skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
+            clock: system_clock(),
+        }
+    }
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -120,24 +152,7 @@ impl FlvChunkSink {
     pub fn new(chunk_dir: PathBuf, chunk_duration: Duration) -> Self {
         let (chunk_tx, _) = broadcast::channel(256);
         Self {
-            inner: Mutex::new(FlvChunkSinkInner {
-                buffer: Vec::with_capacity(128 * 1024),
-                chunk_dir,
-                chunk_duration,
-                chunk_start: None,
-                chunk_index: 0,
-                null_mode: false,
-                video_sequence_header: None,
-                audio_sequence_header: None,
-                chunk_first_ts: 0,
-                chunk_last_ts: 0,
-                chunk_first_wall_clock_ms: 0,
-                session_start_wall_clock_ms: 0,
-                last_session_ts: 0,
-                audio_session_origin_xiu: None,
-                last_audio_xiu_ts: None,
-                skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
-            }),
+            inner: Mutex::new(FlvChunkSinkInner::new(chunk_dir, chunk_duration, false)),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
             ingest_state: None,
@@ -149,29 +164,24 @@ impl FlvChunkSink {
     pub fn new_null() -> Self {
         let (chunk_tx, _) = broadcast::channel(1);
         Self {
-            inner: Mutex::new(FlvChunkSinkInner {
-                buffer: Vec::new(),
-                chunk_dir: PathBuf::new(),
-                chunk_duration: Duration::from_secs(1),
-                chunk_start: None,
-                chunk_index: 0,
-                null_mode: true,
-                video_sequence_header: None,
-                audio_sequence_header: None,
-                chunk_first_ts: 0,
-                chunk_last_ts: 0,
-                chunk_first_wall_clock_ms: 0,
-                session_start_wall_clock_ms: 0,
-                last_session_ts: 0,
-                audio_session_origin_xiu: None,
-                last_audio_xiu_ts: None,
-                skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
-            }),
+            inner: Mutex::new(FlvChunkSinkInner::new(
+                PathBuf::new(),
+                Duration::from_secs(1),
+                true,
+            )),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
             ingest_state: None,
             skew_threshold_ms: DEFAULT_SKEW_THRESHOLD_MS,
         }
+    }
+
+    /// Replace the wall-clock source (#367). Consuming builder — call before
+    /// the sink is `Arc`-wrapped. Production keeps the default system clock;
+    /// tests inject a manual clock to replay arrival bursts deterministically.
+    pub fn with_wall_clock(mut self, clock: Arc<dyn WallClock>) -> Self {
+        self.inner.get_mut().clock = clock;
+        self
     }
 
     /// Subscribe to chunk completion events.
@@ -259,10 +269,7 @@ impl FlvChunkSink {
     /// OBS-PTS-relative stamping with a smoothed rate factor for environments
     /// where ingest jitter is higher (e.g. cellular bonded encoders).
     fn current_session_ts(inner: &mut FlvChunkSinkInner) -> u32 {
-        let now_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now_ms = inner.clock.now_ms();
         if inner.session_start_wall_clock_ms == 0 {
             inner.session_start_wall_clock_ms = now_ms;
             inner.last_session_ts = 0;
@@ -593,10 +600,7 @@ impl FlvChunkSink {
         inner.chunk_start = Some(Instant::now());
         inner.chunk_first_ts = timestamp;
         inner.chunk_last_ts = timestamp;
-        inner.chunk_first_wall_clock_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        inner.chunk_first_wall_clock_ms = inner.clock.now_ms();
     }
 
     /// Write an FLV tag (11-byte header + data + 4-byte previous tag size).
@@ -641,10 +645,7 @@ impl FlvChunkSink {
 
         // Diagnostic logging for drift analysis (#135).
         {
-            let now_ms = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
+            let now_ms = inner.clock.now_ms();
             let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
             let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
             // debug! (not info!) — the chunk-emit cadence is hot-path-frequent
@@ -664,10 +665,7 @@ impl FlvChunkSink {
         hasher.update(&inner.buffer);
         let md5 = format!("{:x}", hasher.finalize());
 
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let timestamp = inner.clock.now_ms();
         let filename = format!("chunk_{timestamp}_{index:06}.bin");
         let path = inner.chunk_dir.join(&filename);
 
@@ -683,10 +681,7 @@ impl FlvChunkSink {
         };
         inner.chunk_start = None;
 
-        let wall_clock_written_at_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let wall_clock_written_at_ms = inner.clock.now_ms();
 
         Some(PendingChunkWrite {
             data,
@@ -782,24 +777,7 @@ impl FlvChunkSink {
 #[cfg(test)]
 impl FlvChunkSinkInner {
     fn new_for_test(chunk_dir: PathBuf) -> Self {
-        Self {
-            buffer: Vec::new(),
-            chunk_dir,
-            chunk_duration: Duration::from_secs(60),
-            chunk_start: None,
-            chunk_index: 0,
-            null_mode: false,
-            video_sequence_header: None,
-            audio_sequence_header: None,
-            chunk_first_ts: 0,
-            chunk_last_ts: 0,
-            chunk_first_wall_clock_ms: 0,
-            session_start_wall_clock_ms: 0,
-            last_session_ts: 0,
-            audio_session_origin_xiu: None,
-            last_audio_xiu_ts: None,
-            skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
-        }
+        Self::new(chunk_dir, Duration::from_secs(60), false)
     }
 }
 
