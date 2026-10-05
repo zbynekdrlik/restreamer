@@ -39,11 +39,14 @@ baseline-relative, so none of them saw it.
   `session_origin` is the source ts of the session's first video keyframe; on
   a GOP replay that is the cached keyframe. Audio before the origin is
   dropped. `chunk_first_ts`/`chunk_last_ts`/`duration_ms` come from VIDEO
-  tags only (#146). Each track's last two source ts classify a new one
-  (`SrcStep`):
+  tags only (#146); `chunk_first_ts` is the chunk's EARLIEST video ts (a
+  glitched keyframe can open a chunk). Each track's last two source ts
+  classify a new one (`SrcStep`):
   - a backward step <= 1000 ms is jitter: clamped to the track's last ts;
-  - a lone forward glitch > 30 s, recognised by its successor walking back,
-    is dropped from the history;
+  - a forward step > 30 s is `FarForward`: written and recorded as is, but
+    the jumped tag does not advance `chunk_last_ts` (a real sustained jump
+    does from the next tag on). If its successor walks back onto the old
+    timeline (`AfterGlitch`), it was a lone glitch, dropped from the history;
   - a FAR backward step is only a candidate: a new publisher and a lone LOW
     glitch look the same at that tag. The tag is HELD (`HeldTag`, at most
     one). If the next tag of EITHER track is also far behind, it is a new
@@ -70,16 +73,24 @@ baseline-relative, so none of them saw it.
     whole retry ladder.
   - Taking over a deferred Publish and looking for a Publish a lag hid are
     PROBES (`Probe { identifier, trigger }`): accept starts the session
-    (audited with the trigger), reject stays Idle with no "connected" flag
-    and no retry ladder.
+    (audited with the trigger); a failure (rejected or timed out,
+    `probe_failed`) never marks the inpoint "connected" and never runs a
+    retry ladder. A failed probe of any stream but `last_identifier` falls
+    back to ONE probe of `last_identifier` (a stalled live publisher can
+    resume without a new Publish); a failed probe of `last_identifier` ends
+    there. At most takeover -> fallback -> idle; never a loop. Known limit:
+    an ACCEPTED takeover B whose session later ends does not re-probe the A
+    it superseded (needs two stream keys on one inpoint).
   - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
     because xiu has no session id.
   - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
   - `Lagged` is survived and remembered (`lag_unprobed`): once the receiver
     is Idle with no session it probes `last_identifier`. A lag while
-    streaming can hide the live stream's own reconnect Publish. A probe
-    clears the flag when SENT (a lag during a probe costs one more probe,
-    never a loop); any successful subscribe clears it too.
+    streaming can hide the live stream's own reconnect Publish. Sending a
+    probe of `last_identifier` (lag probe or fallback) clears the flag (a lag
+    during it sets it again: one more probe, never a loop). An accepted
+    Subscribe covers only the lags from BEFORE it was sent: a lag while it
+    was in flight (`Phase::Subscribing { lagged }`) stays set.
   - A `Closed` hub channel and a StreamsHub exit both return `Err`, so the
     orchestrator restarts.
   - Unsubscribe every dropped subscription (xiu keeps dead senders and logs

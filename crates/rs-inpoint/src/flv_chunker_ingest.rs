@@ -205,10 +205,11 @@ impl FlvChunkSink {
         }
 
         // chunk_first_ts / chunk_last_ts / duration_ms derive from VIDEO
-        // tags only (#146). A far forward step (most likely a lone glitch)
-        // never stretches the duration, and the chunk's first ts is its
-        // EARLIEST video ts: the successors of a glitched keyframe that
-        // opened the chunk walk back below it.
+        // tags only (#146). The jumped tag of a far forward step (most likely
+        // a lone glitch) does not extend the duration; a real sustained jump
+        // does from the next tag on. The chunk's first ts is its EARLIEST
+        // video ts: the successors of a glitched keyframe that opened the
+        // chunk walk back below it.
         inner.chunk_first_ts = inner.chunk_first_ts.min(ts);
         if !matches!(step, SrcStep::FarForward) {
             inner.chunk_last_ts = ts;

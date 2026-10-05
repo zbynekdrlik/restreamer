@@ -17,8 +17,9 @@
 //!   a lone LOW glitch looks the same. The chunker holds that tag and lets
 //!   the next one decide (`flv_chunker_ingest`);
 //! - a far forward step (`FarForward`) is written and recorded as is (its
-//!   successor tells whether it was a lone glitch), but it never stretches
-//!   the chunk's content duration.
+//!   successor tells whether it was a lone glitch), but the jumped tag
+//!   itself does not extend the chunk's content duration. A real sustained
+//!   jump still does, from the next (`Continue`) tag on.
 //!
 //! Known limit: TWO consecutive forward-glitched tags leave the second one
 //! as `before_last`, so the walk back is `FarBackward`, not `AfterGlitch`;
@@ -48,7 +49,7 @@ pub(crate) enum SrcStep {
     /// On the timeline: stamp it as is.
     Continue,
     /// A forward step larger than `GLITCH_JUMP_MS`: stamped and recorded as
-    /// is, but it does not extend the chunk's content duration.
+    /// is, but this tag does not extend the chunk's content duration.
     FarForward,
     /// A tiny backward step (jitter): stamp it at the track's last ts `to`.
     ClampTiny { to: u32 },
