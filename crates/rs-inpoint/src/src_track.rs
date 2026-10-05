@@ -4,15 +4,25 @@
 //! Since #367 the chunker stamps both tracks `src - session_origin`, so the
 //! publisher's source timestamps drive everything. A real backward jump means
 //! a new publisher reused the stream identifier, and it re-anchors the
-//! session for BOTH tracks (a flush, then drop until the next keyframe). One
-//! odd timestamp must not cost that:
+//! session for BOTH tracks (a flush, then a new shared origin). One odd
+//! timestamp must not cost that:
 //! - a tiny backward step (jitter, <= `TINY_BACKWARD_MS`) is stamped at the
 //!   track's last ts instead;
 //! - a lone forward glitch is only recognisable from its successor, which
 //!   walks back below it but stays on the timeline from before the glitch.
 //!   That is `AfterGlitch`: the glitch is dropped from the history and no
 //!   re-anchor happens. The pusher clamps the glitch itself on the wire
-//!   (`rs_rtmp_push`'s outlier isolation).
+//!   (`rs_rtmp_push`'s outlier isolation);
+//! - a far backward step (`FarBackward`) is only a CANDIDATE new timeline:
+//!   a lone LOW glitch looks the same. The chunker holds that tag and lets
+//!   the next one decide (`flv_chunker_ingest`).
+
+/// A media track of the chunker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Track {
+    Video,
+    Audio,
+}
 
 /// Backward steps up to this are timestamp jitter, not a new publisher.
 pub(crate) const TINY_BACKWARD_MS: u32 = 1_000;
@@ -32,8 +42,9 @@ pub(crate) enum SrcStep {
     /// The PREVIOUS tag was a lone forward glitch; this one is back on the
     /// timeline from before it.
     AfterGlitch { glitch: u32 },
-    /// A real backward jump from `prev`: a new publisher on the identifier.
-    NewTimeline { prev: u32 },
+    /// A far backward step from `prev`: a new publisher on the identifier,
+    /// or a lone low glitch. Recorded, it starts a new timeline.
+    FarBackward { prev: u32 },
 }
 
 /// The last two accepted source ts of one track.
@@ -60,7 +71,7 @@ impl SrcTrack {
         if last - ts <= TINY_BACKWARD_MS {
             return SrcStep::ClampTiny { to: last };
         }
-        SrcStep::NewTimeline { prev: last }
+        SrcStep::FarBackward { prev: last }
     }
 
     /// Record an accepted tag's source ts according to its step.
@@ -74,7 +85,7 @@ impl SrcTrack {
             SrcStep::ClampTiny { .. } => {}
             // Drop the glitch; the pre-glitch ts stays the one before.
             SrcStep::AfterGlitch { .. } => self.last = Some(ts),
-            SrcStep::NewTimeline { .. } => {
+            SrcStep::FarBackward { .. } => {
                 self.before_last = None;
                 self.last = Some(ts);
             }
@@ -126,14 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn a_large_backward_jump_is_a_new_timeline() {
+    fn a_large_backward_jump_is_far_backward_and_records_a_new_timeline() {
         let mut t = track(&[601_960, 602_000]);
         assert_eq!(
             t.classify(602_000 - TINY_BACKWARD_MS - 1),
-            SrcStep::NewTimeline { prev: 602_000 }
+            SrcStep::FarBackward { prev: 602_000 }
         );
-        assert_eq!(t.classify(0), SrcStep::NewTimeline { prev: 602_000 });
-        t.record(0, SrcStep::NewTimeline { prev: 602_000 });
+        assert_eq!(t.classify(0), SrcStep::FarBackward { prev: 602_000 });
+        t.record(0, SrcStep::FarBackward { prev: 602_000 });
         assert_eq!(t.classify(40), SrcStep::Continue);
     }
 
@@ -148,15 +159,15 @@ mod tests {
     #[test]
     fn a_forward_step_within_the_glitch_bound_is_not_a_glitch() {
         // 360 -> 360 + GLITCH_JUMP_MS is a (large) normal step; walking back
-        // more than the jitter tolerance from it is a new timeline.
+        // more than the jitter tolerance from it is a far backward step.
         let t = track(&[360, 360 + GLITCH_JUMP_MS]);
-        assert_eq!(t.classify(400), SrcStep::NewTimeline { prev: 30_360 });
+        assert_eq!(t.classify(400), SrcStep::FarBackward { prev: 30_360 });
     }
 
     #[test]
-    fn going_below_the_pre_glitch_ts_is_a_new_timeline() {
+    fn going_below_the_pre_glitch_ts_is_far_backward() {
         let t = track(&[360, 400 + 40_000]);
-        assert_eq!(t.classify(100), SrcStep::NewTimeline { prev: 40_400 });
+        assert_eq!(t.classify(100), SrcStep::FarBackward { prev: 40_400 });
     }
 
     #[test]

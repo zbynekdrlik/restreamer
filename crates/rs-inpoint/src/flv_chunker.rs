@@ -11,9 +11,12 @@ use rs_core::models::InpointState;
 
 use crate::ingest_report::{BoundaryReport, publish_boundary, publish_reanchor};
 use crate::ingest_skew::IngestSkewMonitor;
-use crate::src_track::{SrcStep, SrcTrack};
+use crate::src_track::{SrcTrack, Track};
 use crate::wall_clock::{WallClock, system_clock};
 use rs_rtmp_push::{AvInvariantEvent, AvInvariantGuard};
+
+#[path = "flv_chunker_ingest.rs"]
+mod ingest;
 
 /// Default ingest A/V-skew alert threshold (ms) when no `InpointState` /
 /// config-driven threshold is wired (tests, null sink). Mirrors
@@ -96,6 +99,9 @@ struct FlvChunkSinkInner {
     /// step or a lone glitch does not.
     video_src: SrcTrack,
     audio_src: SrcTrack,
+    /// A far-backward tag held until the next tag decides whether it starts
+    /// a new timeline or was a lone glitch (#367, `flv_chunker_ingest`).
+    held: Option<ingest::HeldTag>,
     /// Ingest A/V-skew monitor (#354): observes the SAME chunker-stamped
     /// content-PTS the VPS pusher's `SkewTracker` consumes downstream, and
     /// latches a sustained-over-threshold state at each chunk boundary. Reset
@@ -132,19 +138,20 @@ impl FlvChunkSinkInner {
             session_origin_src: None,
             video_src: SrcTrack::default(),
             audio_src: SrcTrack::default(),
+            held: None,
             skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
             av_invariant: AvInvariantGuard::default(),
             clock: system_clock(),
         }
     }
-}
 
-/// A backward-jump session re-anchor, finished outside the lock (#367).
-struct Reanchored {
-    /// The old session's partial chunk, if it had any data.
-    flushed: Option<PendingChunkWrite>,
-    /// A latched invariant violation of the old session, now closed.
-    invariant: Option<AvInvariantEvent>,
+    /// The source-ts history of `track`.
+    fn src_track(&self, track: Track) -> SrcTrack {
+        match track {
+            Track::Video => self.video_src,
+            Track::Audio => self.audio_src,
+        }
+    }
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -230,105 +237,43 @@ impl FlvChunkSink {
     /// is applied.
     pub async fn write_video(&self, xiu_timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && data[1] == 0x00;
-
-        let reanchored;
-        let mut pending = None;
-        let mut boundary = BoundaryReport::default();
-        {
+        let fx = {
             let mut inner = self.inner.lock().await;
-
             // Always save sequence headers (even in null mode, for state tracking)
             if is_sequence_header {
                 inner.video_sequence_header = Some(data.clone());
                 debug!("FLV video sequence header saved ({} bytes)", data.len());
                 return;
             }
-
             if inner.null_mode {
                 return;
             }
+            Self::ingest_tag(&mut inner, Track::Video, xiu_timestamp, data)
+        };
+        self.finish_tag(fx).await;
+    }
 
-            // #367: a real backward source jump means a new publisher reused
-            // the stream identifier without its Publish event reaching us:
-            // re-anchor BOTH tracks on a new shared session origin.
-            let (step, reanchor) = Self::classify_src(&mut inner, "video", xiu_timestamp);
-            reanchored = reanchor;
-            let src = Self::stamped_src(step, xiu_timestamp);
-
-            let is_keyframe = !data.is_empty() && (data[0] >> 4) == 1;
-            // A chunk -- and a session -- always starts on a keyframe. Drop
-            // non-keyframes before that, BEFORE anchoring the session origin.
-            if inner.chunk_start.is_some() || is_keyframe {
-                let ts = Self::video_out_ts(&mut inner, src);
-                inner.video_src.record(xiu_timestamp, step);
-
-                // Check if we need to start a new chunk (at keyframe boundary)
-                let should_flush = inner
-                    .chunk_start
-                    .map(|s| s.elapsed() >= inner.chunk_duration)
-                    .unwrap_or(false);
-
-                // #354: a chunk boundary is where the ingest skew monitor is
-                // evaluated. Evaluate the CLOSING chunk BEFORE this keyframe's
-                // ts is observed (below), so the boundary reflects exactly the
-                // frames that belonged to the chunk being flushed.
-                if should_flush && is_keyframe {
-                    pending = Self::extract_chunk(&mut inner);
-                    boundary = Self::evaluate_boundary(&mut inner);
-                    Self::write_chunk_header(&mut inner, ts);
-                } else if inner.chunk_start.is_none() {
-                    // First keyframe — start the chunk.
-                    Self::write_chunk_header(&mut inner, ts);
-                }
-
-                // chunk_first_ts / chunk_last_ts / duration_ms derive from
-                // VIDEO tags only (#146).
-                inner.chunk_last_ts = ts;
-                Self::write_tag(&mut inner, FLV_TAG_VIDEO, ts, data);
-                // Observe the SAME stamped ts the pusher's SkewTracker will see
-                // downstream, so ingest and VPS agree on the number (#354).
-                inner.skew_monitor.observe_video(ts);
-                // A clamped jitter tag is deliberately off the transform.
-                if !matches!(step, SrcStep::ClampTiny { .. }) {
-                    inner
-                        .av_invariant
-                        .observe_video(i64::from(xiu_timestamp), i64::from(ts));
-                }
-
-                // Force-flush if buffer exceeds max size
-                if inner.buffer.len() >= MAX_BUFFER_SIZE {
-                    tracing::warn!(
-                        "FLV chunk buffer exceeded {}MB limit, force-flushing",
-                        MAX_BUFFER_SIZE / (1024 * 1024)
-                    );
-                    if pending.is_none() {
-                        pending = Self::extract_chunk(&mut inner);
-                        // #354: this is ALSO a real chunk boundary -- evaluate
-                        // the skew monitor here too, not just on the normal
-                        // duration+keyframe path above (this branch runs only
-                        // when that one did NOT, since `pending` is still
-                        // `None` at this point in exactly that case).
-                        // Otherwise a pathological stream that keeps hitting
-                        // the 50MB force-flush path (e.g. a misconfigured
-                        // chunk_duration) would never advance the debounce
-                        // counter.
-                        boundary = Self::evaluate_boundary(&mut inner);
-                    }
-                }
+    /// Process an audio frame from xiu's FrameData::Audio.
+    ///
+    /// `timestamp` is the publisher's SOURCE ts (xiu forwards the RTMP ts).
+    /// Audio is stamped `timestamp - session_origin`: the SAME shared origin
+    /// as video, the source ts of the session's first keyframe (#367).
+    pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
+        let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
+        let fx = {
+            let mut inner = self.inner.lock().await;
+            // Always save sequence headers (even in null mode, for state tracking)
+            if is_sequence_header {
+                inner.audio_sequence_header = Some(data.clone());
+                debug!("FLV audio sequence header saved ({} bytes)", data.len());
+                return;
             }
-        }
-
-        // The re-anchor's flushed chunk goes out FIRST (it precedes the new
-        // session's chunk in index order).
-        if let Some(r) = reanchored {
-            self.finish_reanchor(r).await;
-        }
-        // Publish the boundary OUTSIDE the inner lock (audit + shared
-        // atomics live on the ingest state, not the chunker mutex).
-        publish_boundary(self.ingest_state.as_ref(), self.skew_threshold_ms, boundary);
-        if let Some(pending) = pending {
-            self.commit_chunk(pending).await;
-        }
+            if inner.null_mode {
+                return;
+            }
+            Self::ingest_tag(&mut inner, Track::Audio, timestamp, data)
+        };
+        self.finish_tag(fx).await;
     }
 
     /// Stamp a video frame into the session's source-ts domain, anchoring the
@@ -348,80 +293,9 @@ impl FlvChunkSink {
             }
         };
         // Never below the origin: a later video frame is >= the previous one
-        // (a backward jump re-anchors, jitter is clamped up to the last ts),
-        // and the origin IS the session's first video frame.
+        // (a backward jump re-anchors, jitter and a lone glitch are clamped up
+        // to the last ts), and the origin IS the session's first video frame.
         src_ts.saturating_sub(origin)
-    }
-
-    /// Process an audio frame from xiu's FrameData::Audio.
-    ///
-    /// `timestamp` is the publisher's SOURCE ts (xiu forwards the RTMP ts).
-    /// Audio is stamped `timestamp - session_origin`: the SAME shared origin
-    /// as video, which is the source ts of the session's first keyframe
-    /// (#367). The xiu inter-tag deltas (AAC cadence: 1024 samples, 21.3 ms
-    /// at 48 kHz) are untouched, so the #142 chipmunk fix holds: no wall-clock
-    /// jitter in PTS, no resampling artefacts.
-    ///
-    /// Audio never touches `chunk_last_ts`. That field is owned by
-    /// `write_video` (VIDEO-only chunk-duration accounting, #146).
-    pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
-        let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
-
-        let reanchored = {
-            let mut inner = self.inner.lock().await;
-
-            // Always save sequence headers (even in null mode, for state tracking)
-            if is_sequence_header {
-                inner.audio_sequence_header = Some(data.clone());
-                debug!("FLV audio sequence header saved ({} bytes)", data.len());
-                return;
-            }
-
-            if inner.null_mode {
-                return;
-            }
-
-            // #367: a real backward audio source jump re-anchors BOTH tracks
-            // (never the old per-track audio self-heal, which re-zeroed audio
-            // alone while video kept counting).
-            let (step, reanchored) = Self::classify_src(&mut inner, "audio", timestamp);
-            inner.audio_src.record(timestamp, step);
-            let src = Self::stamped_src(step, timestamp);
-
-            // Audio is written only inside a chunk, i.e. once the session's
-            // first keyframe has anchored the shared origin.
-            match (inner.chunk_start, inner.session_origin_src) {
-                (Some(_), Some(origin)) if src >= origin => {
-                    let audio_out = src - origin;
-                    Self::write_tag(&mut inner, FLV_TAG_AUDIO, audio_out, data);
-                    // Observe the SAME ts the pusher's SkewTracker sees
-                    // downstream, so ingest and VPS skew agree (#354).
-                    inner.skew_monitor.observe_audio(audio_out);
-                    // A clamped jitter tag is deliberately off the transform.
-                    if !matches!(step, SrcStep::ClampTiny { .. }) {
-                        inner
-                            .av_invariant
-                            .observe_audio(i64::from(timestamp), i64::from(audio_out));
-                    }
-                }
-                (Some(_), Some(origin)) => {
-                    // Content earlier than the session's first keyframe has
-                    // no place on the session timeline -- same as audio that
-                    // arrives before the first keyframe.
-                    debug!(
-                        src_ts = timestamp,
-                        session_origin_src = origin,
-                        "flv_chunker: dropping audio that precedes the session origin keyframe"
-                    );
-                }
-                _ => {}
-            }
-            reanchored
-        };
-
-        if let Some(r) = reanchored {
-            self.finish_reanchor(r).await;
-        }
     }
 
     /// Force flush any buffered data as a final chunk.
@@ -430,7 +304,8 @@ impl FlvChunkSink {
     pub async fn flush(&self) {
         let (pending, invariant) = {
             let mut inner = self.inner.lock().await;
-            if inner.null_mode || inner.buffer.is_empty() {
+            // A null sink never buffers anything (its writes return early).
+            if inner.buffer.is_empty() {
                 (None, BoundaryReport::default())
             } else {
                 // #367: a flush is a chunk boundary for the absolute A/V
@@ -526,99 +401,13 @@ impl FlvChunkSink {
         inner.session_origin_src = None;
         inner.video_src.clear();
         inner.audio_src.clear();
+        // A held far-backward tag belongs to no session anymore.
+        inner.held = None;
         // #354: a new session is a new common origin, and the operator banner
         // must clear on it.
         inner.skew_monitor.reset();
         // #367: a new session is a new transform.
         inner.av_invariant.reset()
-    }
-
-    /// Classify a track's new source ts (#367, `src_track`) and act on it: a
-    /// real backward jump re-anchors the session (returned for the caller to
-    /// finish outside the lock); a jitter step or a lone glitch is logged.
-    /// Returns the step to stamp and record the tag with (`Continue` after a
-    /// re-anchor: the tag heads the new session).
-    fn classify_src(
-        inner: &mut FlvChunkSinkInner,
-        track: &'static str,
-        src_ts: u32,
-    ) -> (SrcStep, Option<Reanchored>) {
-        let history = if track == "video" {
-            inner.video_src
-        } else {
-            inner.audio_src
-        };
-        match history.classify(src_ts) {
-            SrcStep::NewTimeline { prev } => (
-                SrcStep::Continue,
-                Some(Self::reanchor_session(inner, track, prev, src_ts)),
-            ),
-            SrcStep::ClampTiny { to } => {
-                tracing::warn!(
-                    track,
-                    src_ts,
-                    stamped_as = to,
-                    "flv_chunker: tiny backward source-ts step (jitter) -- stamped at the \
-                     track's last ts, no re-anchor (#367)"
-                );
-                (SrcStep::ClampTiny { to }, None)
-            }
-            SrcStep::AfterGlitch { glitch } => {
-                tracing::warn!(
-                    track,
-                    src_ts,
-                    glitch_src_ts = glitch,
-                    "flv_chunker: previous tag was a lone forward source-ts glitch -- back on \
-                     the timeline, no re-anchor (#367)"
-                );
-                (SrcStep::AfterGlitch { glitch }, None)
-            }
-            SrcStep::Continue => (SrcStep::Continue, None),
-        }
-    }
-
-    /// The source ts a tag is stamped with: a jitter step is clamped up to
-    /// the track's last ts (monotonic per track); anything else as is.
-    fn stamped_src(step: SrcStep, src_ts: u32) -> u32 {
-        match step {
-            SrcStep::ClampTiny { to } => to,
-            _ => src_ts,
-        }
-    }
-
-    /// #367: re-anchor the session for BOTH tracks after a real backward
-    /// source jump on `track`: extract the partial chunk (it belongs to the
-    /// old publisher) and clear the session epoch. The caller finishes the
-    /// re-anchor outside the lock with [`Self::finish_reanchor`].
-    fn reanchor_session(
-        inner: &mut FlvChunkSinkInner,
-        track: &'static str,
-        prev: u32,
-        src_ts: u32,
-    ) -> Reanchored {
-        let flushed = Self::extract_chunk(inner);
-        let old_origin = inner.session_origin_src;
-        let invariant = Self::clear_session_epoch(inner);
-        tracing::warn!(
-            track,
-            prev_src_ts = prev,
-            new_src_ts = src_ts,
-            old_session_origin_src = ?old_origin,
-            chunk_index = inner.chunk_index,
-            flushed_partial_chunk = flushed.is_some(),
-            "flv_chunker: source ts jumped backward -- a new publisher on the same identifier; \
-             re-anchoring BOTH tracks on a new shared session origin (#367)"
-        );
-        Reanchored { flushed, invariant }
-    }
-
-    /// Outside-the-lock half of a backward-jump re-anchor: write the old
-    /// session's partial chunk and clear the ingest banner.
-    async fn finish_reanchor(&self, r: Reanchored) {
-        if let Some(pending) = r.flushed {
-            self.commit_chunk(pending).await;
-        }
-        publish_reanchor(self.ingest_state.as_ref(), r.invariant);
     }
 
     /// Hand an extracted chunk to the background writer, and commit the
