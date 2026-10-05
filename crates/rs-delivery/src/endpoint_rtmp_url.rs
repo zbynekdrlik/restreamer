@@ -4,10 +4,13 @@
 //! URL construction so the pusher connects to the same upstream ffmpeg would.
 //!
 //! Compiled into BOTH the binary (`main.rs`) and the library (`lib.rs`)
-//! targets: it depends only on `rs_ffmpeg`, and the library export lets the
-//! `tests/` integration binaries dial the exact URL production dials (#192).
+//! targets: it depends only on `rs_ffmpeg` and the `test_file_sink` address
+//! constant (also in both), and the library export lets the `tests/`
+//! integration binaries dial the exact URL production dials (#192).
 
 use rs_ffmpeg::ServiceType;
+
+use crate::test_file_sink::TEST_FILE_SINK_ADDR;
 
 /// Build the plain RTMP URL for a given service type and stream key.
 pub fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
@@ -22,7 +25,8 @@ pub fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
         ServiceType::Instagram => {
             format!("rtmps://live-upload.instagram.com:443/rtmp/{stream_key}")
         }
-        // TestFile has no upstream — use a local test address.
-        ServiceType::TestFile => format!("rtmp://127.0.0.1:1935/live/{stream_key}"),
+        // TestFile has no upstream: the delivery binary's own loopback
+        // accept-and-discard sink listens here (#192, `test_file_sink`).
+        ServiceType::TestFile => format!("rtmp://{TEST_FILE_SINK_ADDR}/live/{stream_key}"),
     }
 }
