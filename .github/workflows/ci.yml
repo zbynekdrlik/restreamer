@@ -321,6 +321,7 @@ jobs:
             --exclude-re 'read_loop' \
             --exclude-re 'RtmpPusher::push_flv_bytes' \
             --exclude-re 'RtmpPusher::close' \
+            --exclude-re '<impl Pushable for RtmpPusher>' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \

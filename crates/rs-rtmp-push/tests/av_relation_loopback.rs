@@ -40,15 +40,14 @@ async fn reanchor_keeps_wire_av_relation_equal_to_content_relation() {
         .expect("sub_ready channel dropped");
 
     // Session A: aligned A/V far into a stream.
-    pusher
-        .push_flv_bytes(&av_chunk(600_000, 600_000, 600_400, 0x0A))
-        .await
-        .expect("push session A chunk");
+    push_within(
+        &mut pusher,
+        &av_chunk(600_000, 600_000, 600_400, 0x0A),
+        "session A",
+    )
+    .await;
     // Session B: backward jump -> re-anchor; audio starts 700 ms after video.
-    pusher
-        .push_flv_bytes(&av_chunk(0, 700, 1_000, 0x0B))
-        .await
-        .expect("push session B chunk");
+    push_within(&mut pusher, &av_chunk(0, 700, 1_000, 0x0B), "session B").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let rec = recorded.lock().await;
@@ -100,10 +99,12 @@ async fn reconnect_keeps_wire_av_relation_equal_to_content_relation() {
         .await
         .expect("subscriber A did not signal within 5s")
         .expect("sub_ready_a channel dropped");
-    pusher
-        .push_flv_bytes(&av_chunk(2_000, 2_000, 2_400, 0x0A))
-        .await
-        .expect("push chunk to server A");
+    push_within(
+        &mut pusher,
+        &av_chunk(2_000, 2_000, 2_400, 0x0A),
+        "server A",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // The session drops; a replacement server comes up on the same port.
@@ -121,10 +122,12 @@ async fn reconnect_keeps_wire_av_relation_equal_to_content_relation() {
         .expect("subscriber B did not signal within 5s")
         .expect("sub_ready_b channel dropped");
 
-    pusher
-        .push_flv_bytes(&av_chunk(2_440, 3_140, 3_600, 0x0B))
-        .await
-        .expect("push first chunk after reconnect");
+    push_within(
+        &mut pusher,
+        &av_chunk(2_440, 3_140, 3_600, 0x0B),
+        "first chunk after reconnect",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let rec = recorded_b.lock().await;
@@ -168,10 +171,7 @@ async fn isolated_forward_glitch_does_not_move_the_shared_mapping() {
     let mut tags = av_tags(0, 0, 1_000, 0x0C);
     glitch(&mut tags, FLV_VIDEO, 400, 400 + 720_000);
     let chunk = to_flv(&tags);
-    tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&chunk))
-        .await
-        .expect("an isolated ts glitch must not freeze the pusher in pacing")
-        .expect("push failed");
+    push_within(&mut pusher, &chunk, "isolated glitch").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let rec = recorded.lock().await;

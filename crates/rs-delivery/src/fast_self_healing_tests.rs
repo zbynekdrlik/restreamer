@@ -464,6 +464,11 @@ mod fast_upload_gap_regression {
         fn av_skew_ms(&self) -> i64 {
             0
         }
+
+        fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+            // This mock does not model the #367 invariant guard.
+            Vec::new()
+        }
     }
 
     #[tokio::test(start_paused = true)]

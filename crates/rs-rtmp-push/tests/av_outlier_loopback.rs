@@ -36,13 +36,6 @@ async fn connected() -> (
     (pusher, recorded, server)
 }
 
-async fn push_within(pusher: &mut RtmpPusher, chunk: &[u8], what: &str) {
-    tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(chunk))
-        .await
-        .unwrap_or_else(|_| panic!("{what}: the pusher froze in pacing (> 10 s)"))
-        .unwrap_or_else(|e| panic!("{what}: push failed: {e:?}"));
-}
-
 fn assert_monotonic(track: &[u32], what: &str) {
     assert!(
         track.windows(2).all(|w| w[1] >= w[0]),

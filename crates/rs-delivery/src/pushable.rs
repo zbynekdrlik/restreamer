@@ -29,11 +29,10 @@ pub(crate) trait Pushable {
     /// video). Surfaced to per-endpoint telemetry (issue #257).
     fn av_skew_ms(&self) -> i64;
     /// Drain the absolute A/V invariant guard edges (#367) recorded by the
-    /// pushes since the last call; the consumer audits each one. Test
-    /// pushers that do not model the guard keep the empty default.
-    fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
-        Vec::new()
-    }
+    /// pushes since the last call; the consumer audits each one. Required
+    /// (no default): a pusher that silently returned nothing would make
+    /// its violations invisible.
+    fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent>;
 }
 
 impl Pushable for RtmpPusher {

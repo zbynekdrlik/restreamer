@@ -466,6 +466,32 @@ mod tests {
         );
     }
 
+    /// Every action `classify()` routes to an alert has its OWN operator text
+    /// (a deleted `slovak_text` arm would fall into `_ => ""` and post an
+    /// empty Discord message), and the texts are distinct.
+    #[test]
+    fn every_classified_action_has_its_own_text() {
+        let routed = [
+            Action::VpsUnreachable,
+            Action::S3UploadFailed,
+            Action::HostInternetUnreachable,
+            Action::RescueActivated,
+            Action::IngestSkewDetected,
+            Action::AvInvariantViolated,
+            Action::RescueRecovered,
+            Action::HostInternetRecovered,
+            Action::IngestSkewRecovered,
+            Action::AvInvariantRestored,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for action in routed {
+            assert!(classify(action).is_some(), "{action:?} must be routed");
+            let text = slovak_text(action);
+            assert!(!text.is_empty(), "{action:?} has no operator text");
+            assert!(seen.insert(text), "{action:?} reuses another action's text");
+        }
+    }
+
     /// #367: an absolute A/V invariant violation (any stage: ingest chunker
     /// or VPS pusher) must reach the operator's Discord like the #354 ingest
     /// skew, and its Restored edge closes the episode and re-arms.

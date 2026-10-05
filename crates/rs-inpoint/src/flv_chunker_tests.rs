@@ -206,7 +206,10 @@ async fn flv_tag_structure_is_correct() {
 
     sink.flush().await;
 
-    let chunk = rx.recv().await.unwrap();
+    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("chunk should flush")
+        .unwrap();
     let file_data = std::fs::read(&chunk.path).unwrap();
 
     // FLV header (9) + prev tag size 0 (4) = 13 bytes

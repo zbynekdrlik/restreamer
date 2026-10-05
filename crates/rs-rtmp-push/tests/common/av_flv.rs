@@ -97,3 +97,16 @@ pub fn wire_track(recorded: &[RecordedTag], tag_type: u8) -> Vec<u32> {
         .map(|r| r.timestamp_ms)
         .collect()
 }
+
+/// Push one chunk, failing the test (instead of hanging) if the pusher
+/// freezes in pacing for more than 10 s, as it does when a wire ts runs far
+/// ahead of wall clock.
+pub async fn push_within(pusher: &mut rs_rtmp_push::RtmpPusher, chunk: &[u8], what: &str) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        pusher.push_flv_bytes(chunk),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{what}: the pusher froze in pacing (> 10 s)"))
+    .unwrap_or_else(|e| panic!("{what}: push failed: {e:?}"));
+}
