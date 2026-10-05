@@ -94,10 +94,10 @@ fn audio_falling_behind_video_mid_stream_trips_recovery_after_debounce() {
     assert_eq!(tracker.trip_count(), 1, "exactly one recovery tripped");
 }
 
-/// THE false-positive guard (#257 review 🟡): a benign CONSTANT A/V domain
-/// offset present from session start (audio xiu-ts vs video wall-clock have
-/// different absolute zero points — startup/device init lag) must NEVER
-/// trip. The constant offset folds into the baseline; only a CHANGE trips.
+/// THE false-positive guard (#257 review 🟡): a benign CONSTANT A/V
+/// offset present from session start (the publisher's own startup/device
+/// init lag) must NEVER trip. The constant offset folds into the
+/// baseline; only a CHANGE trips.
 #[test]
 fn constant_startup_domain_offset_never_trips() {
     let mut tracker = SkewTracker::default();
@@ -358,8 +358,10 @@ fn raw_skew_exposes_absolute_offset() {
     assert_eq!(t.current_skew_ms(), 0);
 }
 
-/// Issue #359 — a CONTINUOUS cross-track drift (audio xiu-ts and video
-/// wall-clock advancing at slightly DIFFERENT RATES on our path) must NOT
+/// Issue #359 — a CONTINUOUS cross-track drift (the two tracks' timestamps
+/// advancing at slightly DIFFERENT RATES: in the #359 evidence audio xiu-ts
+/// vs video wall-clock on our path; since #367 both tracks are stamped in
+/// the publisher's source domain, so only a SOURCE-side drift remains) must NOT
 /// death-loop the push. On the pre-fix guard every `AvSkewExceeded`
 /// reconnect calls `reset_tracks()`, re-zeroes the baseline, and the SAME
 /// drift re-accumulates past `MAX_AV_SKEW_MS` and trips again — forever

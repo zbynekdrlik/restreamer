@@ -73,6 +73,21 @@ pub enum Action {
     /// Outage-alert recovery, pairs with `IngestSkewDetected` — see
     /// `notify::classify` (#354).
     IngestSkewRecovered,
+    /// #367: a pipeline stage broke the ABSOLUTE A/V invariant. The stage's
+    /// output A/V relation differs from its input relation by more than
+    /// `tolerance_ms` (every stage must apply ONE common transform to both
+    /// tracks). Unlike the baseline-relative skew guards (#257/#354/#359)
+    /// there is no baseline, so an offset present from the first chunk is
+    /// caught. Warn severity. `detail.stage` is `"ingest"` (the chunker,
+    /// `Source::Inpoint`) or `"push"` (a VPS pusher, `Source::Vps` + the
+    /// endpoint alias). Detail carries `{stage, a_rel_ms, v_rel_ms, delta_ms,
+    /// tolerance_ms}`. Outage-alert onset — see `notify::classify`.
+    AvInvariantViolated,
+    /// #367: a latched `AvInvariantViolated` cleared: the relation is back
+    /// within tolerance, or a session re-anchor started a new transform.
+    /// Info severity. Detail carries `{stage, delta_ms}`. Outage-alert
+    /// recovery, pairs with `AvInvariantViolated`.
+    AvInvariantRestored,
     VpsCreating,
     VpsReady,
     VpsDeleted,
@@ -384,6 +399,40 @@ pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
     }
 }
 
+/// #367: the ONE audit-row shape of an absolute A/V invariant VIOLATION
+/// edge, shared by the ingest chunker (`stage: "ingest"`) and every VPS
+/// pusher (`stage: "push"`). Primitives only, so rs-core needs no
+/// rs-rtmp-push dependency.
+pub fn av_invariant_violated_row(
+    stage: &str,
+    a_rel_ms: i64,
+    v_rel_ms: i64,
+    delta_ms: i64,
+    tolerance_ms: i64,
+) -> (Severity, Action, Value) {
+    (
+        Severity::Warn,
+        Action::AvInvariantViolated,
+        serde_json::json!({
+            "stage": stage,
+            "a_rel_ms": a_rel_ms,
+            "v_rel_ms": v_rel_ms,
+            "delta_ms": delta_ms,
+            "tolerance_ms": tolerance_ms,
+        }),
+    )
+}
+
+/// #367: the audit-row shape of an A/V invariant RESTORED edge (see
+/// [`av_invariant_violated_row`]).
+pub fn av_invariant_restored_row(stage: &str, delta_ms: i64) -> (Severity, Action, Value) {
+    (
+        Severity::Info,
+        Action::AvInvariantRestored,
+        serde_json::json!({ "stage": stage, "delta_ms": delta_ms }),
+    )
+}
+
 /// Drains the audit channel, INSERTs rows (batched), broadcasts WS events, and
 /// — when a Discord outage notifier is configured (#261) — fires an
 /// edge-triggered alert on each outage state transition observed in the drained
@@ -664,5 +713,44 @@ mod tests {
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"process_stall\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_av_invariant_serdes() {
+        // #367: the VPS emits these into its audit ring and the host mirror
+        // (`delivery_audit_mirror`) STRICT-parses the action string, so both
+        // must round-trip exactly or a push-side violation never lands in
+        // `audit_log` (and never reaches Discord).
+        for (a, s) in [
+            (Action::AvInvariantViolated, "\"av_invariant_violated\""),
+            (Action::AvInvariantRestored, "\"av_invariant_restored\""),
+        ] {
+            assert_eq!(serde_json::to_string(&a).unwrap(), s);
+            assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);
+        }
+    }
+
+    #[test]
+    fn av_invariant_rows_have_one_shape_for_both_stages() {
+        let (severity, action, detail) = av_invariant_violated_row("push", 3_300, 4_000, -700, 50);
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(action, Action::AvInvariantViolated);
+        assert_eq!(
+            detail,
+            serde_json::json!({
+                "stage": "push",
+                "a_rel_ms": 3_300,
+                "v_rel_ms": 4_000,
+                "delta_ms": -700,
+                "tolerance_ms": 50,
+            })
+        );
+        let (severity, action, detail) = av_invariant_restored_row("ingest", 3);
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(action, Action::AvInvariantRestored);
+        assert_eq!(
+            detail,
+            serde_json::json!({ "stage": "ingest", "delta_ms": 3 })
+        );
     }
 }

@@ -298,14 +298,15 @@ mod close_on_error {
         push_results: VecDeque<Result<(), PushError>>,
         events: Vec<&'static str>,
         reconnects: u32,
+        /// #367: A/V invariant guard edges the mock "recorded" while pushing.
+        av_events: Vec<rs_rtmp_push::AvInvariantEvent>,
     }
 
     impl MockPusher {
         fn with_results(results: Vec<Result<(), PushError>>) -> Self {
             Self {
                 push_results: VecDeque::from(results),
-                events: Vec::new(),
-                reconnects: 0,
+                ..Self::default()
             }
         }
     }
@@ -332,6 +333,10 @@ mod close_on_error {
 
         fn av_skew_ms(&self) -> i64 {
             0
+        }
+
+        fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+            std::mem::take(&mut self.av_events)
         }
     }
 
@@ -513,6 +518,58 @@ mod close_on_error {
             pusher.reconnects, 0,
             "LocalCancel must NOT trigger any reconnect bookkeeping"
         );
+    }
+
+    /// #367 (push half of the absolute A/V invariant guard): every guard
+    /// edge the pusher recorded is drained after the push and audited with
+    /// the endpoint alias -- on the success path AND when the push failed
+    /// (a violation is queued before the skew guard may fail the chunk).
+    #[tokio::test(start_paused = true)]
+    async fn pusher_av_invariant_edges_are_audited_on_success_and_error() {
+        use rs_core::audit::{Action, Severity, Source};
+        use rs_rtmp_push::{AvInvariantEvent, AvInvariantViolation};
+        let violation = AvInvariantEvent::Violated(AvInvariantViolation {
+            a_rel_ms: 3_300,
+            v_rel_ms: 4_000,
+            delta_ms: -700,
+        });
+        for result in [Ok(()), Err(PushError::AvSkewExceeded { skew_ms: 4_500 })] {
+            let mut pusher = MockPusher::with_results(vec![result]);
+            pusher.av_events = vec![violation];
+            let ring = crate::audit_ring::AuditRing::new(64);
+            let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero) =
+                fresh_state();
+            let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+            handle_rust_push(
+                &mut pusher,
+                b"chunk-data",
+                7,
+                2000,
+                "YT NLW 4k",
+                "YT_RTMP",
+                &mut consec_err,
+                &mut consec_write,
+                &mut consec_zero,
+                &stats,
+                &Some(Arc::clone(&ring)),
+                &mut tel,
+                &mut stop_rx,
+                &mut norm,
+            )
+            .await;
+
+            let (rows, _) = ring.since(0i64);
+            let row = rows
+                .iter()
+                .find(|r| r.action == Action::AvInvariantViolated)
+                .expect("the pusher's invariant violation must be audited");
+            assert_eq!(row.severity, Severity::Warn);
+            assert_eq!(row.source, Source::Vps);
+            assert_eq!(row.endpoint.as_deref(), Some("YT NLW 4k"));
+            assert_eq!(row.detail["stage"], "push");
+            assert_eq!(row.detail["delta_ms"], -700);
+            assert!(pusher.av_events.is_empty(), "the events must be drained");
+        }
     }
 }
 

@@ -36,29 +36,27 @@ pub struct PusherState {
     pub avc_seq_header_sent: bool,
     /// Same as `avc_seq_header_sent` but for AAC.
     pub aac_seq_header_sent: bool,
-    /// FLV ts of the FIRST audio tag seen on the current RTMP session.
-    /// Each subsequent audio tag's wire `output_ts` is computed as
-    /// `audio_base + (tag.ts - audio_origin)`, keeping audio on its OWN
-    /// continuous timeline that exactly preserves xiu's audio cadence
-    /// (~21 ms between AAC frames). Resets to `None` on reconnect so the
-    /// new session anchors fresh; `audio_base` carries the cumulative
-    /// offset so the wire timeline stays monotonic across reconnects.
-    /// Without per-track timelines, audio frames at chunk boundaries
-    /// landed on the same `output_ts` as the last frame of the previous
-    /// chunk → audible click at every chunk boundary (#103).
-    pub audio_origin_xiu_ts: Option<u32>,
-    /// Per-track output_ts base for AUDIO. Carried across reconnects so
-    /// the wire timeline never goes backwards even when xiu's RTMP
-    /// session resets to 0 on the upstream reconnect.
-    pub audio_base_ms: u64,
-    /// Highest audio `output_ts` actually sent. Used to advance
-    /// `audio_base_ms` on reconnect (`audio_base_ms = max + 1`).
+    /// #367: the INPUT (chunk) ts that maps to `base_ms` on the wire, SHARED
+    /// by both tracks. Every media tag goes through ONE common transform:
+    /// `wire = base_ms + (tag.ts - origin_ts)`, so the wire A/V relation is
+    /// exactly the content relation the chunker produced. `None` after a
+    /// reconnect / re-anchor; the next tag re-pins it with `robust_pin`: the
+    /// minimum ts of the chunk's remaining media tags ON the local timeline,
+    /// so no tag of that chunk maps below `base_ms` and one corrupt ts can
+    /// never drag the origin.
+    ///
+    /// Before #367 each track re-pinned its OWN origin on its first tag, so a
+    /// chunk whose audio started 700 ms after its keyframe sent both at the
+    /// same wire instant: the wire offset depended on pusher history, not on
+    /// the content. Cross-chunk continuity (the #103 click fix) is unchanged:
+    /// the origin is per mapping, never per chunk.
+    pub origin_ts: Option<u32>,
+    /// #367: the shared wire base for BOTH tracks. On a reconnect / re-anchor
+    /// it moves to `max(last_audio_output, last_video_output) + 1`, so
+    /// neither track's wire timeline can step back (#103 / #257).
+    pub base_ms: u64,
+    /// Highest audio `output_ts` actually sent.
     pub last_audio_output_ts_ms: u64,
-    /// FLV ts of the FIRST video tag seen on the current RTMP session.
-    /// See `audio_origin_xiu_ts`.
-    pub video_origin_xiu_ts: Option<u32>,
-    /// Per-track output_ts base for VIDEO.
-    pub video_base_ms: u64,
     /// Highest video `output_ts` actually sent.
     pub last_video_output_ts_ms: u64,
     /// Times this pusher has detected upstream-chunker timestamp regression
@@ -73,14 +71,13 @@ pub struct PusherState {
     /// crashes/restarts but our RTMP session to YouTube stays alive, the
     /// chunker resumes with xiu_ts ~0 even though we'd previously been
     /// pushing tags at xiu_ts ~600_000. Without re-anchoring, the next
-    /// `output_ts` would be `audio_base_ms + 0` — strictly less than the
-    /// last `output_ts` we sent, breaking PTS monotonicity on the wire
-    /// and causing YouTube to drop the stream (#103 production test
-    /// 2026-04-30: stream went `active/good` → `inactive/noData` after
-    /// the crash-recovery resilience test). Detection roll forward
-    /// `audio_base_ms`, clears `audio_origin_xiu_ts`, and re-anchors on
-    /// the regressed tag — strictly monotonic on the wire, RTMP session
-    /// preserved.
+    /// `output_ts` would be `base_ms + 0` — strictly less than the last
+    /// `output_ts` we sent, breaking PTS monotonicity on the wire and
+    /// causing YouTube to drop the stream (#103 production test
+    /// 2026-04-30: stream went `active/good` → `inactive/noData` after the
+    /// crash-recovery resilience test). Detection re-anchors BOTH tracks
+    /// (`reanchor`) on the regressed tag — strictly monotonic on the wire,
+    /// RTMP session preserved.
     pub last_audio_xiu_ts: Option<u32>,
     /// Same as `last_audio_xiu_ts` but for video.
     pub last_video_xiu_ts: Option<u32>,
@@ -95,39 +92,60 @@ pub enum Track {
 }
 
 impl PusherState {
+    /// Start a NEW shared wire mapping for both tracks (a fresh RTMP session
+    /// or a re-anchor): the base moves to one past the highest output ts sent
+    /// on either track, the shared origin is cleared so the next tag re-pins
+    /// it, and the per-track "last input ts" trackers are cleared so the new
+    /// mapping does not immediately trip the jump detector again.
+    pub fn begin_new_mapping(&mut self) {
+        self.base_ms = self
+            .last_audio_output_ts_ms
+            .max(self.last_video_output_ts_ms)
+            .saturating_add(1);
+        self.origin_ts = None;
+        self.last_audio_xiu_ts = None;
+        self.last_video_xiu_ts = None;
+    }
+
     /// Re-anchor on a chunker-side timestamp anomaly (backward regression or a
     /// large forward jump) detected on `tripped`.
     ///
-    /// **Symmetric re-anchor (issue #257):** when EITHER track trips, BOTH
-    /// tracks re-anchor to a single shared base on the same tag instant
-    /// (`max(last_audio_output, last_video_output) + 1`) and BOTH origins are
-    /// cleared so the next tag on each track re-pins from the new common base.
-    ///
-    /// Why symmetric: the previous per-track re-anchor bumped only the tripping
-    /// track's base, leaving the other track on its old base. If the two tracks
-    /// had drifted to unequal `last_*_output_ts_ms` (independent reconnect /
-    /// rescue→resume / republish boundaries — see #255 / #249), re-anchoring one
-    /// track FROZE that inter-track offset into the wire timeline. Re-anchoring
-    /// both to the shared base collapses the offset to zero at the re-anchor
-    /// instant, which is the only point where audio and video content are known
-    /// to be coincident (the chunker flushes both on the same boundary).
+    /// **Symmetric (issue #257), one shared transform (issue #367):** when
+    /// EITHER track trips, BOTH tracks move to the single shared base
+    /// `max(last_audio_output, last_video_output) + 1` and the shared origin
+    /// is cleared, so the next tag re-pins ONE origin for both tracks. The
+    /// wire relation after the re-anchor is therefore exactly the content
+    /// relation of the new tags (#257 collapsed it to 0 instead, which was
+    /// still a pusher-made offset whenever the new chunk's tracks did not
+    /// start together).
     ///
     /// The shared base is `max + 1` (not `min + 1`) so the wire timeline stays
     /// strictly monotonic on BOTH tracks — neither can step backward past a
     /// timestamp already sent.
     pub fn reanchor(&mut self, tripped: Track) {
-        let shared_base = self
-            .last_audio_output_ts_ms
-            .max(self.last_video_output_ts_ms)
-            .saturating_add(1);
-        self.audio_base_ms = shared_base;
-        self.video_base_ms = shared_base;
-        self.audio_origin_xiu_ts = None;
-        self.video_origin_xiu_ts = None;
+        self.begin_new_mapping();
         self.regression_reanchor_count = self.regression_reanchor_count.saturating_add(1);
         // `tripped` retained in the signature for call-site clarity / logging;
         // both tracks re-anchor regardless of which one detected the anomaly.
         let _ = tripped;
+    }
+
+    /// Map one media tag's INPUT ts onto the wire with the shared transform,
+    /// pinning the shared origin to `pin_ts` if no mapping is active.
+    /// `pin_ts` is the pusher's `robust_pin`: the minimum input ts of the
+    /// chunk's remaining media tags on the local timeline, so none of them
+    /// maps below `base_ms`. (An off-timeline outlier is clamped by the
+    /// pusher and never reaches this.)
+    pub fn wire_ts(&mut self, input_ts: u32, pin_ts: u32) -> u64 {
+        let origin = *self.origin_ts.get_or_insert(pin_ts);
+        self.base_ms + u64::from(input_ts.saturating_sub(origin))
+    }
+
+    /// Like [`Self::wire_ts`] but never pins the origin (codec sequence
+    /// headers carry ts 0 and must not anchor the mapping).
+    pub fn wire_ts_unpinned(&self, input_ts: u32, pin_ts: u32) -> u64 {
+        let origin = self.origin_ts.unwrap_or(pin_ts);
+        self.base_ms + u64::from(input_ts.saturating_sub(origin))
     }
 }
 
@@ -148,45 +166,43 @@ impl Default for PusherConfig {
 mod tests {
     use super::*;
 
-    /// Symmetric re-anchor (#257): when AUDIO trips, BOTH bases move to the
-    /// shared `max(last_audio_output, last_video_output) + 1` and BOTH origins
-    /// clear — so a drifted inter-track offset collapses instead of freezing.
+    /// Symmetric re-anchor (#257) with one shared transform (#367): when
+    /// AUDIO trips, the ONE shared base moves to `max(last outputs) + 1`, the
+    /// shared origin clears, and so do both per-track jump trackers.
     #[test]
-    fn reanchor_audio_moves_both_bases_to_shared_max_plus_one() {
+    fn reanchor_moves_shared_base_to_max_plus_one_and_clears_origin() {
         let mut state = PusherState {
             last_audio_output_ts_ms: 630_000,
             last_video_output_ts_ms: 600_000,
-            audio_base_ms: 630_000,
-            video_base_ms: 600_000,
-            audio_origin_xiu_ts: Some(1),
-            video_origin_xiu_ts: Some(2),
+            base_ms: 1,
+            origin_ts: Some(42),
+            last_audio_xiu_ts: Some(630_000),
+            last_video_xiu_ts: Some(600_000),
             ..PusherState::default()
         };
         state.reanchor(Track::Audio);
-        assert_eq!(state.audio_base_ms, 630_001, "audio base = max+1");
-        assert_eq!(
-            state.video_base_ms, 630_001,
-            "video base must ALSO move to the shared max+1 (symmetric)"
+        assert_eq!(state.base_ms, 630_001, "shared base = max + 1");
+        assert!(state.origin_ts.is_none(), "shared origin must re-pin");
+        assert!(state.last_audio_xiu_ts.is_none());
+        assert!(
+            state.last_video_xiu_ts.is_none(),
+            "the OTHER track's jump tracker must clear too, or its first new tag \
+             trips a second re-anchor"
         );
-        assert!(state.audio_origin_xiu_ts.is_none());
-        assert!(state.video_origin_xiu_ts.is_none());
         assert_eq!(state.regression_reanchor_count, 1);
     }
 
-    /// Symmetric re-anchor when VIDEO trips: same shared base for both tracks.
-    /// Here video is the higher track, so max+1 derives from it.
+    /// Same when VIDEO trips: video is the higher track here, so max + 1
+    /// derives from it.
     #[test]
-    fn reanchor_video_moves_both_bases_to_shared_max_plus_one() {
+    fn reanchor_on_video_uses_the_same_shared_base() {
         let mut state = PusherState {
             last_audio_output_ts_ms: 500_000,
             last_video_output_ts_ms: 800_000,
-            audio_base_ms: 500_000,
-            video_base_ms: 800_000,
             ..PusherState::default()
         };
         state.reanchor(Track::Video);
-        assert_eq!(state.audio_base_ms, 800_001);
-        assert_eq!(state.video_base_ms, 800_001);
+        assert_eq!(state.base_ms, 800_001);
         assert_eq!(state.regression_reanchor_count, 1);
     }
 
@@ -201,9 +217,86 @@ mod tests {
         };
         state.reanchor(Track::Audio);
         assert_eq!(
-            state.audio_base_ms, 1_000_000,
+            state.base_ms, 1_000_000,
             "must use the LARGER of the two last-outputs + 1, never the smaller"
         );
-        assert_eq!(state.video_base_ms, 1_000_000);
+    }
+
+    /// A new mapping (reconnect) does not count as a re-anchor.
+    #[test]
+    fn begin_new_mapping_does_not_count_as_reanchor() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 60_000,
+            last_video_output_ts_ms: 60_033,
+            origin_ts: Some(40_000),
+            ..PusherState::default()
+        };
+        state.begin_new_mapping();
+        assert_eq!(state.base_ms, 60_034);
+        assert!(state.origin_ts.is_none());
+        assert_eq!(state.regression_reanchor_count, 0);
+    }
+
+    /// #367: ONE origin for both tracks. A mapping pinned at the chunk's
+    /// minimum (the keyframe at 1_000) keeps audio 700 ms after it on the
+    /// wire -- the per-track origins mapped both first tags to the base.
+    #[test]
+    fn wire_ts_maps_both_tracks_through_one_origin() {
+        let mut state = PusherState {
+            base_ms: 5_000,
+            ..PusherState::default()
+        };
+        let v = state.wire_ts(1_000, 1_000);
+        let a = state.wire_ts(1_700, 1_000);
+        assert_eq!(v, 5_000);
+        assert_eq!(a, 5_700, "wire relation must equal the content relation");
+        assert_eq!(state.origin_ts, Some(1_000));
+    }
+
+    /// The origin is per MAPPING, never per chunk: consecutive chunks keep a
+    /// continuous wire timeline per track (the #103 click fix), even though a
+    /// later chunk's pin would be different.
+    #[test]
+    fn wire_ts_is_continuous_across_chunks() {
+        let mut state = PusherState::default();
+        let chunk_n: Vec<u64> = [40_000_u32, 40_021, 41_979]
+            .iter()
+            .map(|&ts| state.wire_ts(ts, 40_000))
+            .collect();
+        let chunk_n1: Vec<u64> = [42_000_u32, 42_021]
+            .iter()
+            .map(|&ts| state.wire_ts(ts, 42_000))
+            .collect();
+        assert_eq!(chunk_n, vec![0, 21, 1_979]);
+        assert_eq!(
+            chunk_n1,
+            vec![2_000, 2_021],
+            "the next chunk must continue the same mapping (no per-chunk rebase)"
+        );
+    }
+
+    /// A codec sequence header (ts 0 in every chunk) must never pin the
+    /// shared origin.
+    #[test]
+    fn wire_ts_unpinned_never_pins_the_origin() {
+        let state = PusherState {
+            base_ms: 10,
+            ..PusherState::default()
+        };
+        assert_eq!(state.wire_ts_unpinned(0, 5_000), 10);
+        assert!(state.origin_ts.is_none());
+    }
+
+    /// With a mapping active, an unpinned tag goes through the SAME shared
+    /// transform as any media tag.
+    #[test]
+    fn wire_ts_unpinned_uses_the_active_mapping() {
+        let state = PusherState {
+            base_ms: 10,
+            origin_ts: Some(1_000),
+            ..PusherState::default()
+        };
+        assert_eq!(state.wire_ts_unpinned(1_500, 5_000), 510);
+        assert_eq!(state.origin_ts, Some(1_000), "unchanged");
     }
 }

@@ -111,10 +111,14 @@ impl RtmpServer {
         // exists to kill. Propagate it so `run_inpoint_loop` restarts + the
         // next pre-bind probe surfaces the conflict on the dashboard.
         let run_result: Result<(), crate::InpointError> = tokio::select! {
-            // Run the StreamsHub event loop
+            // Run the StreamsHub event loop. It only returns if its event
+            // channel closed, i.e. the ingest is dead: surface that as a
+            // failure so the orchestrator restarts the server (#367).
             _ = hub.run() => {
-                info!("StreamsHub stopped");
-                Ok(())
+                error!("StreamsHub stopped unexpectedly -- ingest cannot continue");
+                Err(crate::InpointError::Protocol(
+                    "StreamsHub event loop stopped".to_string(),
+                ))
             }
             // Run the RTMP accept loop (uses xiu's ServerSession per connection)
             result = Self::accept_loop(&listener, event_sender) => {
@@ -131,10 +135,20 @@ impl RtmpServer {
                     }
                 }
             }
-            // Run the media receiver
-            _ = media_receiver.run() => {
-                info!("Media receiver stopped");
-                Ok(())
+            // Run the media receiver. A failure (the hub's event channel
+            // closed) is surfaced as an error so the orchestrator restarts
+            // the whole server instead of reading it as a clean stop (#367).
+            result = media_receiver.run() => {
+                match result {
+                    Ok(()) => {
+                        info!("Media receiver stopped");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Media receiver failed: {e}");
+                        Err(e)
+                    }
+                }
             }
             // Handle shutdown signal
             _ = shutdown_rx.recv() => {

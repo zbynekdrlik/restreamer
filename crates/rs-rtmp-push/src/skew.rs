@@ -146,12 +146,13 @@ pub struct SkewTracker {
     consecutive_over: u32,
     /// Steady-state A/V offset captured on the first chunk where BOTH tracks
     /// are present. The skew that matters for recovery is the DEVIATION from
-    /// this baseline, not the absolute offset: the chunker's audio (xiu-ts) and
-    /// video (wall-clock) live in different time domains whose per-chunk RATE
-    /// matches but whose absolute zero points can differ by a benign,
-    /// CONSTANT startup gap (device/encoder init lag, silent pre-roll —
-    /// `feedback_chunker_time_domains`). A guard on the ABSOLUTE offset would
-    /// false-trip and kill a working stream's session on that benign gap. The
+    /// this baseline, not the absolute offset: a CONSTANT offset present from
+    /// the first chunk is the content's own A/V relation (since #367 the
+    /// chunker stamps BOTH tracks in the publisher's source-ts domain, so it is
+    /// the publisher's offset, e.g. a device/encoder init lag), and killing
+    /// the session on it would only flap. An offset the PIPELINE makes is
+    /// caught by the absolute `av_invariant` guard instead (before #367 the
+    /// chunker's audio was xiu-ts and video wall-clock, two domains). The
     /// 2026-06-19 incident skew, by contrast, APPEARED mid-stream (grew by
     /// ~25.5 s relative to a near-zero baseline on an OBS republish / reconnect)
     /// — a CHANGE, which is exactly what the baseline-relative metric detects.

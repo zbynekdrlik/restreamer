@@ -358,6 +358,41 @@ pub fn emit_endpoint_dead_target(
     );
 }
 
+/// #367: audit one edge of the pusher's absolute A/V invariant guard
+/// (`RtmpPusher::take_av_invariant_events`). A violation means this
+/// endpoint's WIRE A/V relation differs from the chunk's content relation:
+/// Warn row `AvInvariantViolated` with `{stage: "push", a_rel_ms, v_rel_ms,
+/// delta_ms, tolerance_ms}`. The host mirror copies it into `audit_log`,
+/// where the outage notifier alerts the operator. The edge-triggered guard
+/// bounds it to one row per episode. A restore is an Info
+/// `AvInvariantRestored` row that closes the episode.
+pub fn emit_av_invariant_event(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    event: &rs_rtmp_push::AvInvariantEvent,
+) {
+    let Some(ring) = audit_ring else { return };
+    let (severity, action, detail) = match event {
+        rs_rtmp_push::AvInvariantEvent::Violated(v) => rs_core::audit::av_invariant_violated_row(
+            "push",
+            v.a_rel_ms,
+            v.v_rel_ms,
+            v.delta_ms,
+            rs_rtmp_push::AV_INVARIANT_TOLERANCE_MS,
+        ),
+        rs_rtmp_push::AvInvariantEvent::Restored { delta_ms } => {
+            rs_core::audit::av_invariant_restored_row("push", *delta_ms)
+        }
+    };
+    ring.push(
+        severity,
+        Source::Vps,
+        Some(alias.to_string()),
+        action,
+        detail,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +513,51 @@ mod tests {
     fn emit_endpoint_dead_target_with_none_ring_is_no_op() {
         emit_endpoint_dead_target(&None, "test-alias", "DEAD_TARGET: x", 5, 30_000);
         // If we get here without panic the test passes.
+    }
+
+    // --- emit_av_invariant_event (#367 push-side absolute A/V guard) ---
+
+    #[test]
+    fn emit_av_invariant_violation_appends_warn_row_with_relation_detail() {
+        use rs_rtmp_push::{AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantViolation};
+        let ring = AuditRing::new(64);
+        emit_av_invariant_event(
+            &Some(Arc::clone(&ring)),
+            "YT NLW 4k",
+            &AvInvariantEvent::Violated(AvInvariantViolation {
+                a_rel_ms: 3_300,
+                v_rel_ms: 4_000,
+                delta_ms: -700,
+            }),
+        );
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Severity::Warn);
+        assert_eq!(rows[0].source, Source::Vps);
+        assert_eq!(rows[0].action, Action::AvInvariantViolated);
+        assert_eq!(rows[0].endpoint.as_deref(), Some("YT NLW 4k"));
+        let d = &rows[0].detail;
+        assert_eq!(d["stage"], "push");
+        assert_eq!(d["a_rel_ms"], 3_300);
+        assert_eq!(d["v_rel_ms"], 4_000);
+        assert_eq!(d["delta_ms"], -700);
+        assert_eq!(d["tolerance_ms"], AV_INVARIANT_TOLERANCE_MS);
+    }
+
+    #[test]
+    fn emit_av_invariant_restored_appends_info_row() {
+        use rs_rtmp_push::AvInvariantEvent;
+        let ring = AuditRing::new(64);
+        emit_av_invariant_event(
+            &Some(Arc::clone(&ring)),
+            "YT NLW 4k",
+            &AvInvariantEvent::Restored { delta_ms: 3 },
+        );
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Severity::Info);
+        assert_eq!(rows[0].action, Action::AvInvariantRestored);
+        assert_eq!(rows[0].detail["stage"], "push");
+        assert_eq!(rows[0].detail["delta_ms"], 3);
     }
 }

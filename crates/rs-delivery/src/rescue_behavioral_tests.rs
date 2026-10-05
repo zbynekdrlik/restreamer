@@ -80,6 +80,11 @@ impl Pushable for RecordingPusher {
     fn av_skew_ms(&self) -> i64 {
         0
     }
+
+    fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+        // This mock does not model the #367 invariant guard.
+        Vec::new()
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -165,6 +170,11 @@ async fn rescue_push_errors_do_not_stamp_last_push_ok() {
         }
         fn av_skew_ms(&self) -> i64 {
             0
+        }
+
+        fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+            // This mock does not model the #367 invariant guard.
+            Vec::new()
         }
     }
 

@@ -22,6 +22,12 @@ rtmp.workspace = true
 streamhub.workspace = true
 
 [dev-dependencies]
+# The media_receiver tests drive run() under a paused clock
+# (`tokio::time::pause` / `start_paused`), which needs `test-util`. Declared
+# here so `cargo test -p rs-inpoint` (and cargo-mutants, which tests the
+# mutated package alone) builds without relying on feature unification from
+# another workspace crate.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 md-5 = { workspace = true }
 bytes = { workspace = true }

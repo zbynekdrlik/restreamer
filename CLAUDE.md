@@ -11,6 +11,8 @@ Load the relevant skill BEFORE working on these areas. `.claude/rules/*.md` file
 auto-load on their `paths:` — you do not invoke those.
 
 - stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
+- A/V time model: one source-ts transform per stage (chunker / receiver / pusher), absolute A/V invariant guard (#367) → `.claude/rules/av-time-model.md` (auto)
+- cargo-mutants survivors / TIMEOUTs (log-only branches, cross-crate tests, paused-clock watchdog) → `.claude/rules/mutation-killable-code.md` (auto)
 - authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
 - process-stall detector (`logs/stall.log`, ProcessStall, Windows-cfg verify on dev2) → `.claude/rules/process-stall-detector.md` (auto)

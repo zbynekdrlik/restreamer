@@ -24,15 +24,28 @@ Two SEPARATE trackers reuse the same `SkewTracker` (rs-rtmp-push) measurement:
 `raw_skew_ms = video_max_ts − audio_max_ts` over each track's INPUT (chunker-stamped)
 PTS on a SHARED origin (the origin cancels). `current_skew_ms = raw_skew − baseline`,
 where the baseline is captured on the first both-tracks chunk after a reset — so a
-benign CONSTANT startup domain offset folds into the baseline and reads ~0; only a
-skew that CHANGES mid-stream is visible. Audio (xiu-ts) and video (wall-clock) are
-different domains that share a RATE for coincident content but not a zero point
-(`feedback_chunker_time_domains`).
+CONSTANT offset present from the first chunk folds into the baseline and reads ~0; only
+a skew that CHANGES mid-stream is visible.
+
+**Time model (since #367): the chunker stamps BOTH tracks in the publisher's source-ts
+domain (`out = src_ts − session_origin`), and the pusher maps both through ONE shared
+origin + base.** Nothing is wall-clock-stamped any more (before #367 audio was xiu-ts and
+video wall-clock — the split domain that caused the 2026-10-01 desync). So a constant
+offset at chunk 0 is the PUBLISHER's own A/V relation, and an offset the PIPELINE makes
+is caught by the ABSOLUTE `AvInvariantGuard` (no baseline), not by this relative guard.
+The full model, the invariant, and the guard live in `.claude/rules/av-time-model.md` —
+read it before changing any stamping, origin, or base logic.
 
 ## STEP vs DRIFT — a reconnect only fixes ONE of them (#359, the death-loop lesson)
 
 - A **STEP** desync (a republish freezing a fixed inter-track offset) is fixed by a
   clean reconnect + symmetric re-anchor → converges in ONE reconnect. KEEP killing it.
+  **Caveat since #367:** the pusher's shared origin + base make a reconnect keep the
+  wire A/V relation EQUAL to the content relation, so a reconnect can no longer fix a
+  STEP that is already in the content — the kill now only costs a reconnect. The
+  ROZHODNUTÉ on #367 (issuecomment-5997672756) keeps `TripRecovery` unchanged for the first
+  production event after #367 (one variable at a time); switching it to alert-only is
+  tracked on #359. Do not change it in passing.
 - A **DRIFT** (audio/video advancing at slightly different rates) is NOT fixed by a
   reconnect: `reset_tracks()` re-zeroes the baseline and the same drift re-accumulates
   past threshold and trips again → a death-loop by construction. Reconnecting a drift

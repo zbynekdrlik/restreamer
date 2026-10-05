@@ -184,9 +184,9 @@ pub(super) async fn handle_rust_push(
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
-    // chunk_duration_ms is no longer needed by push_flv_bytes (per-track
-    // output_ts math is fully timestamp-driven from inside the FLV
-    // payload — see PusherState::audio_origin_xiu_ts). Kept on the
+    // chunk_duration_ms is no longer needed by push_flv_bytes (the shared
+    // output_ts mapping is fully timestamp-driven from inside the FLV
+    // payload — see PusherState::wire_ts, #367). Kept on the
     // consumer-helper signature for stats reporting (`s.duration_processed_ms`).
     //
     // Phase 2 probe (#177/#178): log push_flv_bytes start so we can
@@ -212,6 +212,12 @@ pub(super) async fn handle_rust_push(
             push_elapsed_ms,
             "rtmp_push: SLOW push_flv_bytes (>=2.5s) -- chunk supply or TCP backpressure"
         );
+    }
+    // #367: audit every absolute A/V invariant edge this push recorded.
+    // Drained on success AND error: the chunk-end evaluation queues a
+    // violation before the skew guard may fail the same chunk.
+    for event in pusher.take_av_invariant_events() {
+        endpoint_audit::emit_av_invariant_event(audit_ring, alias, &event);
     }
 
     match push_result {
