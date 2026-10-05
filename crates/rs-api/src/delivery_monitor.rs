@@ -35,7 +35,7 @@ impl DeliveryOrchestrator {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await; // skip immediate tick
 
-        let mut consecutive_failures = 0u32;
+        let mut health = HealthEdges::default();
         let client = reqwest::Client::new();
 
         // #84: fire a one-shot "stream running too long" warning once this
@@ -152,41 +152,23 @@ impl DeliveryOrchestrator {
                 }
             };
 
-            if healthy {
-                if consecutive_failures > 0 {
+            let consecutive_failures = match health.observe(healthy) {
+                HealthEdge::Steady => None,
+                HealthEdge::Recovered { after } => {
                     info!(
                         event_id,
-                        previous_failures = consecutive_failures,
+                        previous_failures = after,
                         "Delivery VPS health recovered"
                     );
                     // #367 review: the paired recovery of `VpsUnreachable`.
-                    // Without it the outage notifier's VPS-reachability
-                    // episode stayed open for the rest of the delivery and a
-                    // later real VPS death was deduped away.
                     if let Some(tx) = self.audit_tx() {
-                        rs_core::audit::record(
-                            tx,
-                            AuditRow {
-                                severity: Severity::Info,
-                                source: Source::Delivery,
-                                event_id: Some(event_id),
-                                instance_id: Some(instance_id),
-                                endpoint: None,
-                                action: Action::VpsReachable,
-                                detail: serde_json::json!({
-                                    "recovered_after_failures": consecutive_failures,
-                                }),
-                                ts_override: None,
-                            },
-                        );
+                        rs_core::audit::record(tx, vps_reachable_row(event_id, instance_id, after));
                     }
+                    None
                 }
-                consecutive_failures = 0;
-                db::update_delivery_instance_health(self.pool(), instance_id)
-                    .await
-                    .ok();
-            } else {
-                consecutive_failures += 1;
+                HealthEdge::Failed { consecutive } => Some(consecutive),
+            };
+            if let Some(consecutive_failures) = consecutive_failures {
                 error!(
                     event_id,
                     consecutive_failures,
@@ -231,7 +213,102 @@ impl DeliveryOrchestrator {
                         source: "delivery".to_string(),
                     });
                 }
+            } else {
+                db::update_delivery_instance_health(self.pool(), instance_id)
+                    .await
+                    .ok();
             }
         }
+    }
+}
+
+/// What one health poll means for VPS reachability (#367 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HealthEdge {
+    /// Healthy, and so was the previous poll.
+    Steady,
+    /// The first healthy poll after `after` consecutive failures: the
+    /// moment to write `VpsReachable`.
+    Recovered { after: u32 },
+    /// Failed, `consecutive` failures in a row so far.
+    Failed { consecutive: u32 },
+}
+
+/// Counts consecutive failed health polls and reports each poll's edge, so
+/// the recovery row is written exactly once per outage (never on every
+/// healthy 30 s poll).
+#[derive(Debug, Default)]
+pub(crate) struct HealthEdges {
+    consecutive_failures: u32,
+}
+
+impl HealthEdges {
+    pub(crate) fn observe(&mut self, healthy: bool) -> HealthEdge {
+        if healthy {
+            match std::mem::take(&mut self.consecutive_failures) {
+                0 => HealthEdge::Steady,
+                after => HealthEdge::Recovered { after },
+            }
+        } else {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            HealthEdge::Failed {
+                consecutive: self.consecutive_failures,
+            }
+        }
+    }
+}
+
+/// The `VpsReachable` row (#367 review): the paired recovery of
+/// `VpsUnreachable`. Without it the outage notifier's VPS-reachability
+/// episode stayed open for the rest of the delivery and a later real VPS
+/// death was deduped away.
+pub(crate) fn vps_reachable_row(event_id: i64, instance_id: i64, after: u32) -> AuditRow {
+    AuditRow {
+        severity: Severity::Info,
+        source: Source::Delivery,
+        event_id: Some(event_id),
+        instance_id: Some(instance_id),
+        endpoint: None,
+        action: Action::VpsReachable,
+        detail: serde_json::json!({ "recovered_after_failures": after }),
+        ts_override: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_then_healthy_is_exactly_one_recovery_edge() {
+        let mut edges = HealthEdges::default();
+        assert_eq!(edges.observe(true), HealthEdge::Steady);
+        assert_eq!(edges.observe(false), HealthEdge::Failed { consecutive: 1 });
+        assert_eq!(edges.observe(false), HealthEdge::Failed { consecutive: 2 });
+        assert_eq!(edges.observe(false), HealthEdge::Failed { consecutive: 3 });
+        assert_eq!(edges.observe(true), HealthEdge::Recovered { after: 3 });
+        assert_eq!(
+            edges.observe(true),
+            HealthEdge::Steady,
+            "no recovery row on every later healthy poll"
+        );
+        assert_eq!(
+            edges.observe(false),
+            HealthEdge::Failed { consecutive: 1 },
+            "the count restarts after a recovery"
+        );
+        assert_eq!(edges.observe(true), HealthEdge::Recovered { after: 1 });
+    }
+
+    #[test]
+    fn vps_reachable_row_shape() {
+        let row = vps_reachable_row(7, 42, 3);
+        assert_eq!(row.action, Action::VpsReachable);
+        assert_eq!(row.severity, Severity::Info);
+        assert_eq!(row.source, Source::Delivery);
+        assert_eq!(row.event_id, Some(7));
+        assert_eq!(row.instance_id, Some(42));
+        assert_eq!(row.endpoint, None);
+        assert_eq!(row.detail["recovered_after_failures"], 3);
     }
 }
