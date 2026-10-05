@@ -71,11 +71,13 @@ impl RtmpServer {
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        let receiver_failure = tokio::select! {
-            // Run the StreamsHub event loop
+        let failure = tokio::select! {
+            // Run the StreamsHub event loop. It only returns if its event
+            // channel closed, i.e. the ingest is dead: surface that as a
+            // failure so the orchestrator restarts the server (#367).
             _ = hub.run() => {
-                info!("StreamsHub stopped");
-                None
+                error!("StreamsHub stopped unexpectedly -- ingest cannot continue");
+                Some(crate::InpointError::Protocol("StreamsHub event loop stopped".to_string()))
             }
             // Run the xiu RTMP server
             result = rtmp_server.run() => {
@@ -110,7 +112,7 @@ impl RtmpServer {
         // Flush remaining data
         flv_chunk_sink.flush().await;
 
-        match receiver_failure {
+        match failure {
             Some(e) => Err(e),
             None => Ok(()),
         }

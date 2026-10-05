@@ -15,14 +15,20 @@
 //! stop.
 //!
 //! The rules now:
-//! - A Publish at ANY point (streaming, stalled, subscribing, retrying)
-//!   supersedes the current subscription, re-anchors the chunker session
-//!   (`start_new_session`) and subscribes immediately.
+//! - A Publish of the SAME stream at ANY point (streaming, stalled,
+//!   subscribing, retrying) supersedes the current subscription, re-anchors
+//!   the chunker session (`start_new_session`) and subscribes immediately. A
+//!   Publish of a DIFFERENT stream supersedes only a session that is not
+//!   streaming. While one is streaming, the other Publish is remembered and
+//!   picked up when the live stream ends; it never orphans the live
+//!   publisher.
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
-//! - `Lagged` is logged and survived; a `Closed` hub channel is an error, so
-//!   the orchestrator restarts the RTMP server.
+//! - `Lagged` is logged and survived. While Idle, the receiver probes the
+//!   last known stream, because the lag may have swallowed its Publish. A
+//!   `Closed` hub channel is an error, so the orchestrator restarts the RTMP
+//!   server.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -75,11 +81,14 @@ type SubscribeReply = Result<(DataReceiver, Option<StatisticDataSender>), Stream
 enum Phase {
     /// No publisher, or gave up on it. Only a hub event moves us on.
     Idle,
-    /// A Subscribe request is in flight.
+    /// A Subscribe request is in flight. `probe` is set for a lost-Publish
+    /// probe (no session yet): success starts the session, failure just
+    /// returns to Idle.
     Subscribing {
         reply: oneshot::Receiver<SubscribeReply>,
         info: SubscriberInfo,
         deadline: Instant,
+        probe: Option<StreamIdentifier>,
     },
     /// Subscribed: frames are flowing, or stalled until FRAME_TIMEOUT.
     Streaming {
@@ -120,6 +129,7 @@ async fn next_phase_wake(phase: &mut Phase) -> Wake {
             reply, deadline, ..
         } => {
             tokio::select! {
+                biased;
                 r = reply => Wake::SubscribeReply(r),
                 _ = sleep_until(*deadline) => Wake::SubscribeTimedOut,
             }
@@ -127,7 +137,11 @@ async fn next_phase_wake(phase: &mut Phase) -> Wake {
         Phase::Streaming {
             frames, last_frame, ..
         } => {
+            // `biased`: after a process freeze a waiting frame and an already
+            // expired stall timer are ready together. The frame wins, so a
+            // live stream is never dropped as stalled.
             tokio::select! {
+                biased;
                 f = frames.recv() => Wake::Frame(f),
                 _ = sleep_until(*last_frame + FRAME_TIMEOUT) => Wake::Stalled,
             }
@@ -160,6 +174,11 @@ pub struct MediaReceiver {
     inpoint_state: InpointState,
     session: Option<Session>,
     phase: Phase,
+    /// A Publish of a different stream that arrived while the current one
+    /// was streaming; picked up when the current session ends.
+    pending_publish: Option<StreamIdentifier>,
+    /// The last stream that published (target of a lost-Publish probe).
+    last_identifier: Option<StreamIdentifier>,
 }
 
 impl MediaReceiver {
@@ -176,6 +195,8 @@ impl MediaReceiver {
             inpoint_state,
             session: None,
             phase: Phase::Idle,
+            pending_publish: None,
+            last_identifier: None,
         }
     }
 
@@ -200,6 +221,7 @@ impl MediaReceiver {
                         phase = self.phase.name(),
                         "Media receiver lagged behind the hub broadcast channel -- continuing (#367)"
                     );
+                    self.probe_after_lag().await;
                 }
                 Wake::Hub(Err(RecvError::Closed)) => {
                     error!("Hub broadcast event channel closed -- media receiver cannot continue");
@@ -243,12 +265,33 @@ impl MediaReceiver {
                 }
                 Wake::RetryDue => self.subscribe().await,
             }
+            // A Publish deferred while another stream was live is picked up
+            // the moment no session is left.
+            if self.session.is_none() && matches!(self.phase, Phase::Idle) {
+                if let Some(next) = self.pending_publish.take() {
+                    info!("Picking up the Publish deferred while another stream was live: {next}");
+                    self.on_publish(next).await;
+                }
+            }
         }
     }
 
     async fn on_hub_event(&mut self, event: BroadcastEvent) {
         match event {
-            BroadcastEvent::Publish { identifier } => self.on_publish(identifier).await,
+            BroadcastEvent::Publish { identifier } => {
+                let busy_with_other = self.session.as_ref().is_some_and(|s| {
+                    s.identifier != identifier && matches!(self.phase, Phase::Streaming { .. })
+                });
+                if busy_with_other {
+                    warn!(
+                        "Publish of a different stream ({identifier}) while another one is \
+                         streaming -- deferred until the live stream ends (#367)"
+                    );
+                    self.pending_publish = Some(identifier);
+                } else {
+                    self.on_publish(identifier).await;
+                }
+            }
             BroadcastEvent::UnPublish { identifier } => {
                 // streamhub 0.2.4 never broadcasts this; handled for safety.
                 info!("Stream unpublished: {identifier}");
@@ -275,17 +318,31 @@ impl MediaReceiver {
                 "Publish arrived while a session is active -- superseding the current \
                  subscription and subscribing immediately (#367)"
             );
-            self.drop_subscription();
-            self.end_session("superseded_by_publish").await;
         }
+        // Also leaves a pending lost-Publish probe (no session behind it).
+        self.drop_subscription();
+        self.end_session("superseded_by_publish").await;
 
+        if self.pending_publish.as_ref() == Some(&identifier) {
+            self.pending_publish = None;
+        }
+        self.begin_session(identifier, "publish").await;
+        self.subscribe().await;
+    }
+
+    /// Start a published-stream session: mark the inpoint connected, audit
+    /// it and re-anchor audio+video onto a fresh shared session origin
+    /// (#255, #367): a new publisher's source ts restart.
+    async fn begin_session(&mut self, identifier: StreamIdentifier, trigger: &'static str) {
+        self.last_identifier = Some(identifier.clone());
         self.inpoint_state.mark_connected().await;
         self.audit_rtmp(
             rs_core::audit::Action::RtmpConnected,
-            serde_json::json!({ "stream_identifier": format!("{identifier}") }),
+            serde_json::json!({
+                "stream_identifier": format!("{identifier}"),
+                "trigger": trigger,
+            }),
         );
-        // Re-anchor audio+video onto a fresh shared session origin on every
-        // (re)publish (#255, #367): the new publisher's source ts restart.
         self.flv_chunk_sink.start_new_session().await;
         self.session = Some(Session {
             identifier,
@@ -295,7 +352,21 @@ impl MediaReceiver {
             frames_since_heartbeat: 0,
             last_heartbeat: Instant::now(),
         });
-        self.subscribe().await;
+    }
+
+    /// A broadcast lag may have swallowed a Publish (#367). While Idle,
+    /// probe the last known stream: a Subscribe the hub accepts starts the
+    /// session, and a rejection (nothing is publishing) just returns to Idle,
+    /// with no session, no "connected" flag and no retry ladder.
+    async fn probe_after_lag(&mut self) {
+        if self.session.is_some() || !matches!(self.phase, Phase::Idle) {
+            return;
+        }
+        let Some(identifier) = self.last_identifier.clone() else {
+            return;
+        };
+        warn!("Idle after a lagged broadcast -- probing the last stream {identifier} (#367)");
+        self.send_subscribe(identifier, true).await;
     }
 
     /// Send a Subscribe request for the current session's stream.
@@ -304,6 +375,13 @@ impl MediaReceiver {
             self.phase = Phase::Idle;
             return;
         };
+        self.send_subscribe(identifier, false).await;
+    }
+
+    /// Send a Subscribe for `identifier`. `probe`: a lost-Publish probe with
+    /// no session behind it yet.
+    async fn send_subscribe(&mut self, identifier: StreamIdentifier, probe: bool) {
+        let probe_id = probe.then(|| identifier.clone());
         let info = SubscriberInfo {
             id: Uuid::new(RandomDigitCount::Six),
             sub_type: SubscribeType::RtmpPull,
@@ -325,14 +403,17 @@ impl MediaReceiver {
         {
             warn!("Failed to send subscribe request to hub");
             self.phase = Phase::Idle;
-            self.schedule_retry("hub_unreachable").await;
+            if !probe {
+                self.schedule_retry("hub_unreachable").await;
+            }
             return;
         }
-        debug!(subscriber_id = %info.id, "Subscribe request sent to hub");
+        debug!(subscriber_id = %info.id, probe, "Subscribe request sent to hub");
         self.phase = Phase::Subscribing {
             reply: result_rx,
             info,
             deadline: Instant::now() + SUBSCRIPTION_TIMEOUT,
+            probe: probe_id,
         };
     }
 
@@ -340,8 +421,8 @@ impl MediaReceiver {
         &mut self,
         reply: Result<SubscribeReply, oneshot::error::RecvError>,
     ) {
-        let info = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Subscribing { info, .. } => info,
+        let (info, probe) = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Subscribing { info, probe, .. } => (info, probe),
             other => {
                 // Cannot happen: a reply only wakes us in Subscribing.
                 self.phase = other;
@@ -360,9 +441,18 @@ impl MediaReceiver {
             }
         };
         let Some(frames) = frames else {
-            self.schedule_retry("subscription_failed").await;
+            match probe {
+                Some(id) => {
+                    info!("Lost-Publish probe found nothing publishing on {id} -- staying idle")
+                }
+                None => self.schedule_retry("subscription_failed").await,
+            }
             return;
         };
+        if let Some(id) = probe {
+            info!("Lost-Publish probe found {id} publishing -- starting its session (#367)");
+            self.begin_session(id, "lagged_probe").await;
+        }
 
         // #367: xiu gives no session id, so ANY successful re-subscribe after
         // frames have flowed may be a new publisher (and will start with a
@@ -462,11 +552,17 @@ impl MediaReceiver {
     /// Leave the current subscription (or pending subscribe): tell the hub to
     /// drop our frame sender so xiu stops sending to a dead channel.
     fn drop_subscription(&mut self) {
-        let info = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Streaming { info, .. } | Phase::Subscribing { info, .. } => info,
+        let (info, probe) = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Streaming { info, .. } => (info, None),
+            Phase::Subscribing { info, probe, .. } => (info, probe),
             Phase::Idle | Phase::RetryWait { .. } => return,
         };
-        let Some(identifier) = self.session.as_ref().map(|s| s.identifier.clone()) else {
+        let Some(identifier) = self
+            .session
+            .as_ref()
+            .map(|s| s.identifier.clone())
+            .or(probe)
+        else {
             return;
         };
         debug!(subscriber_id = %info.id, "Unsubscribing from hub: {identifier}");
