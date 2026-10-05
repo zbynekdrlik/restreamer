@@ -9,8 +9,10 @@ use tracing::{debug, info};
 
 use rs_core::models::InpointState;
 
-use crate::ingest_skew::{IngestSkewMonitor, SkewEvent, SkewTransition};
+use crate::ingest_report::{BoundaryReport, publish_boundary, publish_reanchor};
+use crate::ingest_skew::IngestSkewMonitor;
 use crate::wall_clock::{WallClock, system_clock};
+use rs_rtmp_push::{AvInvariantEvent, AvInvariantGuard};
 
 /// Default ingest A/V-skew alert threshold (ms) when no `InpointState` /
 /// config-driven threshold is wired (tests, null sink). Mirrors
@@ -52,12 +54,12 @@ pub struct FlvChunkSink {
     /// Track pending disk writes to prevent unbounded task spawning.
     pending_writes: Arc<AtomicU32>,
     /// Optional shared ingest state (#354): the chunker publishes the live
-    /// ingest A/V skew + latched banner flag here and emits the skew audit
-    /// row through its `audit_tx`. `None` in tests / the null sink (no
+    /// ingest A/V skew + latched banner flag here and emits the skew and
+    /// A/V-invariant (#367) audit rows through its `audit_tx`. `None` in tests / the null sink (no
     /// surfacing). Wired via `with_ingest_state`.
     ingest_state: Option<InpointState>,
     /// The operator alert threshold (ms) the monitor was built with (#354).
-    /// Mirrored here (outside the `inner` mutex) so `report_skew` can stamp
+    /// Mirrored here (outside the `inner` mutex) so `publish_boundary` can stamp
     /// it onto the audit row without re-acquiring the lock it was just
     /// dropped from.
     skew_threshold_ms: i64,
@@ -97,6 +99,11 @@ struct FlvChunkSinkInner {
     /// latches a sustained-over-threshold state at each chunk boundary. Reset
     /// on `start_new_session()` / `reset()` alongside the epoch fields.
     skew_monitor: IngestSkewMonitor,
+    /// #367 absolute A/V invariant guard (no baseline): for the latest tag
+    /// of each track, `(a_out - v_out) == (a_src - v_src)` within 50 ms.
+    /// Holds by construction with the one source-ts transform; it catches
+    /// ANY future stage code that breaks it. Evaluated at every chunk flush.
+    av_invariant: AvInvariantGuard,
     /// Wall-clock seam (#367): every Unix-epoch read in the chunker goes
     /// through here so tests can replay arrival bursts deterministically.
     clock: Arc<dyn WallClock>,
@@ -124,6 +131,7 @@ impl FlvChunkSinkInner {
             last_video_src: None,
             last_audio_src: None,
             skew_monitor: IngestSkewMonitor::new(DEFAULT_SKEW_THRESHOLD_MS),
+            av_invariant: AvInvariantGuard::default(),
             clock: system_clock(),
         }
     }
@@ -133,6 +141,8 @@ impl FlvChunkSinkInner {
 struct Reanchored {
     /// The old session's partial chunk, if it had any data.
     flushed: Option<PendingChunkWrite>,
+    /// A latched invariant violation of the old session, now closed.
+    invariant: Option<AvInvariantEvent>,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -201,55 +211,6 @@ impl FlvChunkSink {
         self
     }
 
-    /// Publish a chunk-boundary skew transition to the shared ingest state:
-    /// store the live skew, flip the banner latch, and emit ONE audit row on
-    /// a Detected/Cleared transition (#354). No-op when no state is wired.
-    /// Uses the paired `IngestSkewDetected`/`IngestSkewRecovered` actions
-    /// (not a single action + `detail.state`) so `notify::OutageNotifier`'s
-    /// existing Onset/Recovery `classify()` can alert the operator on this
-    /// signal exactly like `HostInternetUnreachable`/`Recovered` (#354).
-    fn report_skew(&self, t: SkewTransition) {
-        let Some(state) = &self.ingest_state else {
-            return;
-        };
-        state.set_ingest_skew_ms(t.skew_ms);
-        let (active, severity, action, state_str) = match t.event {
-            Some(SkewEvent::Detected) => (
-                true,
-                rs_core::audit::Severity::Warn,
-                rs_core::audit::Action::IngestSkewDetected,
-                "detected",
-            ),
-            Some(SkewEvent::Cleared) => (
-                false,
-                rs_core::audit::Severity::Info,
-                rs_core::audit::Action::IngestSkewRecovered,
-                "recovered",
-            ),
-            None => return,
-        };
-        state.set_ingest_skew_active(active);
-        if let Some(tx) = state.audit_tx() {
-            rs_core::audit::record(
-                tx,
-                rs_core::audit::AuditRow {
-                    severity,
-                    source: rs_core::audit::Source::Inpoint,
-                    event_id: None,
-                    instance_id: None,
-                    endpoint: None,
-                    action,
-                    detail: serde_json::json!({
-                        "skew_ms": t.skew_ms,
-                        "threshold_ms": self.skew_threshold_ms,
-                        "state": state_str,
-                    }),
-                    ts_override: None,
-                },
-            );
-        }
-    }
-
     /// Process a video frame from xiu's FrameData::Video.
     ///
     /// `data` is the FLV tag body (codec header + payload) as provided by xiu.
@@ -270,7 +231,7 @@ impl FlvChunkSink {
 
         let reanchored;
         let mut pending = None;
-        let mut skew_transition = None;
+        let mut boundary = BoundaryReport::default();
         {
             let mut inner = self.inner.lock().await;
 
@@ -309,7 +270,7 @@ impl FlvChunkSink {
                 // frames that belonged to the chunk being flushed.
                 if should_flush && is_keyframe {
                     pending = Self::extract_chunk(&mut inner);
-                    skew_transition = Some(inner.skew_monitor.evaluate_chunk());
+                    boundary = Self::evaluate_boundary(&mut inner);
                     Self::write_chunk_header(&mut inner, ts);
                 } else if inner.chunk_start.is_none() {
                     // First keyframe — start the chunk.
@@ -323,6 +284,9 @@ impl FlvChunkSink {
                 // Observe the SAME stamped ts the pusher's SkewTracker will see
                 // downstream, so ingest and VPS agree on the number (#354).
                 inner.skew_monitor.observe_video(ts);
+                inner
+                    .av_invariant
+                    .observe_video(i64::from(xiu_timestamp), i64::from(ts));
 
                 // Force-flush if buffer exceeds max size
                 if inner.buffer.len() >= MAX_BUFFER_SIZE {
@@ -341,7 +305,7 @@ impl FlvChunkSink {
                         // the 50MB force-flush path (e.g. a misconfigured
                         // chunk_duration) would never advance the debounce
                         // counter.
-                        skew_transition = Some(inner.skew_monitor.evaluate_chunk());
+                        boundary = Self::evaluate_boundary(&mut inner);
                     }
                 }
             }
@@ -352,11 +316,9 @@ impl FlvChunkSink {
         if let Some(r) = reanchored {
             self.finish_reanchor(r).await;
         }
-        // Publish the skew transition OUTSIDE the inner lock (audit + shared
+        // Publish the boundary OUTSIDE the inner lock (audit + shared
         // atomics live on the ingest state, not the chunker mutex).
-        if let Some(t) = skew_transition {
-            self.report_skew(t);
-        }
+        publish_boundary(self.ingest_state.as_ref(), self.skew_threshold_ms, boundary);
         if let Some(pending) = pending {
             self.commit_chunk(pending).await;
         }
@@ -429,6 +391,9 @@ impl FlvChunkSink {
                     // Observe the SAME ts the pusher's SkewTracker sees
                     // downstream, so ingest and VPS skew agree (#354).
                     inner.skew_monitor.observe_audio(audio_out);
+                    inner
+                        .av_invariant
+                        .observe_audio(i64::from(timestamp), i64::from(audio_out));
                 }
                 (Some(_), Some(origin)) => {
                     // Content earlier than the session's first keyframe has
@@ -454,19 +419,34 @@ impl FlvChunkSink {
     /// Unlike write_video/write_audio, this awaits the write to ensure
     /// all data is on disk before the process exits.
     pub async fn flush(&self) {
-        let pending = {
+        let (pending, invariant) = {
             let mut inner = self.inner.lock().await;
             if inner.null_mode || inner.buffer.is_empty() {
-                None
+                (None, BoundaryReport::default())
             } else {
+                // #367: a flush is a chunk boundary for the absolute A/V
+                // invariant too (the skew monitor keeps its keyframe-boundary
+                // cadence, unchanged).
+                let invariant = inner.av_invariant.evaluate();
+                let report = BoundaryReport::capture(
+                    &inner.skew_monitor,
+                    &inner.av_invariant,
+                    None,
+                    invariant,
+                );
                 let p = Self::extract_chunk(&mut inner);
                 if p.is_some() {
                     inner.chunk_index += 1;
                 }
-                p
+                (p, report)
             }
         };
 
+        publish_boundary(
+            self.ingest_state.as_ref(),
+            self.skew_threshold_ms,
+            invariant,
+        );
         if let Some(pending) = pending {
             self.write_and_notify(pending).await;
         }
@@ -489,7 +469,7 @@ impl FlvChunkSink {
 
         let mut inner = self.inner.lock().await;
         let old_origin = inner.session_origin_src;
-        Self::clear_session_epoch(&mut inner);
+        let invariant = Self::clear_session_epoch(&mut inner);
         info!(
             chunk_index = inner.chunk_index,
             old_session_origin_src = ?old_origin,
@@ -497,7 +477,7 @@ impl FlvChunkSink {
              keyframe re-anchors audio+video together (#255, #367)"
         );
         drop(inner);
-        self.clear_ingest_surface();
+        publish_reanchor(self.ingest_state.as_ref(), invariant);
     }
 
     /// Reset the chunker state.
@@ -508,15 +488,28 @@ impl FlvChunkSink {
     pub async fn reset(&self) {
         let mut inner = self.inner.lock().await;
         inner.buffer.clear();
-        Self::clear_session_epoch(&mut inner);
+        let invariant = Self::clear_session_epoch(&mut inner);
         drop(inner);
-        self.clear_ingest_surface();
+        publish_reanchor(self.ingest_state.as_ref(), invariant);
+    }
+
+    /// Evaluate both A/V guards at a chunk boundary (under the lock).
+    fn evaluate_boundary(inner: &mut FlvChunkSinkInner) -> BoundaryReport {
+        let skew = inner.skew_monitor.evaluate_chunk();
+        let invariant = inner.av_invariant.evaluate();
+        BoundaryReport::capture(
+            &inner.skew_monitor,
+            &inner.av_invariant,
+            Some(skew),
+            invariant,
+        )
     }
 
     /// Re-zero the per-session time state: the shared source origin, the
-    /// last source ts of BOTH tracks and the skew monitor. Keeps
-    /// `chunk_index` and the saved sequence headers.
-    fn clear_session_epoch(inner: &mut FlvChunkSinkInner) {
+    /// last source ts of BOTH tracks, the skew monitor and the invariant
+    /// guard. Keeps `chunk_index` and the saved sequence headers. Returns the
+    /// guard's `Restored` edge if a violation was latched.
+    fn clear_session_epoch(inner: &mut FlvChunkSinkInner) -> Option<AvInvariantEvent> {
         inner.chunk_start = None;
         inner.chunk_first_ts = 0;
         inner.chunk_last_ts = 0;
@@ -527,15 +520,8 @@ impl FlvChunkSink {
         // #354: a new session is a new common origin, and the operator banner
         // must clear on it.
         inner.skew_monitor.reset();
-    }
-
-    /// Clear the operator-facing ingest skew surface after a session
-    /// re-anchor (the skew monitor was reset with it).
-    fn clear_ingest_surface(&self) {
-        if let Some(state) = &self.ingest_state {
-            state.set_ingest_skew_active(false);
-            state.set_ingest_skew_ms(0);
-        }
+        // #367: a new session is a new transform.
+        inner.av_invariant.reset()
     }
 
     /// #367: if `src_ts` went backward on a track, re-anchor the session for
@@ -554,7 +540,7 @@ impl FlvChunkSink {
         }
         let flushed = Self::extract_chunk(inner);
         let old_origin = inner.session_origin_src;
-        Self::clear_session_epoch(inner);
+        let invariant = Self::clear_session_epoch(inner);
         tracing::warn!(
             track,
             prev_src_ts = prev,
@@ -565,16 +551,16 @@ impl FlvChunkSink {
             "flv_chunker: source ts jumped backward -- a new publisher on the same identifier; \
              re-anchoring BOTH tracks on a new shared session origin (#367)"
         );
-        Some(Reanchored { flushed })
+        Some(Reanchored { flushed, invariant })
     }
 
     /// Outside-the-lock half of a backward-jump re-anchor: write the old
-    /// session's partial chunk and clear the ingest skew surface.
+    /// session's partial chunk and clear the ingest banner.
     async fn finish_reanchor(&self, r: Reanchored) {
         if let Some(pending) = r.flushed {
             self.commit_chunk(pending).await;
         }
-        self.clear_ingest_surface();
+        publish_reanchor(self.ingest_state.as_ref(), r.invariant);
     }
 
     /// Hand an extracted chunk to the background writer, and commit the

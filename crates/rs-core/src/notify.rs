@@ -54,10 +54,16 @@ fn classify(action: Action) -> Option<Signal> {
         // incidents alerted no one ("žiadny alert nikam nešiel") — the source
         // (OBS) desync was only ever visible on the dashboard. Route it
         // through the SAME onset/recovery pairing as HostInternetUnreachable.
-        | Action::IngestSkewDetected => Some(Signal::Onset(action)),
+        | Action::IngestSkewDetected
+        // #367: an absolute A/V invariant violation at ANY stage (ingest
+        // chunker or VPS pusher) is a desync the audience hears/sees -- the
+        // 2026-10-01 incident alerted no one because every guard was
+        // baseline-relative.
+        | Action::AvInvariantViolated => Some(Signal::Onset(action)),
         Action::RescueRecovered
         | Action::HostInternetRecovered
-        | Action::IngestSkewRecovered => Some(Signal::Recovery(action)),
+        | Action::IngestSkewRecovered
+        | Action::AvInvariantRestored => Some(Signal::Recovery(action)),
         _ => None,
     }
 }
@@ -140,7 +146,14 @@ fn slovak_text(action: Action) -> &'static str {
              kým to platí."
         }
         Action::IngestSkewRecovered => "✅ Zvuk a obraz z OBS sú znova zosynchronizované.",
-        // classify() only routes the eight actions above into this function.
+        Action::AvInvariantViolated => {
+            "🔴 Restreamer posunul zvuk voči obrazu (chyba synchronizácie vo vysielaní) — \
+             diváci môžu mať rozídený zvuk a obraz, treba to riešiť."
+        }
+        Action::AvInvariantRestored => {
+            "✅ Synchronizácia zvuku a obrazu v Restreameri je znova v poriadku."
+        }
+        // classify() only routes the ten actions above into this function.
         _ => "",
     }
 }

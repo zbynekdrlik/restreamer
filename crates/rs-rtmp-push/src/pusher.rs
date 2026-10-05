@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use crate::av_invariant::{AvInvariantEvent, AvInvariantGuard};
 use crate::session::Session;
 use crate::skew::{SkewDecision, SkewTracker};
 use crate::state::Track;
@@ -17,6 +18,13 @@ pub struct RtmpPusher {
     /// Cross-track A/V-skew detector (issue #257). Reset on each fresh RTMP
     /// session so skew is measured from the new common epoch.
     skew: SkewTracker,
+    /// #367 absolute A/V invariant guard (no baseline): the wire relation of
+    /// the latest audio/video tags must equal their content (chunk)
+    /// relation. Fed with the u32 ts ACTUALLY written to the wire.
+    av_guard: AvInvariantGuard,
+    /// Guard edges not yet taken by the consumer (which turns them into
+    /// `AvInvariantViolated` / `AvInvariantRestored` audit rows).
+    av_events: Vec<AvInvariantEvent>,
 }
 
 /// Catch-up factor expressed as percent of real-time. 120 = at most 1.2×
@@ -94,6 +102,8 @@ impl RtmpPusher {
             state: PusherState::default(),
             session: None,
             skew: SkewTracker::default(),
+            av_guard: AvInvariantGuard::default(),
+            av_events: Vec::new(),
         }
     }
 
@@ -120,6 +130,44 @@ impl RtmpPusher {
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Drain the A/V invariant guard edges recorded since the last call
+    /// (#367). The consumer audits each one.
+    pub fn take_av_invariant_events(&mut self) -> Vec<AvInvariantEvent> {
+        std::mem::take(&mut self.av_events)
+    }
+
+    /// Times this pusher's wire A/V relation broke the absolute invariant
+    /// (#367). Expected to stay 0: the shared origin + base make the wire
+    /// relation equal the content relation by construction.
+    pub fn av_invariant_violation_count(&self) -> u32 {
+        self.av_guard.violation_count()
+    }
+
+    /// Chunk-end evaluation of the absolute A/V invariant (#367): log the
+    /// edge loudly and queue it for the consumer's audit row.
+    pub(crate) fn evaluate_av_invariant(&mut self) {
+        let Some(event) = self.av_guard.evaluate() else {
+            return;
+        };
+        match event {
+            AvInvariantEvent::Violated(v) => tracing::warn!(
+                stage = "push",
+                a_rel_ms = v.a_rel_ms,
+                v_rel_ms = v.v_rel_ms,
+                delta_ms = v.delta_ms,
+                tolerance_ms = crate::av_invariant::AV_INVARIANT_TOLERANCE_MS,
+                "rtmp_push: A/V INVARIANT VIOLATED -- the wire A/V relation differs from the \
+                 chunk's content relation (#367)"
+            ),
+            AvInvariantEvent::Restored { delta_ms } => tracing::info!(
+                stage = "push",
+                delta_ms,
+                "rtmp_push: A/V invariant restored -- wire relation equals content relation (#367)"
+            ),
+        }
+        self.av_events.push(event);
     }
 
     /// Lazy-connect + write FLV bytes.
@@ -180,6 +228,9 @@ impl RtmpPusher {
             // saw upstream"): the new session starts fresh, so any input ts
             // is valid.
             self.state.begin_new_mapping();
+            // A new mapping is a new transform: never pair an old-mapping
+            // sample of one track with a new-mapping sample of the other.
+            self.av_guard.begin_new_transform();
             // A fresh RTMP session re-anchors BOTH tracks from a common
             // start, so the A/V-skew detector must measure from the new
             // shared epoch (issue #257). This is also how the bounded
@@ -280,6 +331,7 @@ impl RtmpPusher {
                                 // inter-track offset into the wire timeline.
                                 self.state.reanchor(Track::Audio);
                                 self.skew.reset_tracks();
+                                self.av_guard.begin_new_transform();
                                 tracing::warn!(
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
@@ -318,6 +370,7 @@ impl RtmpPusher {
                                 // audio block above.
                                 self.state.reanchor(Track::Video);
                                 self.skew.reset_tracks();
+                                self.av_guard.begin_new_transform();
                                 tracing::warn!(
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
@@ -366,6 +419,19 @@ impl RtmpPusher {
             let output_ts = output_ts_u64 as u32;
             if output_ts_u64 > *track_max {
                 *track_max = output_ts_u64;
+            }
+            // #367: feed the absolute invariant guard with the ts that goes on
+            // the wire (the u32, so even a wrap would be caught).
+            if !is_seq_header {
+                match tag.tag_type {
+                    crate::flv::FLV_TAG_AUDIO => self
+                        .av_guard
+                        .observe_audio(i64::from(tag.timestamp_ms), i64::from(output_ts)),
+                    crate::flv::FLV_TAG_VIDEO => self
+                        .av_guard
+                        .observe_video(i64::from(tag.timestamp_ms), i64::from(output_ts)),
+                    _ => {}
+                }
             }
 
             // De-duplicate codec sequence headers across the session.
@@ -477,6 +543,9 @@ impl RtmpPusher {
         // a common session start. Strict 1× — recovery is ONLY a reconnect +
         // re-anchor, never a speed-up. Debounced + rate-limited inside
         // SkewTracker so a persistent upstream skew cannot thrash reconnects.
+        // #367: the absolute (no-baseline) invariant -- evaluated first so a
+        // violation is queued for audit even when the skew guard trips below.
+        self.evaluate_av_invariant();
         let skew_decision = self.skew.evaluate_chunk(actual_ms);
         let av_skew_ms = self.skew.last_skew_ms();
         if skew_decision == SkewDecision::TripRecovery {

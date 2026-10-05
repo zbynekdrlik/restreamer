@@ -61,6 +61,21 @@ pub enum Action {
     /// Outage-alert recovery, pairs with `IngestSkewDetected` — see
     /// `notify::classify` (#354).
     IngestSkewRecovered,
+    /// #367: a pipeline stage broke the ABSOLUTE A/V invariant. The stage's
+    /// output A/V relation differs from its input relation by more than
+    /// `tolerance_ms` (every stage must apply ONE common transform to both
+    /// tracks). Unlike the baseline-relative skew guards (#257/#354/#359)
+    /// there is no baseline, so an offset present from the first chunk is
+    /// caught. Warn severity. `detail.stage` is `"ingest"` (the chunker,
+    /// `Source::Inpoint`) or `"push"` (a VPS pusher, `Source::Vps` + the
+    /// endpoint alias). Detail carries `{stage, a_rel_ms, v_rel_ms, delta_ms,
+    /// tolerance_ms}`. Outage-alert onset — see `notify::classify`.
+    AvInvariantViolated,
+    /// #367: a latched `AvInvariantViolated` cleared: the relation is back
+    /// within tolerance, or a session re-anchor started a new transform.
+    /// Info severity. Detail carries `{stage, delta_ms}`. Outage-alert
+    /// recovery, pairs with `AvInvariantViolated`.
+    AvInvariantRestored,
     VpsCreating,
     VpsReady,
     VpsDeleted,
