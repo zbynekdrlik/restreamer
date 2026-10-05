@@ -1888,6 +1888,124 @@ jobs:
 
           Write-Host "=== Audio PTS cadence GATE PASSED ==="
 
+      - name: GATE late-join republish keeps chunk A/V aligned (#367)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # Regression for the 2026-10-01 live A/V desync (#367). The trigger
+          # was a consumer stall (FRAME_TIMEOUT re-subscribe) while the
+          # publisher reconnected: the Publish event got queued behind the
+          # re-subscribe retry ladder, the new publisher was joined late with
+          # xiu's GOP-cache replay as a burst, and the old chunker stamped
+          # video by ARRIVAL time (audio by source ts), baking a constant A/V
+          # offset into every chunk. Repro: suspend the ffmpeg publisher past
+          # FRAME_TIMEOUT (30 s), kill it, republish within ~1 s (keyint 60 =
+          # 2 s GOP like OBS). Assert every chunk of the new session keeps the
+          # source A/V relation (ffmpeg lavfi A+V start together, so the last
+          # audio and last video pts of a chunk are within one frame), and
+          # that no av_invariant_violated audit row appeared. The YouTube
+          # VOD-measured gate stays camera-box #357. Never touches OBS.
+          $ErrorActionPreference = 'Stop'
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) { throw "FAILED: ffprobe not found at $ffprobe" }
+          $chunkDir = "C:\ProgramData\Restreamer\chunks"
+          $snapDir = Join-Path $env:TEMP "latejoin-367"
+          Remove-Item $snapDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $snapDir | Out-Null
+          $startTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LateJoin367 {
+            [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);
+          }
+          "@
+
+          function Start-Publisher([int]$seconds) {
+            Start-Process -FilePath $ffmpegPath -ArgumentList @(
+              "-hide_banner", "-loglevel", "error", "-y", "-re",
+              "-f", "lavfi", "-i", "testsrc=duration=${seconds}:size=320x240:rate=30",
+              "-f", "lavfi", "-i", "sine=frequency=1000:duration=${seconds}",
+              "-c:v", "libx264", "-preset", "ultrafast", "-g", "60", "-c:a", "aac",
+              "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
+            ) -NoNewWindow -PassThru
+          }
+
+          $p1 = $null
+          $p2 = $null
+          try {
+            $p1 = Start-Publisher 120
+            Start-Sleep -Seconds 15
+            if ($p1.HasExited) { throw "FAILED: publisher 1 exited early (code $($p1.ExitCode))" }
+
+            # Freeze the publisher past FRAME_TIMEOUT (30 s) -> the inpoint stalls.
+            $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
+            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess returned $rc" }
+            Write-Host "Publisher 1 (PID $($p1.Id)) suspended; waiting 31 s for the inpoint stall"
+            Start-Sleep -Seconds 31
+
+            # Kill it and republish within ~1 s: the Thursday reconnect.
+            Stop-Process -Id $p1.Id -Force
+            Start-Sleep -Milliseconds 500
+            $p2StartMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $p2 = Start-Publisher 60
+            Write-Host "Publisher 2 (PID $($p2.Id)) started at unix ms $p2StartMs"
+
+            # Snapshot the new session's chunks while they still exist on disk
+            # (the uploader deletes each one right after its S3 upload).
+            $deadline = (Get-Date).AddSeconds(25)
+            while ((Get-Date) -lt $deadline) {
+              Get-ChildItem $chunkDir -File -Filter "chunk_*.bin" -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -match '^chunk_(\d+)_\d+\.bin$') {
+                  $writtenMs = [int64]$Matches[1]
+                  $dest = Join-Path $snapDir $_.Name
+                  if ($writtenMs -gt ($p2StartMs + 1500) -and -not (Test-Path $dest)) {
+                    try {
+                      $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+                      [System.IO.File]::WriteAllBytes($dest, $bytes)
+                    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException], [System.UnauthorizedAccessException] {
+                      # pruned or locked mid-read -- the next poll retries
+                    }
+                  }
+                }
+              }
+              Start-Sleep -Milliseconds 30
+            }
+          } finally {
+            foreach ($p in @($p1, $p2)) {
+              if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
+
+          $snaps = @(Get-ChildItem $snapDir -File | Sort-Object Name)
+          Write-Host "Captured $($snaps.Count) chunk(s) of the republished session"
+          if ($snaps.Count -lt 3) { throw "FAILED: captured only $($snaps.Count) post-republish chunks, need >= 3" }
+
+          $failures = @()
+          foreach ($snap in $snaps) {
+            $json = & $ffprobe -v error -show_entries packet=codec_type,pts_time -of json $snap.FullName 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "FAILED: ffprobe exited $LASTEXITCODE on $($snap.Name): $json" }
+            $pk = ($json | ConvertFrom-Json).packets
+            $aMax = ($pk | Where-Object { $_.codec_type -eq 'audio' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
+            $vMax = ($pk | Where-Object { $_.codec_type -eq 'video' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
+            if ($null -eq $aMax -or $null -eq $vMax) { throw "FAILED: $($snap.Name) lacks an audio or a video packet" }
+            $deltaMs = [math]::Round(($aMax - $vMax) * 1000.0)
+            Write-Host "$($snap.Name): last audio pts $aMax s, last video pts $vMax s, audio-minus-video $deltaMs ms"
+            if ([math]::Abs($deltaMs) -gt 100) { $failures += "$($snap.Name): $deltaMs ms" }
+          }
+          if ($failures.Count -gt 0) {
+            throw "FAILED: chunk A/V relation drifted from the source relation after a late-join republish (#367): $($failures -join '; ')"
+          }
+
+          $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=av_invariant_violated&since=$startTs&limit=100" -TimeoutSec 10
+          $rows = if ($audit.rows) { @($audit.rows) } else { @() }
+          if ($rows.Count -gt 0) {
+            throw "FAILED: $($rows.Count) av_invariant_violated audit row(s) during the late-join repro: $($rows | ConvertTo-Json -Compress -Depth 4)"
+          }
+          Write-Host "=== Late-join republish GATE PASSED: $($snaps.Count) chunks within 100 ms, 0 invariant violations ==="
+
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell
         timeout-minutes: 4
