@@ -7,6 +7,7 @@ paths:
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/media_receiver_tests.rs"
   - "crates/rs-inpoint/src/media_receiver_takeover_tests.rs"
+  - "crates/rs-inpoint/src/media_receiver_remembered_tests.rs"
   - "crates/rs-inpoint/src/frame_stats.rs"
   - "crates/rs-inpoint/src/ingest_report.rs"
   - "crates/rs-inpoint/src/src_track.rs"
@@ -75,24 +76,29 @@ baseline-relative, so none of them saw it.
     PROBES (`Probe { identifier, trigger }`): accept starts the session
     (audited with the trigger); a failure (rejected or timed out) only logs
     and returns to Idle: never a "connected" inpoint, never a retry ladder.
-  - A takeover remembers the stream it superseded (`superseded`). The next
-    time the receiver is Idle with no session (the takeover probe failed,
-    or the taken-over session ended), `settle()` probes it ONCE: a stalled
-    publisher stays registered at the hub and can resume without a new
-    Publish. Two keys do reach stream.lan (OBS `live/obs-e2e-test`, the CI
-    ffmpeg `live/ci-e2e-test`). Without a new lag the chain is at most
-    takeover -> superseded probe -> idle; each lag during a probe adds at
-    most one lag probe. Never a loop.
+  - Every stream the receiver LEAVES without seeing it end is remembered
+    (`remembered`, deduplicated): the last stream at a deferred takeover,
+    the session or in-flight probe an `on_publish` of ANOTHER stream
+    supersedes, and the last stream when an ACCEPTED probe of another
+    stream would otherwise swallow its pending lag. Each time the receiver
+    is Idle with no session, `settle()` probes ONE remembered stream (most
+    recent first), and only then a pending lag. `begin_session` forgets the
+    stream it starts. A stalled publisher stays registered at the hub and
+    can resume without a new Publish; two keys do reach stream.lan (OBS
+    `live/obs-e2e-test`, the CI ffmpeg `live/ci-e2e-test`). Each remembered
+    entry costs at most one probe and each lag at most one more: never a
+    loop. Do not patch one more path with its own flag: feed `remember()`.
   - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
     because xiu has no session id.
   - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
   - `Lagged` is survived and remembered (`lag_unprobed`): once the receiver
-    is Idle with no session it probes `last_identifier`. A lag while
-    streaming can hide the live stream's own reconnect Publish. Sending ANY
-    probe of `last_identifier` clears the flag, in ONE place
-    (`send_subscribe`); a lag during it sets it again. An accepted
-    Subscribe covers only the lags from BEFORE it was sent: a lag while it
-    was in flight (`Phase::Subscribing { lagged }`) stays set.
+    is Idle with no session (and no remembered stream is left) it probes
+    `last_identifier`. A lag while streaming can hide the live stream's own
+    reconnect Publish. Sending ANY probe of `last_identifier` clears the
+    flag (`send_subscribe`); `settle` consumes it when it sends the lag
+    probe; a lag during a probe sets it again. An accepted Subscribe sets
+    it to `lagged`: it covers only the lags from BEFORE it was sent, a lag
+    while it was in flight (`Phase::Subscribing { lagged }`) stays set.
   - A `Closed` hub channel and a StreamsHub exit both return `Err`, so the
     orchestrator restarts.
   - Unsubscribe every dropped subscription (xiu keeps dead senders and logs
@@ -153,7 +159,8 @@ arrival patterns deterministically (burst at one instant, dead air, new
 publisher). `media_receiver_tests.rs` has a programmable hub (publisher slot,
 accept/reject, subscribe + UnSubscribe log) driving `run()` under
 `start_paused`; the takeover/probe cases live in its child
-`media_receiver_takeover_tests.rs` (plus a hand-answered hub).
+`media_receiver_takeover_tests.rs` (plus a hand-answered hub) and its child
+`media_receiver_remembered_tests.rs`.
 
 **Every paused-clock receiver test starts with `let _wd = watchdog(..)`**
 (why: `.claude/rules/mutation-killable-code.md`). With the hand-answered hub

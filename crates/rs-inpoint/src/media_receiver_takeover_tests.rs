@@ -169,7 +169,7 @@ async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
     assert_eq!(
         probed,
         vec![other, live],
-        "the takeover probe, ONE fallback probe of the ended live stream, then silence"
+        "the takeover probe, ONE remembered probe of the ended live stream, then silence"
     );
     assert!(
         !state.is_connected(),
@@ -286,12 +286,12 @@ async fn same_stream_republish_while_streaming_supersedes_at_once() {
     drop(tx1);
 }
 
-/// A hub whose Subscribe requests the test answers by hand.
 /// Subscribe requests a hand-answered hub hands to the test.
 type HubRequests =
     tokio::sync::mpsc::UnboundedReceiver<(StreamIdentifier, oneshot::Sender<SubscribeReply>)>;
 
-/// Also reports the stream of every UnSubscribe it receives.
+/// A hub whose Subscribe requests the test answers by hand. It also
+/// reports the stream of every UnSubscribe it receives.
 fn spawn_manual_hub(
     mut hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
 ) -> (
@@ -423,8 +423,8 @@ fn accept(reply: oneshot::Sender<SubscribeReply>) -> tokio::sync::mpsc::Unbounde
 /// finds nothing, the receiver must look at the stalled live stream again
 /// instead of going dark.
 #[tokio::test(start_paused = true)]
-async fn a_stale_deferred_publish_falls_back_to_the_stalled_live_stream() {
-    let _wd = watchdog("a_stale_deferred_publish_falls_back_to_the_stalled_live_stream");
+async fn a_stale_deferred_publish_reprobes_the_stalled_live_stream() {
+    let _wd = watchdog("a_stale_deferred_publish_reprobes_the_stalled_live_stream");
     let state = InpointState::new();
     let (event_tx, mut requests) = manual_receiver(state.clone());
     let live = identifier_named("live-a");
@@ -460,7 +460,7 @@ async fn a_stale_deferred_publish_falls_back_to_the_stalled_live_stream() {
     assert_eq!(probed, other);
     let _ = b_reply.send(Err(rejected()));
 
-    // The stalled live stream is still registered: the receiver falls back.
+    // The stalled live stream is still registered: it is probed again.
     let (again, a_reply) = tokio::time::timeout(within, requests.recv())
         .await
         .expect("a stale takeover must fall back to the stalled live stream")
@@ -514,13 +514,13 @@ async fn a_lag_while_subscribing_is_probed_after_the_session() {
     assert_eq!(probed, id);
 }
 
-/// Fourth review (#367): the fallback probe targets the same stream a lag
+/// Fourth review (#367): the remembered probe targets the same stream a lag
 /// probe would, so sending it covers an earlier lag too. A lag while the
 /// live stream streamed, then a stale takeover, costs the takeover probe and
-/// ONE fallback probe, not a third, identical lag probe after them.
+/// ONE remembered probe, not a third, identical lag probe after them.
 #[tokio::test(start_paused = true)]
-async fn a_fallback_probe_also_covers_an_earlier_lag() {
-    let _wd = watchdog("a_fallback_probe_also_covers_an_earlier_lag");
+async fn a_remembered_probe_of_the_last_stream_covers_an_earlier_lag() {
+    let _wd = watchdog("a_remembered_probe_of_the_last_stream_covers_an_earlier_lag");
     let state = InpointState::new();
     let (event_tx, mut requests) = manual_receiver(state.clone());
     let live = identifier_named("live-a");
@@ -548,7 +548,7 @@ async fn a_fallback_probe_also_covers_an_earlier_lag() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     overflow(&event_tx);
 
-    // A stalls: B is taken over and found gone, the fallback finds A gone.
+    // A stalls: B is taken over and found gone, the remembered A is gone too.
     let mut probed = Vec::new();
     for _ in 0..3 {
         match tokio::time::timeout(FRAME_TIMEOUT + within, requests.recv()).await {
@@ -562,17 +562,17 @@ async fn a_fallback_probe_also_covers_an_earlier_lag() {
     assert_eq!(
         probed,
         vec![other, live],
-        "the takeover probe, then ONE fallback probe that also covers the lag"
+        "the takeover probe, then ONE remembered probe that also covers the lag"
     );
     drop(frames_a);
 }
 
 /// Fourth review (#367): a takeover probe the hub never answers times out
-/// after SUBSCRIPTION_TIMEOUT and fails like a rejected one: it falls back
-/// to the stalled live stream.
+/// after SUBSCRIPTION_TIMEOUT and fails like a rejected one: the stalled
+/// live stream it superseded is probed next.
 #[tokio::test(start_paused = true)]
-async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
-    let _wd = watchdog("a_timed_out_takeover_probe_falls_back_like_a_rejected_one");
+async fn a_timed_out_takeover_probe_fails_like_a_rejected_one() {
+    let _wd = watchdog("a_timed_out_takeover_probe_fails_like_a_rejected_one");
     let state = InpointState::new();
     let (event_tx, mut requests, mut unsubscribed) =
         manual_receiver_with_unsubscribes(state.clone());
@@ -607,24 +607,24 @@ async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
     let sent_at = tokio::time::Instant::now();
     let (again, a_reply) = tokio::time::timeout(SUBSCRIPTION_TIMEOUT + within, requests.recv())
         .await
-        .expect("a timed-out takeover probe falls back to the live stream")
+        .expect("after a timed-out takeover probe the stalled live stream is probed")
         .unwrap();
     assert_eq!(again, live);
     assert!(
         sent_at.elapsed() >= SUBSCRIPTION_TIMEOUT,
-        "the fallback goes out only once the probe timed out"
+        "the remembered probe goes out only once the takeover probe timed out"
     );
     assert!(
         !state.is_connected(),
         "a probe in flight is not a session: the inpoint is not connected"
     );
 
-    // The fallback times out as well: then nothing more.
+    // The remembered probe times out as well: then nothing more.
     assert!(
         tokio::time::timeout(Duration::from_secs(60), requests.recv())
             .await
             .is_err(),
-        "after a timed-out fallback the receiver stays idle"
+        "after a timed-out remembered probe the receiver stays idle"
     );
     assert!(!state.is_connected());
     let mut gone = Vec::new();
