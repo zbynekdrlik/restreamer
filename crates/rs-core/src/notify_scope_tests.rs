@@ -123,21 +123,23 @@ fn an_endpoint_boundary_closes_only_that_endpoints_episodes() {
         }
 
         assert!(n.observe(&row_ep(boundary, "YT A"), None).is_none());
-        assert!(
-            n.observe(&a_rescue, None).is_some(),
-            "{boundary:?} for A re-arms A's rescue"
-        );
+        // Push-side rows BEFORE the rescue rows: a RescueActivated row is
+        // itself a live-pusher scope end for its endpoint.
         assert!(
             n.observe(&a_push, None).is_some(),
             "{boundary:?} for A re-arms A's push-side invariant"
         );
         assert!(
-            n.observe(&b_rescue, None).is_none(),
-            "{boundary:?} for A must not touch B's rescue episode"
-        );
-        assert!(
             n.observe(&b_push, None).is_none(),
             "{boundary:?} for A must not touch B's invariant episode"
+        );
+        assert!(
+            n.observe(&a_rescue, None).is_some(),
+            "{boundary:?} for A re-arms A's rescue"
+        );
+        assert!(
+            n.observe(&b_rescue, None).is_none(),
+            "{boundary:?} for A must not touch B's rescue episode"
         );
         assert!(
             n.observe(&vps, None).is_none(),

@@ -300,8 +300,11 @@ fn a_recovery_ends_only_its_own_family() {
     let mut n = notifier();
     let rescue_on = row_ep(Action::RescueActivated, "YT A");
     let rescue_off = row_ep(Action::RescueRecovered, "YT A");
-    let av_violated = row_av(Action::AvInvariantViolated, "push", Some("YT A"));
-    let av_restored = row_av(Action::AvInvariantRestored, "push", Some("YT A"));
+    // The invariant episode is on ANOTHER endpoint: entering rescue on A
+    // drops A's live pusher, which ends A's own push-side invariant episode
+    // by scope (notify_scope_tests.rs), not by a recovery.
+    let av_violated = row_av(Action::AvInvariantViolated, "push", Some("FB B"));
+    let av_restored = row_av(Action::AvInvariantRestored, "push", Some("FB B"));
 
     assert!(n.observe(&rescue_on, None).is_some());
     assert!(n.observe(&av_violated, None).is_some());
@@ -434,7 +437,9 @@ fn is_outage_relevant_gates_the_name_lookup() {
     assert!(n.is_outage_relevant(&row(Action::RescueActivated)));
     assert!(n.is_outage_relevant(&row(Action::RescueRecovered)));
     // Everything else is not — the writer skips the DB lookup entirely.
-    assert!(!n.is_outage_relevant(&row(Action::EventStarted)));
+    // (Lifecycle rows such as EventStarted ARE relevant since #367: they end
+    // episode scopes, see notify_scope_tests.rs.)
+    assert!(!n.is_outage_relevant(&row(Action::ConfigChanged)));
     assert!(!n.is_outage_relevant(&row(Action::DiskCachePushSample)));
 }
 
