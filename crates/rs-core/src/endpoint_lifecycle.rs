@@ -267,4 +267,18 @@ mod lifecycle_tests {
         );
         assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Buffering);
     }
+
+    /// #192: an endpoint the VPS refused to start (unknown service type)
+    /// never starts on its own -- the operator must fix it, so it is red
+    /// Attention, not grey Pending ("will start").
+    #[test]
+    fn a_refused_endpoint_is_red_attention() {
+        let i = input(
+            false,
+            Some("refused"),
+            Some("unknown_service_type"),
+            Some("endpoint not started: unknown service type: BOGUS"),
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
 }
