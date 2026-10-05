@@ -2,11 +2,15 @@
 //! Rust `RtmpPusher`. Extracted from `endpoint_task.rs` to keep that file
 //! under the 1000-line CI cap (#232). Mirrors `rs_ffmpeg::build_ffmpeg_args`
 //! URL construction so the pusher connects to the same upstream ffmpeg would.
+//!
+//! Compiled into BOTH the binary (`main.rs`) and the library (`lib.rs`)
+//! targets: it depends only on `rs_ffmpeg`, and the library export lets the
+//! `tests/` integration binaries dial the exact URL production dials (#192).
 
 use rs_ffmpeg::ServiceType;
 
 /// Build the plain RTMP URL for a given service type and stream key.
-pub(crate) fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
+pub fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
     match service_type {
         ServiceType::YtRtmp => format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"),
         ServiceType::Facebook => {
@@ -21,11 +25,4 @@ pub(crate) fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> Str
         // TestFile has no upstream — use a local test address.
         ServiceType::TestFile => format!("rtmp://127.0.0.1:1935/live/{stream_key}"),
     }
-}
-
-/// Test-accessible re-export so unit tests can call `build_rtmp_url` without
-/// making it part of the public API.
-#[cfg(test)]
-pub(crate) fn build_rtmp_url_pub(service_type: ServiceType, stream_key: &str) -> String {
-    build_rtmp_url(service_type, stream_key)
 }
