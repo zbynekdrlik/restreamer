@@ -123,7 +123,8 @@ async fn deferred_publish_is_taken_over_when_the_live_stream_stalls() {
 
 /// Review finding (#367): a deferred Publish can be STALE by the time the
 /// live stream ends (that publisher already left). Taking it over must be a
-/// probe: one Subscribe the hub rejects, then Idle. Never an inpoint reported
+/// probe: the takeover probe and ONE probe of the ended live stream it
+/// superseded, both rejected, then Idle. Never an inpoint reported
 /// "connected" with a re-subscribe ladder behind a stream that is gone.
 #[tokio::test(start_paused = true)]
 async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
@@ -286,23 +287,37 @@ async fn same_stream_republish_while_streaming_supersedes_at_once() {
 }
 
 /// A hub whose Subscribe requests the test answers by hand.
+/// Subscribe requests a hand-answered hub hands to the test.
+type HubRequests =
+    tokio::sync::mpsc::UnboundedReceiver<(StreamIdentifier, oneshot::Sender<SubscribeReply>)>;
+
+/// Also reports the stream of every UnSubscribe it receives.
 fn spawn_manual_hub(
     mut hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
-) -> tokio::sync::mpsc::UnboundedReceiver<(StreamIdentifier, oneshot::Sender<SubscribeReply>)> {
+) -> (
+    HubRequests,
+    tokio::sync::mpsc::UnboundedReceiver<StreamIdentifier>,
+) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (unsub_tx, unsub_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(event) = hub_rx.recv().await {
-            if let StreamHubEvent::Subscribe {
-                identifier,
-                result_sender,
-                ..
-            } = event
-            {
-                let _ = tx.send((identifier, result_sender));
+            match event {
+                StreamHubEvent::Subscribe {
+                    identifier,
+                    result_sender,
+                    ..
+                } => {
+                    let _ = tx.send((identifier, result_sender));
+                }
+                StreamHubEvent::UnSubscribe { identifier, .. } => {
+                    let _ = unsub_tx.send(identifier);
+                }
+                _ => {}
             }
         }
     });
-    rx
+    (rx, unsub_rx)
 }
 
 /// Review round 3 (#367): a lag while a probe is in flight must not send a
@@ -367,16 +382,25 @@ async fn a_lag_during_a_probe_is_covered_after_it() {
 /// Receiver + hand-answered hub, ready to `run()`.
 fn manual_receiver(
     state: InpointState,
+) -> (tokio::sync::broadcast::Sender<BroadcastEvent>, HubRequests) {
+    let (event_tx, requests, _unsubscribed) = manual_receiver_with_unsubscribes(state);
+    (event_tx, requests)
+}
+
+/// `manual_receiver` that also reports the stream of every UnSubscribe.
+fn manual_receiver_with_unsubscribes(
+    state: InpointState,
 ) -> (
     tokio::sync::broadcast::Sender<BroadcastEvent>,
-    tokio::sync::mpsc::UnboundedReceiver<(StreamIdentifier, oneshot::Sender<SubscribeReply>)>,
+    HubRequests,
+    tokio::sync::mpsc::UnboundedReceiver<StreamIdentifier>,
 ) {
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
     let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
     let receiver = MediaReceiver::new(event_rx, hub_tx, Arc::new(FlvChunkSink::new_null()), state);
-    let requests = spawn_manual_hub(hub_rx);
+    let (requests, unsubscribed) = spawn_manual_hub(hub_rx);
     tokio::spawn(receiver.run());
-    (event_tx, requests)
+    (event_tx, requests, unsubscribed)
 }
 
 /// Accept a Subscribe with a fresh frame channel; returns its sender.
@@ -550,7 +574,8 @@ async fn a_fallback_probe_also_covers_an_earlier_lag() {
 async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
     let _wd = watchdog("a_timed_out_takeover_probe_falls_back_like_a_rejected_one");
     let state = InpointState::new();
-    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let (event_tx, mut requests, mut unsubscribed) =
+        manual_receiver_with_unsubscribes(state.clone());
     let live = identifier_named("live-a");
     let other = identifier_named("other-b");
     let within = Duration::from_secs(5);
@@ -588,6 +613,28 @@ async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
     assert!(
         sent_at.elapsed() >= SUBSCRIPTION_TIMEOUT,
         "the fallback goes out only once the probe timed out"
+    );
+    assert!(
+        !state.is_connected(),
+        "a probe in flight is not a session: the inpoint is not connected"
+    );
+
+    // The fallback times out as well: then nothing more.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(60), requests.recv())
+            .await
+            .is_err(),
+        "after a timed-out fallback the receiver stays idle"
+    );
+    assert!(!state.is_connected());
+    let mut gone = Vec::new();
+    while let Ok(id) = unsubscribed.try_recv() {
+        gone.push(id);
+    }
+    assert_eq!(
+        gone,
+        vec![live.clone(), other, live],
+        "the stalled subscription, then each timed-out probe, is unsubscribed from the hub"
     );
     drop((b_reply, a_reply, frames_a));
 }
