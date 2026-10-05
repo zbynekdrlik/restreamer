@@ -208,6 +208,7 @@ async fn warmup_exits_as_soon_as_buffer_fills() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         target_ms,
         Some("file:///tmp/nonexistent-rescue.mp4"),
@@ -242,6 +243,7 @@ async fn warmup_without_rescue_url_skips_ffmpeg_but_waits_for_fill() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         2000, // target 2000ms
         None,
@@ -295,6 +297,7 @@ async fn warmup_with_rescue_url_updates_mode_to_warmup() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         10_000, // unreachable target — warmup stays active until stop signal
         Some("file:///tmp/nonexistent-rescue.mp4"),
@@ -331,6 +334,7 @@ async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         500,
         Some("file:///tmp/nonexistent.mp4"),
@@ -368,6 +372,7 @@ async fn warmup_stop_signal_cleans_up_and_returns_true() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         10_000, // large target, will not fill
         Some("file:///tmp/nonexistent.mp4"),
@@ -402,6 +407,7 @@ async fn warmup_skips_forward_when_chunk_missing_for_n_seconds() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         1,
         1000,
         None, // no rescue video — keeps test simple
@@ -440,6 +446,7 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         1,
         1000,
         None,

@@ -332,11 +332,15 @@ pub async fn run_defensive_rescue(
 /// target met, or stop signal), the handle is aborted — terminating the
 /// rescue stream cleanly. This closes the 2026-05-30 stream.lan blank-
 /// warmup gap (gap #3 of 3 in the design spec).
+///
+/// `svc_type` is the endpoint's service type, parsed ONCE by the caller
+/// (#192): this function never re-parses `ep_cfg.service_type`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     fetcher: &F,
     alias: &str,
     ep_cfg: &crate::api::EndpointConfig,
+    svc_type: rs_ffmpeg::ServiceType,
     start_chunk_id: i64,
     delivery_delay_ms: u64,
     rescue_video_url: Option<&str>,
@@ -350,11 +354,6 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     // DEFAULT_RESCUE_FLV so blank-warmup is impossible. Fast endpoints
     // continue to skip rescue per design (low-latency trade-off).
     let warmup_handle: Option<tokio::task::JoinHandle<bool>> = if !ep_cfg.is_fast {
-        let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-            .service_type
-            .parse()
-            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-
         // Resolve the rescue clip source BEFORE spawning so the audit_ring
         // borrow stays local to this function — the spawned task only owns
         // the resolved source. Warmup mode always shows the "Vysielanie sa o

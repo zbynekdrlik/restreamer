@@ -746,10 +746,15 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     // rescue video (with countdown) during the initial cache fill. Without
     // this, viewers see nothing until ~120s of buffer has accumulated.
     if delivery_delay_ms > 0 {
+        let warmup_svc_type: rs_ffmpeg::ServiceType = ep_cfg
+            .service_type
+            .parse()
+            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
         let stopped = crate::rescue::run_warmup_loop(
             &fetcher,
             &alias,
             &ep_cfg,
+            warmup_svc_type,
             start_chunk_id,
             delivery_delay_ms,
             rescue_video_url.as_deref(),
