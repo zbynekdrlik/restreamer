@@ -71,10 +71,11 @@ impl RtmpServer {
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::select! {
+        let receiver_failure = tokio::select! {
             // Run the StreamsHub event loop
             _ = hub.run() => {
                 info!("StreamsHub stopped");
+                None
             }
             // Run the xiu RTMP server
             result = rtmp_server.run() => {
@@ -82,21 +83,37 @@ impl RtmpServer {
                     Ok(()) => info!("RTMP server stopped"),
                     Err(e) => error!("RTMP server error: {e}"),
                 }
+                None
             }
-            // Run the media receiver
-            _ = media_receiver.run() => {
-                info!("Media receiver stopped");
+            // Run the media receiver. A failure (the hub's event channel
+            // closed) is surfaced as an error so the orchestrator restarts
+            // the whole server instead of reading it as a clean stop (#367).
+            result = media_receiver.run() => {
+                match result {
+                    Ok(()) => {
+                        info!("Media receiver stopped");
+                        None
+                    }
+                    Err(e) => {
+                        error!("Media receiver failed: {e}");
+                        Some(e)
+                    }
+                }
             }
             // Handle shutdown signal
             _ = shutdown_rx.recv() => {
                 info!("RTMP server shutting down");
+                None
             }
-        }
+        };
 
         // Flush remaining data
         flv_chunk_sink.flush().await;
 
-        Ok(())
+        match receiver_failure {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
