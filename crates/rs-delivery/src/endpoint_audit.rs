@@ -373,22 +373,16 @@ pub fn emit_av_invariant_event(
 ) {
     let Some(ring) = audit_ring else { return };
     let (severity, action, detail) = match event {
-        rs_rtmp_push::AvInvariantEvent::Violated(v) => (
-            Severity::Warn,
-            Action::AvInvariantViolated,
-            serde_json::json!({
-                "stage": "push",
-                "a_rel_ms": v.a_rel_ms,
-                "v_rel_ms": v.v_rel_ms,
-                "delta_ms": v.delta_ms,
-                "tolerance_ms": rs_rtmp_push::AV_INVARIANT_TOLERANCE_MS,
-            }),
+        rs_rtmp_push::AvInvariantEvent::Violated(v) => rs_core::audit::av_invariant_violated_row(
+            "push",
+            v.a_rel_ms,
+            v.v_rel_ms,
+            v.delta_ms,
+            rs_rtmp_push::AV_INVARIANT_TOLERANCE_MS,
         ),
-        rs_rtmp_push::AvInvariantEvent::Restored { delta_ms } => (
-            Severity::Info,
-            Action::AvInvariantRestored,
-            serde_json::json!({ "stage": "push", "delta_ms": delta_ms }),
-        ),
+        rs_rtmp_push::AvInvariantEvent::Restored { delta_ms } => {
+            rs_core::audit::av_invariant_restored_row("push", *delta_ms)
+        }
     };
     ring.push(
         severity,

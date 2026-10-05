@@ -352,6 +352,40 @@ pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
     }
 }
 
+/// #367: the ONE audit-row shape of an absolute A/V invariant VIOLATION
+/// edge, shared by the ingest chunker (`stage: "ingest"`) and every VPS
+/// pusher (`stage: "push"`). Primitives only, so rs-core needs no
+/// rs-rtmp-push dependency.
+pub fn av_invariant_violated_row(
+    stage: &str,
+    a_rel_ms: i64,
+    v_rel_ms: i64,
+    delta_ms: i64,
+    tolerance_ms: i64,
+) -> (Severity, Action, Value) {
+    (
+        Severity::Warn,
+        Action::AvInvariantViolated,
+        serde_json::json!({
+            "stage": stage,
+            "a_rel_ms": a_rel_ms,
+            "v_rel_ms": v_rel_ms,
+            "delta_ms": delta_ms,
+            "tolerance_ms": tolerance_ms,
+        }),
+    )
+}
+
+/// #367: the audit-row shape of an A/V invariant RESTORED edge (see
+/// [`av_invariant_violated_row`]).
+pub fn av_invariant_restored_row(stage: &str, delta_ms: i64) -> (Severity, Action, Value) {
+    (
+        Severity::Info,
+        Action::AvInvariantRestored,
+        serde_json::json!({ "stage": stage, "delta_ms": delta_ms }),
+    )
+}
+
 /// Drains the audit channel, INSERTs rows (batched), broadcasts WS events, and
 /// — when a Discord outage notifier is configured (#261) — fires an
 /// edge-triggered alert on each outage state transition observed in the drained
@@ -633,5 +667,29 @@ mod tests {
             assert_eq!(serde_json::to_string(&a).unwrap(), s);
             assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);
         }
+    }
+
+    #[test]
+    fn av_invariant_rows_have_one_shape_for_both_stages() {
+        let (severity, action, detail) = av_invariant_violated_row("push", 3_300, 4_000, -700, 50);
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(action, Action::AvInvariantViolated);
+        assert_eq!(
+            detail,
+            serde_json::json!({
+                "stage": "push",
+                "a_rel_ms": 3_300,
+                "v_rel_ms": 4_000,
+                "delta_ms": -700,
+                "tolerance_ms": 50,
+            })
+        );
+        let (severity, action, detail) = av_invariant_restored_row("ingest", 3);
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(action, Action::AvInvariantRestored);
+        assert_eq!(
+            detail,
+            serde_json::json!({ "stage": "ingest", "delta_ms": 3 })
+        );
     }
 }
