@@ -24,16 +24,26 @@
 //!   or is given up); it never orphans the live publisher.
 //! - Taking over a deferred Publish, and looking for a Publish a broadcast
 //!   lag may have swallowed, are PROBES: a Subscribe the hub accepts starts
-//!   the session, a rejection just leaves the receiver Idle (no "connected"
-//!   inpoint, no retry ladder against a publisher that is gone).
+//!   the session; a failed one (rejected or timed out) never marks the
+//!   inpoint "connected" and never runs a retry ladder against a publisher
+//!   that is gone. A failed probe of any stream but the last one that had a
+//!   session falls back to ONE probe of that last stream (a stalled live
+//!   publisher can resume without a new Publish); then the receiver idles.
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
 //! - `Lagged` is logged and survived. The lag is remembered until the
 //!   receiver is next Idle with no session, and then the last known stream
 //!   is probed: the lag may have swallowed its Publish, even the live
-//!   stream's own reconnect. A `Closed` hub channel is an error, so the
-//!   orchestrator restarts the RTMP server.
+//!   stream's own reconnect. Sending a probe of the last stream covers the
+//!   lags seen so far; an accepted Subscribe covers the lags from before it
+//!   was sent, not one that arrived while it was in flight. A `Closed` hub
+//!   channel is an error, so the orchestrator restarts the RTMP server.
+//!
+//! Known limit: when a taken-over stream B is accepted and its session later
+//! ends, the stalled stream A it superseded is not probed again (the last
+//! stream is B by then). It needs two different stream keys on one inpoint;
+//! production publishes one.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -81,9 +91,9 @@ fn retry_delay(retry: u32) -> Duration {
 type SubscribeReply = Result<(DataReceiver, Option<StatisticDataSender>), StreamHubError>;
 
 /// A Subscribe sent with no session behind it yet (#367): a deferred
-/// Publish taken over, or a stream a broadcast lag may have hidden.
-/// Acceptance starts the session (audited with `trigger`); a rejection just
-/// returns to Idle.
+/// Publish taken over, a stream a broadcast lag may have hidden, or the
+/// fallback after a failed probe. Acceptance starts the session (audited
+/// with `trigger`); a failure goes through `probe_failed`.
 struct Probe {
     identifier: StreamIdentifier,
     trigger: &'static str,
@@ -633,18 +643,30 @@ impl MediaReceiver {
     /// any other stream falls back to ONE probe of the last stream that had a
     /// session. A failed probe of that stream ends it: no probe loop.
     async fn probe_failed(&mut self, probe: Probe, why: &'static str) {
-        info!(
-            trigger = probe.trigger,
-            why, "Probe found nothing publishing on {} -- staying idle (#367)", probe.identifier
-        );
         let fallback = self
             .last_identifier
             .clone()
             .filter(|last| *last != probe.identifier);
-        if let Some(last) = fallback {
-            warn!("Falling back to probing the last live stream {last} (#367)");
-            self.send_subscribe(last, Some("fallback_probe")).await;
-        }
+        let Some(last) = fallback else {
+            info!(
+                trigger = probe.trigger,
+                why,
+                "Probe found nothing publishing on {} -- staying idle (#367)",
+                probe.identifier
+            );
+            return;
+        };
+        warn!(
+            trigger = probe.trigger,
+            why,
+            "Probe found nothing publishing on {} -- falling back to probing the last live \
+             stream {last} (#367)",
+            probe.identifier
+        );
+        // The fallback targets exactly what a lag probe would: it covers
+        // every lag seen so far (a lag during its flight sets the flag again).
+        self.lag_unprobed = false;
+        self.send_subscribe(last, Some("fallback_probe")).await;
     }
 
     /// End the current published-stream session: mark the inpoint
