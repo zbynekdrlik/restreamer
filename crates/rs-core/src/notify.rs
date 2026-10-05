@@ -13,6 +13,12 @@
 //! one alert per state transition. A recovery signal ends the episode and
 //! re-arms the onset alerts so a genuinely new outage alerts again.
 //!
+//! Episodes are keyed by (family, stage, endpoint) (#367): a recovery ends
+//! ONLY the episode of its own [`Family`] on its own stage and endpoint. One
+//! global episode let endpoint A's `AvInvariantRestored` clear the alert while
+//! endpoint B was still violated, and B's edge-triggered guard never
+//! re-alerted: a false all-clear.
+//!
 //! Two delivery mechanisms (#306): a **bot token** posting to the Discord REST
 //! API (`channels/{id}/messages` with an `Authorization: Bot <token>` header —
 //! a thread IS a channel, so this targets the operator's alerts-snv thread, the
@@ -21,7 +27,7 @@
 //! default), so the feature ships dark until the operator fills one in.
 //! The token / webhook URL are runtime secrets — never committed to the repo.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use crate::audit::{Action, AuditRow};
@@ -37,43 +43,88 @@ pub struct DiscordAlert {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Signal {
     /// Outage onset — one alert per distinct onset action per episode.
-    Onset(Action),
-    /// Recovery / all-clear — ends the episode and re-arms onset alerts.
-    Recovery(Action),
+    Onset(Action, Family),
+    /// Recovery / all-clear — ends its own family's episode (on the row's
+    /// stage + endpoint) and re-arms that episode's onset alerts.
+    Recovery(Action, Family),
     /// #84: a standalone operator heads-up that is NOT part of outage-episode
-    /// semantics — it fires an alert but never touches `in_outage`/`alerted`,
-    /// so it cannot flip the notifier into a fake outage (which would make a
+    /// semantics — it fires an alert but never opens or ends an episode, so
+    /// it cannot flip the notifier into a fake outage (which would make a
     /// later `RescueRecovered` emit a spurious "recovered"). The emitter
     /// guarantees its own once-per-occurrence dedup (the long-stream monitor
     /// arms once per delivery).
     Standalone(Action),
 }
 
+/// The outage condition an onset / recovery belongs to (#367). A recovery
+/// ends only the episodes of its own family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Family {
+    /// Host-level connectivity: internet egress, S3 upload, host -> VPS
+    /// reachability. `VpsUnreachable` and `S3UploadFailed` have no recovery
+    /// action of their own (the delivery monitor waits for the network), so
+    /// `HostInternetRecovered` ends the whole family's episode.
+    HostConnectivity,
+    /// A VPS endpoint playing the rescue clip (per endpoint).
+    Rescue,
+    /// The source (OBS) A/V skew seen at ingest (#354).
+    IngestSkew,
+    /// The absolute A/V invariant (#367), per stage (`ingest` / `push`) and,
+    /// on the push stage, per endpoint.
+    AvInvariant,
+}
+
 /// Route an audit action to an outage signal, or `None` if it is not
 /// outage-relevant. Keep in sync with the emission sites verified for #261.
 fn classify(action: Action) -> Option<Signal> {
-    match action {
-        Action::VpsUnreachable
-        | Action::S3UploadFailed
-        | Action::HostInternetUnreachable
-        | Action::RescueActivated
+    let signal = match action {
+        Action::VpsUnreachable | Action::S3UploadFailed | Action::HostInternetUnreachable => {
+            Signal::Onset(action, Family::HostConnectivity)
+        }
+        Action::HostInternetRecovered => Signal::Recovery(action, Family::HostConnectivity),
+        Action::RescueActivated => Signal::Onset(action, Family::Rescue),
+        Action::RescueRecovered => Signal::Recovery(action, Family::Rescue),
         // #354: the ingest-side A/V-skew banner exists BECAUSE the 2026-08-30
         // incidents alerted no one ("žiadny alert nikam nešiel") — the source
         // (OBS) desync was only ever visible on the dashboard. Route it
         // through the SAME onset/recovery pairing as HostInternetUnreachable.
-        | Action::IngestSkewDetected
+        Action::IngestSkewDetected => Signal::Onset(action, Family::IngestSkew),
+        Action::IngestSkewRecovered => Signal::Recovery(action, Family::IngestSkew),
         // #367: an absolute A/V invariant violation at ANY stage (ingest
         // chunker or VPS pusher) is a desync the audience hears/sees -- the
         // 2026-10-01 incident alerted no one because every guard was
         // baseline-relative.
-        | Action::AvInvariantViolated => Some(Signal::Onset(action)),
-        Action::RescueRecovered
-        | Action::HostInternetRecovered
-        | Action::IngestSkewRecovered
-        | Action::AvInvariantRestored => Some(Signal::Recovery(action)),
+        Action::AvInvariantViolated => Signal::Onset(action, Family::AvInvariant),
+        Action::AvInvariantRestored => Signal::Recovery(action, Family::AvInvariant),
         // #84: standalone heads-up, deliberately OUTSIDE the outage episode.
-        Action::LongStreamWarning => Some(Signal::Standalone(action)),
-        _ => None,
+        Action::LongStreamWarning => Signal::Standalone(action),
+        _ => return None,
+    };
+    Some(signal)
+}
+
+/// One outage episode (#367): the family plus the row's `detail.stage` and
+/// endpoint alias. Every emitter writes the same stage / endpoint on an
+/// onset and on its paired recovery (host-level rows carry neither), so the
+/// recovery finds exactly the episode its onset opened.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EpisodeKey {
+    family: Family,
+    stage: Option<String>,
+    endpoint: Option<String>,
+}
+
+impl EpisodeKey {
+    fn of(family: Family, row: &AuditRow) -> Self {
+        Self {
+            family,
+            stage: row
+                .detail
+                .get("stage")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            endpoint: row.endpoint.clone(),
+        }
     }
 }
 
@@ -193,39 +244,32 @@ pub struct OutageNotifier {
     episodes: Episodes,
 }
 
-/// Outage-episode bookkeeping: whether an episode is open, and which onset
+/// Outage-episode bookkeeping (#367): the open episodes, each with the onset
 /// actions already alerted in it (the dedup set).
 #[derive(Debug, Default)]
 struct Episodes {
-    /// Whether an outage episode is currently active.
-    in_outage: bool,
-    /// Onset actions already alerted during the current episode (dedup key).
-    alerted: HashSet<Action>,
+    open: HashMap<EpisodeKey, HashSet<Action>>,
 }
 
 impl Episodes {
-    /// Record an onset. True when this onset has not alerted yet in its
-    /// episode (the first occurrence alerts, repeats are deduped).
-    fn onset(&mut self, action: Action) -> bool {
-        self.in_outage = true;
-        self.alerted.insert(action)
+    /// Record an onset in its episode, opening the episode if needed. True
+    /// when this onset has not alerted yet in that episode (the first
+    /// occurrence alerts, repeats are deduped).
+    fn onset(&mut self, key: EpisodeKey, action: Action) -> bool {
+        self.open.entry(key).or_default().insert(action)
     }
 
-    /// End the episode. True when one was open: only then is a recovery
-    /// alert due (no spurious "recovered" when nothing was flagged as down).
-    fn recover(&mut self) -> bool {
-        if !self.in_outage {
-            return false;
-        }
-        self.in_outage = false;
-        self.alerted.clear();
-        true
+    /// End the episode `key`; every other episode stays open. True when it
+    /// was open: only then is a recovery alert due (no spurious "recovered"
+    /// when nothing was flagged as down).
+    fn recover(&mut self, key: &EpisodeKey) -> bool {
+        self.open.remove(key).is_some()
     }
 
     /// No outage episode is open.
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        !self.in_outage
+        self.open.is_empty()
     }
 }
 
@@ -294,7 +338,7 @@ impl OutageNotifier {
             }
         }
         match signal {
-            Signal::Onset(action) => {
+            Signal::Onset(action, family) => {
                 // #315: the SAME onset action can be a real outage or telemetry /
                 // transient noise depending on its detail payload. Suppress the
                 // noise BEFORE touching episode state (like the E2E gate above),
@@ -308,25 +352,38 @@ impl OutageNotifier {
                     );
                     return None;
                 }
-                // First occurrence of this onset in the episode alerts; repeats
-                // (the per-retry storm) are suppressed.
-                if self.episodes.onset(action) {
+                // First occurrence of this onset in its episode alerts;
+                // repeats (the per-retry storm) are suppressed.
+                let key = EpisodeKey::of(family, row);
+                if self.episodes.onset(key.clone(), action) {
+                    tracing::info!(episode = ?key, action = ?action, "outage notifier: onset alert");
                     Some(build_alert(action, row))
                 } else {
                     None
                 }
             }
-            Signal::Recovery(action) => {
-                if self.episodes.recover() {
+            Signal::Recovery(action, family) => {
+                let key = EpisodeKey::of(family, row);
+                if self.episodes.recover(&key) {
+                    tracing::info!(
+                        episode = ?key,
+                        action = ?action,
+                        "outage notifier: episode recovered"
+                    );
                     Some(build_alert(action, row))
                 } else {
-                    // No spurious "recovered" when nothing was flagged as down.
+                    // No spurious "recovered" when this episode was not open.
+                    tracing::debug!(
+                        episode = ?key,
+                        action = ?action,
+                        "outage notifier: recovery with no open episode -- no alert"
+                    );
                     None
                 }
             }
             // #84: fire the heads-up without touching episode state. The
             // emitter (the long-stream monitor) already dedups to once per
-            // delivery, so no per-episode `alerted` tracking is needed here.
+            // delivery, so no per-episode dedup is needed here.
             Signal::Standalone(action) => Some(build_alert(action, row)),
         }
     }
