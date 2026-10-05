@@ -92,7 +92,7 @@ async fn post(
 #[tokio::test]
 async fn sink_follows_the_test_file_endpoint_through_remove() {
     let state = state_with(&[("e2e rtmp", "YT_RTMP")]).await;
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
     assert_eq!(
         sink_addr(&state).await,
         None,
@@ -103,7 +103,7 @@ async fn sink_follows_the_test_file_endpoint_through_remove() {
         "e2e fast".to_string(),
         EndpointHandle::stub_with_config_for_test(endpoint_cfg("e2e fast", "TEST_FILE"), 1),
     );
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
     let addr = sink_addr(&state)
         .await
         .expect("adding a TEST_FILE endpoint must start the sink");
@@ -137,7 +137,7 @@ async fn sink_follows_the_test_file_endpoint_through_remove() {
 #[tokio::test]
 async fn stopping_another_endpoint_keeps_the_same_sink_running() {
     let state = state_with(&[("e2e fast", "TEST_FILE"), ("e2e rtmp", "YT_RTMP")]).await;
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
     let before = sink_addr(&state)
         .await
         .expect("TEST_FILE endpoint present -> sink running");
@@ -156,10 +156,49 @@ async fn stopping_another_endpoint_keeps_the_same_sink_running() {
     );
 }
 
+/// init / add reconcile with the INCOMING service types before they spawn,
+/// so a TEST_FILE endpoint's first push (its warmup rescue) never races the
+/// sink's bind.
+#[tokio::test]
+async fn incoming_test_file_endpoint_starts_the_sink_before_it_spawns() {
+    let state = state_with(&[]).await;
+    reconcile_test_file_sink(&state, &["YT_RTMP"]).await;
+    assert_eq!(
+        sink_addr(&state).await,
+        None,
+        "an incoming non-TEST_FILE endpoint needs no sink"
+    );
+    reconcile_test_file_sink(&state, &["YT_RTMP", "TEST_FILE"]).await;
+    assert!(
+        sink_addr(&state).await.is_some(),
+        "an incoming TEST_FILE endpoint must have its sink before it is even in the map"
+    );
+}
+
+/// The real /api/endpoints/add handler refuses (409) before /api/init, and a
+/// refused add must not start the sink: its pre-spawn reconcile runs only
+/// after the DiskCache check passes.
+#[tokio::test]
+async fn add_before_init_is_refused_and_starts_no_sink() {
+    let state = state_with(&[]).await;
+    let (status, _) = post(
+        &state,
+        "/api/endpoints/add",
+        serde_json::json!({"endpoint": {"alias": "e2e fast", "service_type": "TEST_FILE", "stream_key": "k"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "no /api/init yet");
+    assert_eq!(
+        sink_addr(&state).await,
+        None,
+        "a refused add must not start the sink"
+    );
+}
+
 #[tokio::test]
 async fn stop_all_endpoints_stops_the_sink() {
     let state = state_with(&[("e2e fast", "TEST_FILE"), ("e2e rtmp", "YT_RTMP")]).await;
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
     assert!(
         sink_addr(&state).await.is_some(),
         "sink running before /api/stop"
@@ -205,7 +244,7 @@ async fn update_start_reconverges_the_sink() {
 #[tokio::test]
 async fn status_reports_the_running_sink() {
     let state = state_with(&[("e2e fast", "TEST_FILE")]).await;
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
     let addr = sink_addr(&state).await.expect("sink running");
 
     let req = Request::builder()

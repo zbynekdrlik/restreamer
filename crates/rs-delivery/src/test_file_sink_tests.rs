@@ -102,6 +102,13 @@ async fn slot_starts_one_loopback_sink_and_stops_it() {
     );
 
     slot.reconcile(async { false }).await;
+    // The port is free the moment reconcile returns (shutdown awaits the
+    // accept task), not "eventually": rebind it synchronously, before any
+    // await could let an aborted-but-not-yet-dropped listener go away.
+    drop(
+        std::net::TcpListener::bind(first.local_addr)
+            .expect("reconcile(false) must release the port before it returns"),
+    );
     assert!(
         slot.status().await.is_none(),
         "wanted=false must stop the sink"
@@ -198,8 +205,9 @@ async fn two_publishers_on_the_same_key_are_both_accepted() {
     );
 
     let c = wait_counters(&slot, "both publishes", |c| c.publishes == 2).await;
+    // (No `active_connections == 2` check here: xiu drops a publisher idle
+    // for 2 s, so on a slow runner one may already be gone.)
     assert_eq!(c.connections_accepted, 2, "{c:?}");
-    assert_eq!(c.active_connections, 2, "both still connected: {c:?}");
     assert!(c.bytes_received > 0, "{c:?}");
 
     first.close().await;
@@ -209,5 +217,48 @@ async fn two_publishers_on_the_same_key_are_both_accepted() {
     })
     .await;
     assert_eq!(c.unpublishes, 2, "{c:?}");
+    slot.reconcile(async { false }).await;
+}
+
+/// Pins the documented sink characteristic: xiu's `ServerSession` hard-codes
+/// a 2 s client read timeout, so a publisher that goes quiet (e.g. a fast
+/// endpoint waiting out `FAST_KEEPALIVE_TRIGGER_SECS` before its freeze
+/// frame) is DISCONNECTED -- where YouTube would hold the session -- and the
+/// pusher's reconnect on the same key is accepted. If an xiu upgrade changes
+/// this, this test flips and the playbook note must be updated with it.
+#[tokio::test]
+async fn an_idle_publisher_is_dropped_and_a_new_one_on_the_same_key_is_accepted() {
+    use rs_rtmp_push::{PusherConfig, RtmpPusher};
+
+    let slot = TestFileSinkSlot::new("127.0.0.1:0");
+    slot.reconcile(async { true }).await;
+    let addr = slot.status().await.expect("sink running").local_addr;
+    let url = format!("rtmp://{addr}/live/ci-fast");
+    let clip = crate::rescue_default::DEFAULT_RESCUE_FLV;
+
+    let mut idle = RtmpPusher::new(url.clone(), PusherConfig::default());
+    let pushed = tokio::time::timeout(Duration::from_secs(30), idle.push_flv_bytes(clip))
+        .await
+        .expect("push must finish");
+    assert!(pushed.is_ok(), "first publisher refused: {pushed:?}");
+    // Stay connected but send nothing.
+    let c = wait_counters(&slot, "the silent publisher to be dropped", |c| {
+        c.active_connections == 0
+    })
+    .await;
+    assert_eq!(c.unpublishes, 1, "{c:?}");
+
+    let mut fresh = RtmpPusher::new(url.clone(), PusherConfig::default());
+    let pushed = tokio::time::timeout(Duration::from_secs(30), fresh.push_flv_bytes(clip))
+        .await
+        .expect("push must finish");
+    assert!(
+        pushed.is_ok(),
+        "reconnect on the same key refused: {pushed:?}"
+    );
+    let c = wait_counters(&slot, "the second publish", |c| c.publishes == 2).await;
+    assert_eq!(c.connections_accepted, 2, "{c:?}");
+    fresh.close().await;
+    drop(idle);
     slot.reconcile(async { false }).await;
 }

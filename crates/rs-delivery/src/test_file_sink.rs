@@ -4,9 +4,10 @@
 //! `build_rtmp_url(TestFile, key)`, which is `rtmp://127.0.0.1:1935/live/<key>`.
 //! Before #192 nothing on the delivery VPS listened there. Every push died at
 //! `Session::connect`, so a TEST_FILE endpoint silently never delivered. This
-//! sink makes TEST_FILE a real, credential-free target. The full producer,
-//! Rust-pusher and rescue path runs against it exactly as it does against
-//! YouTube. The sink accepts the publish and throws the media away.
+//! sink makes TEST_FILE a real, credential-free target: the producer, the
+//! Rust pusher and the rescue loop push into a live RTMP server, as they do
+//! into YouTube. The sink accepts the publish and throws the media away. One
+//! difference from YouTube is listed under "Known characteristic" below.
 //!
 //! ## Reuses xiu, writes no RTMP code
 //! - Every connection is driven by xiu's `ServerSession`. That is the same
@@ -31,13 +32,18 @@
 //!   address, so it is never reachable from outside the VPS.
 //! - `TestFileSinkSlot` holds at most one sink. `reconcile` starts it while
 //!   the endpoint set holds a TEST_FILE endpoint and stops it when none is
-//!   left. The delivery API calls it after every endpoint-set change.
+//!   left. The delivery API reconciles BEFORE spawning new endpoints (with
+//!   their service types) and after every removal.
 //!
-//! ## Known characteristic
+//! ## Known characteristic (pinned by a test)
 //! xiu's `ServerSession` hard-codes a 2 s client-read timeout. A publisher
 //! that sends nothing for 2 s or more is disconnected, and the pusher then
-//! reconnects. YouTube tolerates a longer gap. Steady-state delivery is
-//! unaffected, because per-tag real-time pacing keeps bytes flowing.
+//! reconnects; YouTube holds such a session. The fast keepalive bridge only
+//! starts after `FAST_KEEPALIVE_TRIGGER_SECS` (2 s) without a chunk, so on
+//! this sink a producer gap of 2 s or more becomes a reconnect instead of a
+//! bridged freeze frame: the #124 bridge cannot be exercised through
+//! TEST_FILE. Steady-state delivery is unaffected, because per-tag real-time
+//! pacing keeps bytes flowing.
 
 use std::future::Future;
 use std::io;
@@ -296,10 +302,10 @@ async fn respond_to_session(
     peer: SocketAddr,
 ) {
     let mut frames: Option<FrameDataReceiver> = None;
-    let mut progress = tokio::time::interval_at(
-        tokio::time::Instant::now() + PROGRESS_LOG_INTERVAL,
-        PROGRESS_LOG_INTERVAL,
-    );
+    let mut progress = tokio::time::interval(PROGRESS_LOG_INTERVAL);
+    // `interval` ticks immediately; reset so the first progress line comes
+    // one full interval after the connection opened.
+    progress.reset();
     loop {
         tokio::select! {
             event = hub_rx.recv() => match event {
@@ -315,7 +321,14 @@ async fn respond_to_session(
                     return;
                 }
             },
-            frame = next_frame(&mut frames) => match frame {
+            // Only while a publish is live. (The future is still built when
+            // the branch is disabled, so it must not unwrap `frames`.)
+            frame = async {
+                match frames.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => None,
+                }
+            }, if frames.is_some() => match frame {
                 Some(frame) => count_frame(&frame, counters),
                 None => frames = None,
             },
@@ -332,14 +345,6 @@ async fn respond_to_session(
                 }
             }
         }
-    }
-}
-
-/// The next frame of the current publish, or never while nothing publishes.
-async fn next_frame(frames: &mut Option<FrameDataReceiver>) -> Option<FrameData> {
-    match frames {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
     }
 }
 

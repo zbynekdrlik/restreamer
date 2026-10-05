@@ -186,6 +186,15 @@ async fn init_endpoints(
     tracing::info!("DiskCache initialized");
     *state.disk_cache.write().await = Some(Arc::clone(&disk_cache_arc));
 
+    // #192: bring the TEST_FILE sink up BEFORE spawning, so a TEST_FILE
+    // endpoint's first push (e.g. its warmup rescue) never races the bind.
+    let incoming: Vec<&str> = req
+        .endpoints
+        .iter()
+        .map(|e| e.service_type.as_str())
+        .collect();
+    reconcile_test_file_sink(&state, &incoming).await;
+
     let mut endpoints = state.endpoints.write().await;
     let mut started = 0usize;
 
@@ -216,7 +225,8 @@ async fn init_endpoints(
         "Initialized endpoints"
     );
     drop(endpoints);
-    reconcile_test_file_sink(&state).await;
+    // Re-converge in case a concurrent reconcile ran before the inserts.
+    reconcile_test_file_sink(&state, &[]).await;
 
     Ok(Json(InitResponse {
         status: "ok".to_string(),
@@ -398,17 +408,23 @@ async fn endpoint_status(
 }
 
 /// #192: start or stop the TEST_FILE loopback sink so it runs exactly while
-/// the endpoint set holds a TEST_FILE endpoint. Call AFTER every endpoint-set
-/// change, with the endpoint lock already RELEASED: the slot lock is taken
-/// first and the endpoint map is read under it, so concurrent reconciles
-/// serialize and always converge on the latest set.
-pub(crate) async fn reconcile_test_file_sink(state: &AppState) {
+/// the endpoint set holds a TEST_FILE endpoint. `incoming` = service types
+/// about to be spawned: pass them BEFORE spawning (init / add / update_start)
+/// so the sink is up before their first push; pass `&[]` AFTER a change
+/// (stop / remove, and the re-converge after an insert). Call with the
+/// endpoint lock RELEASED: the slot lock is
+/// taken first and the endpoint map is read under it, so concurrent
+/// reconciles serialize and converge on the latest set.
+pub(crate) async fn reconcile_test_file_sink(state: &AppState, incoming: &[&str]) {
     state
         .test_file_sink
         .reconcile(async {
             let endpoints = state.endpoints.read().await;
             crate::test_file_sink::wants_test_file_sink(
-                endpoints.values().map(|h| h.config().service_type.as_str()),
+                endpoints
+                    .values()
+                    .map(|h| h.config().service_type.as_str())
+                    .chain(incoming.iter().copied()),
             )
         })
         .await;
@@ -449,7 +465,7 @@ async fn stop_endpoints(
         }
     };
     drop(endpoints);
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
 
     Json(StopResponse {
         status: "ok".to_string(),
@@ -488,6 +504,9 @@ async fn add_endpoint(
             "Delivery not initialized — call /api/init first".to_string(),
         ))?;
 
+    // #192: TEST_FILE sink up BEFORE the spawn (see init_endpoints).
+    reconcile_test_file_sink(&state, &[req.endpoint.service_type.as_str()]).await;
+
     let mut endpoints = state.endpoints.write().await;
 
     // Check for duplicate alias
@@ -513,7 +532,8 @@ async fn add_endpoint(
     let alias = req.endpoint.alias.clone();
     endpoints.insert(alias.clone(), handle);
     drop(endpoints);
-    reconcile_test_file_sink(&state).await;
+    // Re-converge in case a concurrent reconcile ran before the insert.
+    reconcile_test_file_sink(&state, &[]).await;
 
     tracing::info!(alias = %alias, start_chunk_id = start_id, "Added endpoint mid-stream");
 
@@ -551,7 +571,7 @@ async fn remove_endpoint(
         None => false,
     };
     drop(endpoints);
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
 
     Ok(Json(RemoveEndpointResponse {
         status: "ok".to_string(),
@@ -600,6 +620,8 @@ pub async fn update_start_handler(
     let delivery_delay_ms = *state.delivery_delay_ms.read().await;
     let rescue_video_url = state.rescue_video_url.read().await.clone();
     let disk_cache_opt = state.disk_cache.read().await.clone();
+    // #192: TEST_FILE sink up BEFORE the respawn's first push.
+    reconcile_test_file_sink(&state, &[cfg.service_type.as_str()]).await;
 
     // If disk_cache is None we are in the test path — insert a stub so the
     // swap semantics are preserved without needing a real DiskCache.
@@ -623,6 +645,8 @@ pub async fn update_start_handler(
                     alias = %req.alias,
                     "update_start: DiskCache uninitialised at runtime; cannot respawn"
                 );
+                // The endpoint is gone: let the sink follow the shrunk set.
+                reconcile_test_file_sink(&state, &[]).await;
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
@@ -636,7 +660,7 @@ pub async fn update_start_handler(
         .insert(req.alias.clone(), new_handle);
     // #192: the alias was briefly absent from the map above; a reconcile that
     // ran in that window may have stopped the TEST_FILE sink. Re-converge.
-    reconcile_test_file_sink(&state).await;
+    reconcile_test_file_sink(&state, &[]).await;
 
     state.audit_ring.push(
         rs_core::audit::Severity::Info,

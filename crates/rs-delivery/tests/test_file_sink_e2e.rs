@@ -193,8 +193,13 @@ async fn the_sink_binds_loopback_only() {
         "the sink must refuse a non-loopback bind address"
     );
 
-    // Stopping releases the port: a fresh connect is refused again.
+    // Stopping releases the port the moment reconcile returns: rebind it
+    // synchronously (no await in between), then a fresh connect is refused.
     slot.reconcile(async { false }).await;
+    drop(
+        std::net::TcpListener::bind(addr)
+            .expect("reconcile(false) must release 127.0.0.1:1935 before it returns"),
+    );
     assert!(slot.status().await.is_none());
     let reconnect = tokio::time::timeout(WAIT, tokio::net::TcpStream::connect(addr))
         .await
