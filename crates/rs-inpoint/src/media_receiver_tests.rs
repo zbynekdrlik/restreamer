@@ -495,3 +495,138 @@ async fn lagged_while_idle_probes_the_last_stream() {
         "after a Lagged broadcast while Idle the receiver must probe the last stream"
     );
 }
+
+/// One video frame, enough to mark a session as having had frames.
+fn a_frame(timestamp: u32) -> FrameData {
+    FrameData::Video {
+        timestamp,
+        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]),
+    }
+}
+
+/// Review finding (#367): a Publish of another stream deferred behind a live
+/// stream must be taken over the moment that stream STALLS. A stalled stream
+/// is no longer live; waiting for its whole re-subscribe ladder (minutes)
+/// before looking at the other publisher leaves ingest dark meanwhile.
+#[tokio::test(start_paused = true)]
+async fn deferred_publish_is_taken_over_when_the_live_stream_stalls() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    let tx_a = publish(&slot, &event_tx, &live);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("the live stream must be subscribed");
+    tx_a.send(a_frame(0)).unwrap();
+    let last_frame_at = tokio::time::Instant::now();
+
+    // B publishes while A is healthy: deferred.
+    let _tx_b = publish(&slot, &event_tx, &other);
+
+    // A freezes (no frames for FRAME_TIMEOUT): B must be taken over at once.
+    let sub = next_accepted(&mut log_rx, FRAME_TIMEOUT + Duration::from_secs(5))
+        .await
+        .expect("the deferred stream must be subscribed once the live one stalls");
+    assert_eq!(
+        sub.identifier, other,
+        "the stalled live stream's slot must go to the deferred publisher"
+    );
+    let late = sub.at.duration_since(last_frame_at + FRAME_TIMEOUT);
+    assert!(
+        late <= Duration::from_millis(100),
+        "the deferred stream must be taken over at the stall, got {late:?} after it"
+    );
+    drop(tx_a);
+}
+
+/// Review finding (#367): a deferred Publish can be STALE by the time the
+/// live stream ends (that publisher already left). Taking it over must be a
+/// probe: one Subscribe the hub rejects, then Idle. Never an inpoint reported
+/// "connected" with a re-subscribe ladder behind a stream that is gone.
+#[tokio::test(start_paused = true)]
+async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    let tx_a = publish(&slot, &event_tx, &live);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("the live stream must be subscribed");
+    tx_a.send(a_frame(0)).unwrap();
+
+    // B publishes while A is healthy (deferred), then leaves again.
+    let tx_b = publish(&slot, &event_tx, &other);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(tx_b);
+    *slot.lock().unwrap() = None;
+
+    // A ends: the deferred Publish of B is stale now.
+    drop(tx_a);
+    let mut b_subscribes = 0;
+    while let Ok(Some(rec)) = tokio::time::timeout(Duration::from_secs(60), log_rx.recv()).await {
+        if rec.identifier == other {
+            b_subscribes += 1;
+        }
+    }
+    assert_eq!(
+        b_subscribes, 1,
+        "a stale deferred Publish must be probed once, not retried"
+    );
+    assert!(
+        !state.is_connected(),
+        "a probe that finds nothing publishing must not report the inpoint connected"
+    );
+}
+
+/// Review finding (#367): a broadcast lag while a stream is LIVE can swallow
+/// that stream's own reconnect Publish (OBS reconnected on a new connection;
+/// xiu closes the old connection's frames afterwards). Once the old session
+/// ends the receiver must probe the stream, or ingest stays dark although
+/// the publisher is up.
+#[tokio::test(start_paused = true)]
+async fn publish_lost_in_a_lag_while_streaming_is_found_when_the_session_ends() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let id = test_identifier();
+
+    let tx_old = publish(&slot, &event_tx, &id);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("first publish must be subscribed");
+    tx_old.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The reconnect's Publish is lost: 40 noise events overflow the
+    // 16-slot ring behind it.
+    let _tx_new = publish(&slot, &event_tx, &id);
+    for i in 0..40 {
+        event_tx
+            .send(BroadcastEvent::UnSubscribe {
+                id: format!("noise-{i}"),
+                result_sender: None,
+            })
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // xiu closes the old connection's frame channel.
+    drop(tx_old);
+    let ended_at = tokio::time::Instant::now();
+    let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("the publisher whose Publish was lost in a lag must be found");
+    assert_eq!(sub.identifier, id);
+    assert!(
+        sub.at.duration_since(ended_at) <= Duration::from_millis(100),
+        "the probe must go out as soon as the old session ends"
+    );
+    tokio::task::yield_now().await;
+    assert!(state.is_connected(), "the found publisher starts a session");
+}

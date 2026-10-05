@@ -469,3 +469,47 @@ async fn isolated_forward_glitch_does_not_reanchor() {
     );
     assert_eq!(out_ts(&chunks, Kind::Audio, 800), 800);
 }
+
+/// Review finding (#367): ONE video frame whose source ts collapsed far
+/// BACKWARD (a corrupt ts), with its successors back on the original
+/// timeline, is an isolated outlier like the forward glitch above. It must
+/// not re-anchor the session (a flush plus everything dropped until the next
+/// keyframe). The frame itself is kept, stamped at the track's last ts.
+#[tokio::test]
+async fn isolated_low_glitch_does_not_reanchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    // Far from 0, so the glitch is a FAR backward step, not jitter.
+    let frames = without_video_at(
+        &av_frames(10_000, 11_000, |src| T0 + i64::from(src - 10_000)),
+        10_400,
+    );
+    let (before, after): (Vec<Frame>, Vec<Frame>) =
+        frames.into_iter().partition(|f| f.src_ts < 10_400);
+    feed(&sink, &clock, &before).await;
+    clock.set(T0 + 400);
+    sink.write_video(5, &body(Kind::InterFrame, 10_400)).await;
+    feed(&sink, &clock, &after).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(
+        chunks.len(),
+        1,
+        "an isolated low glitch must not re-anchor the session"
+    );
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 10_800),
+        800,
+        "origin unchanged"
+    );
+    assert_eq!(out_ts(&chunks, Kind::Audio, 10_800), 800);
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 10_400),
+        360,
+        "the glitched frame is kept, stamped at the video track's last ts"
+    );
+}
