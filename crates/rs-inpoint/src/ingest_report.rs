@@ -63,9 +63,7 @@ pub(crate) fn publish_boundary(state: Option<&InpointState>, threshold_ms: i64, 
     if b.is_empty() {
         return;
     }
-    if let Some(ev) = b.invariant {
-        log_invariant_edge(&ev);
-    }
+    let invariant_row = b.invariant.as_ref().map(invariant_edge);
     let Some(state) = state else {
         return;
     };
@@ -76,44 +74,53 @@ pub(crate) fn publish_boundary(state: Option<&InpointState>, threshold_ms: i64, 
     if let Some(t) = b.skew {
         audit_skew_edge(state, threshold_ms, t);
     }
-    if let Some(ev) = b.invariant {
-        audit_invariant_edge(state, &ev);
+    if let Some((severity, action, detail)) = invariant_row {
+        audit(state, severity, action, detail);
     }
 }
 
 /// Publish a session re-anchor: both guards were reset, so the banner
 /// clears; a latched invariant violation closes with one Restored row.
 pub(crate) fn publish_reanchor(state: Option<&InpointState>, invariant: Option<AvInvariantEvent>) {
-    if let Some(ev) = invariant {
-        log_invariant_edge(&ev);
-    }
+    let invariant_row = invariant.as_ref().map(invariant_edge);
     let Some(state) = state else {
         return;
     };
     state.set_ingest_skew_active(false);
     state.set_ingest_skew_ms(0);
-    if let Some(ev) = invariant {
-        audit_invariant_edge(state, &ev);
+    if let Some((severity, action, detail)) = invariant_row {
+        audit(state, severity, action, detail);
     }
 }
 
-fn log_invariant_edge(ev: &AvInvariantEvent) {
-    match ev {
-        AvInvariantEvent::Violated(v) => tracing::warn!(
-            stage = "ingest",
-            a_rel_ms = v.a_rel_ms,
-            v_rel_ms = v.v_rel_ms,
-            delta_ms = v.delta_ms,
-            tolerance_ms = AV_INVARIANT_TOLERANCE_MS,
-            "flv_chunker: A/V INVARIANT VIOLATED -- the chunk A/V relation differs from the \
-             publisher's source relation (#367)"
+/// One invariant-guard edge as its audit row, logged loudly on the way: the
+/// log line and the row come from the same decision.
+fn invariant_edge(ev: &AvInvariantEvent) -> (Severity, Action, serde_json::Value) {
+    let row = match ev {
+        AvInvariantEvent::Violated(v) => (
+            Severity::Warn,
+            Action::AvInvariantViolated,
+            serde_json::json!({
+                "stage": "ingest",
+                "a_rel_ms": v.a_rel_ms,
+                "v_rel_ms": v.v_rel_ms,
+                "delta_ms": v.delta_ms,
+                "tolerance_ms": AV_INVARIANT_TOLERANCE_MS,
+            }),
         ),
-        AvInvariantEvent::Restored { delta_ms } => tracing::info!(
-            stage = "ingest",
-            delta_ms,
-            "flv_chunker: A/V invariant restored (#367)"
+        AvInvariantEvent::Restored { delta_ms } => (
+            Severity::Info,
+            Action::AvInvariantRestored,
+            serde_json::json!({ "stage": "ingest", "delta_ms": delta_ms }),
         ),
-    }
+    };
+    tracing::warn!(
+        action = ?row.1,
+        detail = %row.2,
+        "flv_chunker: A/V invariant edge -- a violation means the chunk A/V relation differs \
+         from the publisher's source relation (#367)"
+    );
+    row
 }
 
 /// One audit row per skew-monitor edge. Uses the paired
@@ -136,28 +143,6 @@ fn audit_skew_edge(state: &InpointState, threshold_ms: i64, t: SkewTransition) {
             "state": state_str,
         }),
     );
-}
-
-fn audit_invariant_edge(state: &InpointState, ev: &AvInvariantEvent) {
-    let (severity, action, detail) = match ev {
-        AvInvariantEvent::Violated(v) => (
-            Severity::Warn,
-            Action::AvInvariantViolated,
-            serde_json::json!({
-                "stage": "ingest",
-                "a_rel_ms": v.a_rel_ms,
-                "v_rel_ms": v.v_rel_ms,
-                "delta_ms": v.delta_ms,
-                "tolerance_ms": AV_INVARIANT_TOLERANCE_MS,
-            }),
-        ),
-        AvInvariantEvent::Restored { delta_ms } => (
-            Severity::Info,
-            Action::AvInvariantRestored,
-            serde_json::json!({ "stage": "ingest", "delta_ms": delta_ms }),
-        ),
-    };
-    audit(state, severity, action, detail);
 }
 
 fn audit(state: &InpointState, severity: Severity, action: Action, detail: serde_json::Value) {
