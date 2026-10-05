@@ -191,6 +191,49 @@ async fn ignores_non_keyframe_before_first_chunk() {
     assert!(inner.chunk_start.is_none());
 }
 
+/// A one-byte tag body cannot be a codec sequence header (that needs the
+/// AVC/AAC packet-type byte): it is media, and reading it must not panic.
+#[tokio::test]
+async fn one_byte_tags_are_media_not_sequence_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+    sink.write_video(0, &BytesMut::from(&[0x17][..])).await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF][..])).await;
+
+    let inner = sink.inner.lock().await;
+    assert!(inner.video_sequence_header.is_none());
+    assert!(inner.audio_sequence_header.is_none());
+    assert!(
+        inner.chunk_start.is_some(),
+        "the one-byte keyframe starts a chunk like any keyframe"
+    );
+}
+
+/// A tag that fills the buffer past MAX_BUFFER_SIZE force-flushes the chunk
+/// at once, without waiting for the chunk duration or a keyframe boundary.
+#[tokio::test]
+async fn an_oversized_buffer_is_force_flushed() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+    let mut big = vec![0u8; MAX_BUFFER_SIZE];
+    big[0] = 0x17;
+    big[1] = 0x01;
+    sink.write_video(0, &BytesMut::from(&big[..])).await;
+
+    assert_eq!(
+        sink.chunk_count().await,
+        1,
+        "the oversized chunk is flushed"
+    );
+    let inner = sink.inner.lock().await;
+    assert!(inner.buffer.is_empty());
+    assert!(
+        inner.chunk_start.is_none(),
+        "the next chunk waits for a keyframe"
+    );
+}
+
 #[tokio::test]
 async fn flv_tag_structure_is_correct() {
     let dir = tempfile::tempdir().unwrap();

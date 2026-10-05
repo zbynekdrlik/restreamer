@@ -70,14 +70,7 @@ async fn lagged_while_idle_probes_the_last_stream() {
     // The publisher comes back, but its Publish is lost in a broadcast lag:
     // the Publish is sent FIRST, then 40 noise events overflow the 16-slot ring.
     let _tx2 = publish(&slot, &event_tx, &id);
-    for i in 0..40 {
-        event_tx
-            .send(BroadcastEvent::UnSubscribe {
-                id: format!("noise-{i}"),
-                result_sender: None,
-            })
-            .unwrap();
-    }
+    overflow(&event_tx);
     let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
         .await
         .expect("after a Lagged broadcast while Idle the receiver must probe the last stream");
@@ -196,14 +189,7 @@ async fn publish_lost_in_a_lag_while_streaming_is_found_when_the_session_ends() 
     // The reconnect's Publish is lost: 40 noise events overflow the
     // 16-slot ring behind it.
     let _tx_new = publish(&slot, &event_tx, &id);
-    for i in 0..40 {
-        event_tx
-            .send(BroadcastEvent::UnSubscribe {
-                id: format!("noise-{i}"),
-                result_sender: None,
-            })
-            .unwrap();
-    }
+    overflow(&event_tx);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // xiu closes the old connection's frame channel.

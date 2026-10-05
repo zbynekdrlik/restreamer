@@ -697,3 +697,39 @@ async fn a_forward_glitch_opening_a_chunk_does_not_zero_its_duration() {
         "the glitch-opened chunk spans 1_080..2_000, not 0 ms"
     );
 }
+
+/// A held far-backward VIDEO tag is decided by the next VIDEO tag (or by a
+/// far-backward tag of either track), never released by an ordinary tag of
+/// the OTHER track: a new publisher's first keyframe can be followed by the
+/// old publisher's last audio tag.
+#[tokio::test]
+async fn a_held_tag_waits_for_its_own_track_to_decide() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let a = av_frames(600_000, 602_000, |src| T0 + i64::from(src - 600_000));
+    feed(&sink, &clock, &a).await;
+    let restart = T0 + 7_000;
+    clock.set(restart);
+    // The new publisher's keyframe (source 0) ...
+    sink.write_video(0, &body(Kind::KeyFrame, 0)).await;
+    // ... then the OLD publisher's last audio tag, still on its timeline.
+    sink.write_audio(602_020, &body(Kind::Audio, 602_020)).await;
+    // The rest of the new publisher.
+    let b: Vec<Frame> = av_frames(0, 1_000, |src| restart + i64::from(src))
+        .into_iter()
+        .filter(|f| f.kind != Kind::KeyFrame)
+        .collect();
+    feed(&sink, &clock, &b).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 400),
+        400,
+        "the held keyframe heads the new session"
+    );
+    assert_eq!(out_ts(&chunks, Kind::Audio, 400), 400);
+}
