@@ -35,14 +35,25 @@ fn row_detail(action: Action, detail: Value) -> AuditRow {
     }
 }
 
-/// An A/V invariant edge shaped the way the stages emit it (#367): the
-/// `detail.stage` the shared row builders write, plus the endpoint alias a
-/// push-side row carries (`rs-delivery` `emit_av_invariant_event`; ingest
-/// rows have none).
+/// An A/V invariant edge built by the SAME row builders both stages use
+/// (`av_invariant_violated_row` / `av_invariant_restored_row`, #367), plus
+/// the endpoint alias a push-side row carries (`rs-delivery`
+/// `emit_av_invariant_event`; ingest rows have none). Building the detail
+/// here by hand would let a change to the builders' `stage` key slip past
+/// the episode tests.
 fn row_av(action: Action, stage: &str, ep: Option<&str>) -> AuditRow {
+    let (severity, built, detail) = match action {
+        Action::AvInvariantViolated => {
+            crate::audit::av_invariant_violated_row(stage, 3_300, 4_000, -700, 50)
+        }
+        Action::AvInvariantRestored => crate::audit::av_invariant_restored_row(stage, 3),
+        other => panic!("row_av builds A/V invariant rows only, got {other:?}"),
+    };
     AuditRow {
+        severity,
         endpoint: ep.map(str::to_string),
-        detail: serde_json::json!({ "stage": stage }),
+        action: built,
+        detail,
         ..row(action)
     }
 }
@@ -857,3 +868,8 @@ fn long_stream_warning_suppressed_for_e2e_event() {
             .is_none()
     );
 }
+
+// #367 review B1/B2: episode scopes and the override row, in their own file
+// for the 1000-line cap.
+#[path = "notify_scope_tests.rs"]
+mod scope;

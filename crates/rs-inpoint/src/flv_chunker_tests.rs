@@ -714,6 +714,129 @@ async fn with_ingest_state_reports_active_ingest_skew_and_audit_row() {
     assert_eq!(row.detail["state"], "detected");
 }
 
+/// Drive a sink wired to `ingest_state` until the ingest skew monitor latches
+/// Detected (same video-vs-frozen-audio recipe as the test above), and
+/// return the Detected audit row.
+async fn latch_ingest_skew(
+    sink: &FlvChunkSink,
+    audit_rx: &mut tokio::sync::mpsc::Receiver<rs_core::audit::AuditRow>,
+) -> rs_core::audit::AuditRow {
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]),
+    )
+    .await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]))
+        .await;
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]),
+    )
+    .await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]))
+        .await;
+    for i in 1..=5u8 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
+        sink.write_video(u32::from(i) * 20, &kf).await;
+    }
+    audit_rx
+        .try_recv()
+        .expect("the skew monitor must latch Detected first")
+}
+
+/// #367 review B1: a session reset (OBS republish -> `start_new_session`, RTMP
+/// disconnect -> `reset`) clears a latched ingest skew and the banner. It must
+/// say so with an `IngestSkewRecovered` row, or the outage notifier's
+/// IngestSkew episode never closes and the NEXT desync is never alerted.
+#[tokio::test]
+async fn a_session_reset_that_clears_a_latched_skew_records_its_recovery() {
+    use rs_core::audit::Action;
+    use rs_core::models::InpointState;
+    use tokio::sync::mpsc;
+
+    const THRESHOLD_MS: i64 = 10;
+    for via_disconnect in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_tx, mut audit_rx) = mpsc::channel(16);
+        let ingest_state = InpointState::new().with_audit_tx(audit_tx);
+        let sink = Arc::new(
+            FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+                .with_ingest_state(ingest_state.clone(), THRESHOLD_MS),
+        );
+
+        let detected = latch_ingest_skew(&sink, &mut audit_rx).await;
+        assert_eq!(detected.action, Action::IngestSkewDetected);
+        assert!(ingest_state.ingest_skew_active());
+
+        if via_disconnect {
+            sink.reset().await;
+        } else {
+            sink.start_new_session().await;
+        }
+
+        assert!(
+            !ingest_state.ingest_skew_active(),
+            "the reset clears the banner latch"
+        );
+        let mut rows = Vec::new();
+        while let Ok(r) = audit_rx.try_recv() {
+            rows.push(r);
+        }
+        let recovered: Vec<_> = rows
+            .iter()
+            .filter(|r| r.action == Action::IngestSkewRecovered)
+            .collect();
+        assert_eq!(
+            recovered.len(),
+            1,
+            "via_disconnect={via_disconnect}: exactly one IngestSkewRecovered for the reset, \
+             got {rows:?}"
+        );
+        let row = recovered[0];
+        assert_eq!(row.source, rs_core::audit::Source::Inpoint);
+        assert_eq!(row.detail["state"], "reset");
+        assert_eq!(row.detail["threshold_ms"], THRESHOLD_MS);
+        let skew_ms = row.detail["skew_ms"].as_i64().expect("skew_ms is a number");
+        assert!(
+            skew_ms.abs() > THRESHOLD_MS,
+            "the row records the over-threshold skew the latch was holding, got {skew_ms}"
+        );
+    }
+}
+
+/// A session reset with NO latched skew writes no skew row.
+#[tokio::test]
+async fn a_session_reset_without_a_latched_skew_writes_no_skew_row() {
+    use rs_core::audit::Action;
+    use rs_core::models::InpointState;
+    use tokio::sync::mpsc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (audit_tx, mut audit_rx) = mpsc::channel(16);
+    let ingest_state = InpointState::new().with_audit_tx(audit_tx);
+    let sink = Arc::new(
+        FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+            .with_ingest_state(ingest_state.clone(), 2_000),
+    );
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]),
+    )
+    .await;
+    sink.start_new_session().await;
+    sink.reset().await;
+    while let Ok(r) = audit_rx.try_recv() {
+        assert!(
+            !matches!(
+                r.action,
+                Action::IngestSkewRecovered | Action::IngestSkewDetected
+            ),
+            "no skew edge without a latched skew, got {r:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn with_ingest_state_stays_clear_on_a_healthy_source() {
     use rs_core::models::InpointState;
