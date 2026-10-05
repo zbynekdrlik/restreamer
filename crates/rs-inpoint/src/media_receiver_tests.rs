@@ -5,175 +5,6 @@ use super::*;
 use std::time::Duration;
 use streamhub::define::DataReceiver;
 
-/// Helper: create a MediaReceiver with controlled mock channels.
-/// Returns (MediaReceiver, hub_event_rx) so tests can intercept Subscribe events
-/// and respond with a controlled frame channel.
-fn create_test_receiver() -> (
-    MediaReceiver,
-    tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
-    tokio::sync::broadcast::Sender<BroadcastEvent>,
-) {
-    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
-    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
-    let flv_sink = Arc::new(FlvChunkSink::new_null());
-    let state = InpointState::new();
-
-    let receiver = MediaReceiver::new(event_rx, hub_tx, flv_sink, state);
-
-    (receiver, hub_rx, event_tx)
-}
-
-/// Helper: spawn a mock hub that responds to Subscribe events with a given
-/// frame sender. Returns the frame_tx for the test to control.
-fn spawn_mock_hub(
-    mut hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
-) -> tokio::sync::mpsc::UnboundedSender<FrameData> {
-    let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    tokio::spawn(async move {
-        while let Some(event) = hub_rx.recv().await {
-            if let StreamHubEvent::Subscribe { result_sender, .. } = event {
-                let data_receiver = DataReceiver {
-                    frame_receiver: Some(frame_rx),
-                    packet_receiver: None,
-                };
-                let _ = result_sender.send(Ok((data_receiver, None)));
-                // Only handle one subscription per mock hub
-                return;
-            }
-        }
-    });
-
-    frame_tx
-}
-
-#[tokio::test]
-async fn frame_timeout_returns_after_stall() {
-    // Simulate: frames flow, then stop (stall). process_stream should return
-    // StreamEnd::Timeout within FRAME_TIMEOUT, not hang forever.
-    tokio::time::pause();
-
-    let (receiver, hub_rx, _event_tx) = create_test_receiver();
-    let frame_tx = spawn_mock_hub(hub_rx);
-
-    let identifier = StreamIdentifier::Rtmp {
-        app_name: "live".to_string(),
-        stream_name: "test".to_string(),
-    };
-
-    // Send a few frames
-    let video_frame = FrameData::Video {
-        timestamp: 0,
-        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]),
-    };
-    frame_tx.send(video_frame).unwrap();
-
-    // Now don't send more frames. The timeout should fire.
-    // We keep frame_tx alive (don't drop it) -- this simulates xiu holding
-    // the channel open but not sending.
-
-    // Call process_stream -- it should return Timeout after FRAME_TIMEOUT
-    let result = receiver.process_stream(&identifier).await;
-
-    // It consumed the one frame, then waited for FRAME_TIMEOUT with no more frames
-    assert_eq!(result, StreamEnd::Timeout);
-}
-
-#[tokio::test]
-async fn frame_channel_close_returns_channel_closed() {
-    // When the frame channel closes (publisher disconnect), process_stream
-    // should return ChannelClosed.
-    tokio::time::pause();
-
-    let (receiver, hub_rx, _event_tx) = create_test_receiver();
-    let frame_tx = spawn_mock_hub(hub_rx);
-
-    let identifier = StreamIdentifier::Rtmp {
-        app_name: "live".to_string(),
-        stream_name: "test".to_string(),
-    };
-
-    // Drop the frame_tx immediately -- channel closes
-    drop(frame_tx);
-
-    let result = receiver.process_stream(&identifier).await;
-
-    assert_eq!(result, StreamEnd::ChannelClosed);
-}
-
-#[tokio::test]
-async fn subscription_timeout_returns_failed() {
-    // When the hub never responds to Subscribe, process_stream should return
-    // SubscriptionFailed after SUBSCRIPTION_TIMEOUT.
-    tokio::time::pause();
-
-    let (receiver, _hub_rx, _event_tx) = create_test_receiver();
-    // Don't spawn mock hub -- nobody responds to Subscribe
-
-    let identifier = StreamIdentifier::Rtmp {
-        app_name: "live".to_string(),
-        stream_name: "test".to_string(),
-    };
-
-    let result = receiver.process_stream(&identifier).await;
-
-    assert_eq!(result, StreamEnd::SubscriptionFailed);
-}
-
-#[tokio::test]
-async fn frame_timeout_flushes_flv_chunk() {
-    // When timeout fires, any buffered FLV data should be flushed.
-    tokio::time::pause();
-
-    let (_event_tx_b, event_rx) = tokio::sync::broadcast::channel(16);
-    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    let dir = tempfile::tempdir().unwrap();
-    let flv_sink = Arc::new(FlvChunkSink::new(
-        dir.path().to_path_buf(),
-        Duration::from_secs(60), // long duration -- won't auto-flush
-    ));
-    let state = InpointState::new();
-
-    let receiver = MediaReceiver::new(event_rx, hub_tx, flv_sink.clone(), state);
-
-    let frame_tx = spawn_mock_hub(hub_rx);
-
-    let identifier = StreamIdentifier::Rtmp {
-        app_name: "live".to_string(),
-        stream_name: "test".to_string(),
-    };
-
-    // Send sequence header then keyframe to start a chunk
-    let seq_header = FrameData::Video {
-        timestamp: 0,
-        data: bytes::BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]),
-    };
-    frame_tx.send(seq_header).unwrap();
-
-    let keyframe = FrameData::Video {
-        timestamp: 100,
-        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xDE, 0xAD][..]),
-    };
-    frame_tx.send(keyframe).unwrap();
-
-    // Don't send more -- stall
-    // process_stream should timeout and flush the partial chunk
-
-    // Yield so the mock hub can process
-    tokio::task::yield_now().await;
-
-    let result = receiver.process_stream(&identifier).await;
-
-    assert_eq!(result, StreamEnd::Timeout);
-
-    // The partial FLV chunk should have been flushed
-    assert!(
-        flv_sink.chunk_count().await > 0,
-        "FLV chunk sink should have flushed partial data on timeout"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // #367 event-driven receiver: a programmable hub that answers EVERY Subscribe
 // from a "current publisher" slot (accept), or rejects when no publisher is
@@ -368,4 +199,168 @@ async fn lagged_broadcast_does_not_end_run() {
         "after a Lagged broadcast the receiver must keep running and subscribe to the Publish"
     );
     assert!(!run.is_finished(), "a Lagged broadcast must not end run()");
+}
+
+// ---------------------------------------------------------------------------
+// Stall / disconnect / subscription-timeout behaviour, driven through run().
+// (#367 re-expressed these from the removed `process_stream`/`StreamEnd`
+// internals; the asserted behaviour is unchanged.)
+// ---------------------------------------------------------------------------
+
+/// Receiver + programmable hub + broadcast sender, ready to `run()`.
+fn running_receiver(
+    sink: Arc<FlvChunkSink>,
+    state: InpointState,
+) -> (
+    tokio::sync::broadcast::Sender<BroadcastEvent>,
+    PublisherSlot,
+    tokio::sync::mpsc::UnboundedReceiver<SubRecord>,
+) {
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receiver = MediaReceiver::new(event_rx, hub_tx, sink, state);
+    let (slot, log_rx) = spawn_programmable_hub(hub_rx);
+    tokio::spawn(receiver.run());
+    (event_tx, slot, log_rx)
+}
+
+/// A stalled subscription (publisher alive, no frames for FRAME_TIMEOUT) is
+/// dropped and re-subscribed, never left hanging forever.
+#[tokio::test(start_paused = true)]
+async fn stalled_subscription_is_resubscribed_after_frame_timeout() {
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), InpointState::new());
+    let id = test_identifier();
+
+    let tx = publish(&slot, &event_tx, &id);
+    let first = next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    tx.send(FrameData::Video {
+        timestamp: 0,
+        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]),
+    })
+    .unwrap();
+
+    // The publisher is still up (xiu would accept a new subscription).
+    let (_tx_again, rx_again) = tokio::sync::mpsc::unbounded_channel();
+    *slot.lock().unwrap() = Some(rx_again);
+
+    let again = next_accepted(&mut log_rx, Duration::from_secs(120))
+        .await
+        .expect("a stalled subscription must be re-subscribed");
+    let gap = again.at.duration_since(first.at);
+    assert!(
+        gap >= FRAME_TIMEOUT,
+        "re-subscribe must wait out FRAME_TIMEOUT ({FRAME_TIMEOUT:?}), happened after {gap:?}"
+    );
+    drop(tx);
+}
+
+/// The publisher disconnecting (frame channel closed) ends the session: the
+/// inpoint reports disconnected.
+#[tokio::test(start_paused = true)]
+async fn publisher_disconnect_ends_the_session() {
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let id = test_identifier();
+
+    let tx = publish(&slot, &event_tx, &id);
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    assert!(
+        state.is_connected(),
+        "Publish must mark the inpoint connected"
+    );
+
+    drop(tx);
+    for _ in 0..50 {
+        if !state.is_connected() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("publisher disconnect must mark the inpoint disconnected");
+}
+
+/// A Subscribe the hub never answers times out after SUBSCRIPTION_TIMEOUT and
+/// is retried, instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn unanswered_subscribe_times_out_and_is_retried() {
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, mut hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receiver = MediaReceiver::new(
+        event_rx,
+        hub_tx,
+        Arc::new(FlvChunkSink::new_null()),
+        InpointState::new(),
+    );
+    // A hub that records Subscribe requests but never answers them (it keeps
+    // the reply senders alive so the receiver really has to time out).
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut parked = Vec::new();
+        while let Some(event) = hub_rx.recv().await {
+            if let StreamHubEvent::Subscribe { result_sender, .. } = event {
+                parked.push(result_sender);
+                let _ = seen_tx.send(tokio::time::Instant::now());
+            }
+        }
+    });
+    tokio::spawn(receiver.run());
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: test_identifier(),
+        })
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+        .await
+        .expect("first Subscribe")
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(60), seen_rx.recv())
+        .await
+        .expect("an unanswered Subscribe must be retried")
+        .unwrap();
+    assert!(
+        second.duration_since(first) >= SUBSCRIPTION_TIMEOUT,
+        "retry must come after SUBSCRIPTION_TIMEOUT ({SUBSCRIPTION_TIMEOUT:?})"
+    );
+}
+
+/// A stall flushes the partial FLV chunk, so the frames received before the
+/// freeze still reach disk/S3.
+#[tokio::test(start_paused = true)]
+async fn stall_flushes_the_partial_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(FlvChunkSink::new(
+        dir.path().to_path_buf(),
+        Duration::from_secs(60), // long duration -- won't auto-flush
+    ));
+    let (event_tx, slot, mut log_rx) = running_receiver(Arc::clone(&sink), InpointState::new());
+
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    tx.send(FrameData::Video {
+        timestamp: 0,
+        data: bytes::BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]),
+    })
+    .unwrap();
+    tx.send(FrameData::Video {
+        timestamp: 100,
+        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xDE, 0xAD][..]),
+    })
+    .unwrap();
+
+    // Stall past FRAME_TIMEOUT.
+    tokio::time::sleep(FRAME_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(
+        sink.chunk_count().await > 0,
+        "FLV chunk sink should have flushed partial data on a stall"
+    );
+    drop(tx);
 }
