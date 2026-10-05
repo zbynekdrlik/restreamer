@@ -18,6 +18,8 @@ struct SubRecord {
     accepted: bool,
     /// The stream the Subscribe asked for.
     identifier: StreamIdentifier,
+    /// The subscriber id the request carried.
+    subscriber: String,
 }
 
 type PublisherSlot = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<FrameData>>>>;
@@ -26,46 +28,71 @@ type PublisherSlot = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedRec
 /// publisher's frame receiver), or rejects with `NoAppOrStreamName` when the
 /// slot is empty, and logs each answer to the returned channel.
 fn spawn_programmable_hub(
-    mut hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
+    hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
 ) -> (
     PublisherSlot,
     tokio::sync::mpsc::UnboundedReceiver<SubRecord>,
 ) {
+    let (slot, log_rx, _unsubscribed) = spawn_recording_hub(hub_rx);
+    (slot, log_rx)
+}
+
+/// `spawn_programmable_hub` that also reports the subscriber id of every
+/// UnSubscribe it receives.
+fn spawn_recording_hub(
+    mut hub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamHubEvent>,
+) -> (
+    PublisherSlot,
+    tokio::sync::mpsc::UnboundedReceiver<SubRecord>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
     let slot: PublisherSlot = Arc::new(std::sync::Mutex::new(None));
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (unsub_tx, unsub_rx) = tokio::sync::mpsc::unbounded_channel();
     let hub_slot = Arc::clone(&slot);
     tokio::spawn(async move {
         while let Some(event) = hub_rx.recv().await {
-            if let StreamHubEvent::Subscribe {
-                identifier,
-                result_sender,
-                ..
-            } = event
-            {
-                let frames = hub_slot.lock().unwrap().take();
-                let accepted = frames.is_some();
-                let reply = match frames {
-                    Some(rx) => Ok((
-                        DataReceiver {
-                            frame_receiver: Some(rx),
-                            packet_receiver: None,
-                        },
-                        None,
-                    )),
-                    None => Err(streamhub::errors::StreamHubError {
-                        value: streamhub::errors::StreamHubErrorValue::NoAppOrStreamName,
-                    }),
-                };
-                let _ = result_sender.send(reply);
-                let _ = log_tx.send(SubRecord {
-                    at: tokio::time::Instant::now(),
-                    accepted,
+            match event {
+                StreamHubEvent::Subscribe {
                     identifier,
-                });
+                    info,
+                    result_sender,
+                } => {
+                    let frames = hub_slot.lock().unwrap().take();
+                    let accepted = frames.is_some();
+                    let reply = match frames {
+                        Some(rx) => Ok((
+                            DataReceiver {
+                                frame_receiver: Some(rx),
+                                packet_receiver: None,
+                            },
+                            None,
+                        )),
+                        None => Err(rejected()),
+                    };
+                    let _ = result_sender.send(reply);
+                    let _ = log_tx.send(SubRecord {
+                        at: tokio::time::Instant::now(),
+                        accepted,
+                        identifier,
+                        subscriber: info.id.to_string(),
+                    });
+                }
+                StreamHubEvent::UnSubscribe { info, .. } => {
+                    let _ = unsub_tx.send(info.id.to_string());
+                }
+                _ => {}
             }
         }
     });
-    (slot, log_rx)
+    (slot, log_rx, unsub_rx)
+}
+
+/// The hub's answer when nothing publishes on the stream.
+fn rejected() -> streamhub::errors::StreamHubError {
+    streamhub::errors::StreamHubError {
+        value: streamhub::errors::StreamHubErrorValue::NoAppOrStreamName,
+    }
 }
 
 /// A publisher (re)connects. The hub registers its stream, THEN broadcasts
@@ -117,6 +144,7 @@ fn test_identifier() -> StreamIdentifier {
 /// the chunker session.
 #[tokio::test(start_paused = true)]
 async fn publish_during_stall_is_not_lost_and_next_republish_joins_immediately() {
+    let _wd = watchdog("publish_during_stall_is_not_lost_and_next_republish_joins_immediately");
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
     let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
     let state = InpointState::new();
@@ -178,6 +206,7 @@ async fn publish_during_stall_is_not_lost_and_next_republish_joins_immediately()
 /// logged and survived.
 #[tokio::test(start_paused = true)]
 async fn lagged_broadcast_does_not_end_run() {
+    let _wd = watchdog("lagged_broadcast_does_not_end_run");
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
     let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
     let receiver = MediaReceiver::new(
@@ -236,6 +265,7 @@ fn running_receiver(
 /// dropped and re-subscribed, never left hanging forever.
 #[tokio::test(start_paused = true)]
 async fn stalled_subscription_is_resubscribed_after_frame_timeout() {
+    let _wd = watchdog("stalled_subscription_is_resubscribed_after_frame_timeout");
     let (event_tx, slot, mut log_rx) =
         running_receiver(Arc::new(FlvChunkSink::new_null()), InpointState::new());
     let id = test_identifier();
@@ -269,6 +299,7 @@ async fn stalled_subscription_is_resubscribed_after_frame_timeout() {
 /// inpoint reports disconnected.
 #[tokio::test(start_paused = true)]
 async fn publisher_disconnect_ends_the_session() {
+    let _wd = watchdog("publisher_disconnect_ends_the_session");
     let state = InpointState::new();
     let (event_tx, slot, mut log_rx) =
         running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
@@ -297,6 +328,7 @@ async fn publisher_disconnect_ends_the_session() {
 /// is retried, instead of hanging.
 #[tokio::test(start_paused = true)]
 async fn unanswered_subscribe_times_out_and_is_retried() {
+    let _wd = watchdog("unanswered_subscribe_times_out_and_is_retried");
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
     let (hub_tx, mut hub_rx) = tokio::sync::mpsc::unbounded_channel();
     let receiver = MediaReceiver::new(
@@ -342,6 +374,7 @@ async fn unanswered_subscribe_times_out_and_is_retried() {
 /// freeze still reach disk/S3.
 #[tokio::test(start_paused = true)]
 async fn stall_flushes_the_partial_chunk() {
+    let _wd = watchdog("stall_flushes_the_partial_chunk");
     let dir = tempfile::tempdir().unwrap();
     let sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -364,6 +397,11 @@ async fn stall_flushes_the_partial_chunk() {
     })
     .unwrap();
 
+    // The publisher stays up, so the re-subscribe after the stall is
+    // accepted and the receiver goes quiet again.
+    let (_tx_again, rx_again) = tokio::sync::mpsc::unbounded_channel();
+    *slot.lock().unwrap() = Some(rx_again);
+
     // Stall past FRAME_TIMEOUT.
     tokio::time::sleep(FRAME_TIMEOUT + Duration::from_secs(1)).await;
     assert!(
@@ -379,6 +417,7 @@ async fn stall_flushes_the_partial_chunk() {
 /// server read that as a clean shutdown.
 #[tokio::test(start_paused = true)]
 async fn closed_hub_channel_ends_run_with_error() {
+    let _wd = watchdog("closed_hub_channel_ends_run_with_error");
     let state = InpointState::new();
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
     let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -419,83 +458,6 @@ fn identifier_named(stream_name: &str) -> StreamIdentifier {
     }
 }
 
-/// Review finding (#367): a Publish of a DIFFERENT stream must not preempt a
-/// healthy live stream. That would leave the live publisher orphaned once
-/// the other one leaves. It is remembered instead, and picked up when the
-/// current stream ends.
-#[tokio::test(start_paused = true)]
-async fn other_stream_publish_waits_for_the_live_stream_to_end() {
-    let state = InpointState::new();
-    let (event_tx, slot, mut log_rx) =
-        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
-    let live = identifier_named("live-a");
-    let other = identifier_named("other-b");
-
-    let tx_a = publish(&slot, &event_tx, &live);
-    next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("the live stream must be subscribed");
-    tx_a.send(FrameData::Video {
-        timestamp: 0,
-        data: bytes::BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]),
-    })
-    .unwrap();
-
-    // Another stream starts publishing while A is healthy.
-    let _tx_b = publish(&slot, &event_tx, &other);
-    assert!(
-        next_accepted(&mut log_rx, Duration::from_secs(1))
-            .await
-            .is_none(),
-        "a different stream's Publish must not preempt the healthy live stream"
-    );
-
-    // A ends: the remembered Publish of B is picked up right away.
-    drop(tx_a);
-    let ended_at = tokio::time::Instant::now();
-    let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("the pending stream must be subscribed once the live one ends");
-    assert_eq!(sub.identifier, other);
-    assert!(sub.at.duration_since(ended_at) <= Duration::from_millis(100));
-}
-
-/// Review finding (#367): a `Lagged` broadcast can swallow a Publish. While
-/// Idle, the receiver must probe the last known stream instead of waiting
-/// forever for an event that was dropped.
-#[tokio::test(start_paused = true)]
-async fn lagged_while_idle_probes_the_last_stream() {
-    let state = InpointState::new();
-    let (event_tx, slot, mut log_rx) =
-        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
-    let id = test_identifier();
-
-    // First session, then the publisher leaves: the receiver is Idle.
-    let tx1 = publish(&slot, &event_tx, &id);
-    next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("first publish must be subscribed");
-    drop(tx1);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // The publisher comes back, but its Publish is lost in a broadcast lag:
-    // the Publish is sent FIRST, then 40 noise events overflow the 16-slot ring.
-    let _tx2 = publish(&slot, &event_tx, &id);
-    for i in 0..40 {
-        event_tx
-            .send(BroadcastEvent::UnSubscribe {
-                id: format!("noise-{i}"),
-                result_sender: None,
-            })
-            .unwrap();
-    }
-    let sub = next_accepted(&mut log_rx, Duration::from_secs(5)).await;
-    assert!(
-        sub.is_some(),
-        "after a Lagged broadcast while Idle the receiver must probe the last stream"
-    );
-}
-
 /// One video frame, enough to mark a session as having had frames.
 fn a_frame(timestamp: u32) -> FrameData {
     FrameData::Video {
@@ -504,108 +466,34 @@ fn a_frame(timestamp: u32) -> FrameData {
     }
 }
 
-/// Review finding (#367): a Publish of another stream deferred behind a live
-/// stream must be taken over the moment that stream STALLS. A stalled stream
-/// is no longer live; waiting for its whole re-subscribe ladder (minutes)
-/// before looking at the other publisher leaves ingest dark meanwhile.
-#[tokio::test(start_paused = true)]
-async fn deferred_publish_is_taken_over_when_the_live_stream_stalls() {
-    let state = InpointState::new();
-    let (event_tx, slot, mut log_rx) =
-        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
-    let live = identifier_named("live-a");
-    let other = identifier_named("other-b");
+/// Real-time watchdog for the paused-clock tests (#367). A mutant that makes
+/// the receiver spin keeps the runtime busy, so the paused clock never
+/// advances and the test would hang until cargo-mutants' 300 s timeout.
+/// After 30 s of REAL time the whole test process aborts instead: a hung
+/// test is a failed test. Dropped at the end of the test (also on a panic).
+struct Watchdog(Option<std::sync::mpsc::Sender<()>>);
 
-    let tx_a = publish(&slot, &event_tx, &live);
-    next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("the live stream must be subscribed");
-    tx_a.send(a_frame(0)).unwrap();
-    let last_frame_at = tokio::time::Instant::now();
-
-    // B publishes while A is healthy: deferred.
-    let _tx_b = publish(&slot, &event_tx, &other);
-
-    // A freezes (no frames for FRAME_TIMEOUT): B must be taken over at once.
-    let sub = next_accepted(&mut log_rx, FRAME_TIMEOUT + Duration::from_secs(5))
-        .await
-        .expect("the deferred stream must be subscribed once the live one stalls");
-    assert_eq!(
-        sub.identifier, other,
-        "the stalled live stream's slot must go to the deferred publisher"
-    );
-    let late = sub.at.duration_since(last_frame_at + FRAME_TIMEOUT);
-    assert!(
-        late <= Duration::from_millis(100),
-        "the deferred stream must be taken over at the stall, got {late:?} after it"
-    );
-    drop(tx_a);
-}
-
-/// Review finding (#367): a deferred Publish can be STALE by the time the
-/// live stream ends (that publisher already left). Taking it over must be a
-/// probe: one Subscribe the hub rejects, then Idle. Never an inpoint reported
-/// "connected" with a re-subscribe ladder behind a stream that is gone.
-#[tokio::test(start_paused = true)]
-async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
-    let state = InpointState::new();
-    let (event_tx, slot, mut log_rx) =
-        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
-    let live = identifier_named("live-a");
-    let other = identifier_named("other-b");
-
-    let tx_a = publish(&slot, &event_tx, &live);
-    next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("the live stream must be subscribed");
-    tx_a.send(a_frame(0)).unwrap();
-
-    // B publishes while A is healthy (deferred), then leaves again.
-    let tx_b = publish(&slot, &event_tx, &other);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    drop(tx_b);
-    *slot.lock().unwrap() = None;
-
-    // A ends: the deferred Publish of B is stale now.
-    drop(tx_a);
-    let mut b_subscribes = 0;
-    while let Ok(Some(rec)) = tokio::time::timeout(Duration::from_secs(60), log_rx.recv()).await {
-        if rec.identifier == other {
-            b_subscribes += 1;
-        }
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.0.take());
     }
-    assert_eq!(
-        b_subscribes, 1,
-        "a stale deferred Publish must be probed once, not retried"
-    );
-    assert!(
-        !state.is_connected(),
-        "a probe that finds nothing publishing must not report the inpoint connected"
-    );
 }
 
-/// Review finding (#367): a broadcast lag while a stream is LIVE can swallow
-/// that stream's own reconnect Publish (OBS reconnected on a new connection;
-/// xiu closes the old connection's frames afterwards). Once the old session
-/// ends the receiver must probe the stream, or ingest stays dark although
-/// the publisher is up.
-#[tokio::test(start_paused = true)]
-async fn publish_lost_in_a_lag_while_streaming_is_found_when_the_session_ends() {
-    let state = InpointState::new();
-    let (event_tx, slot, mut log_rx) =
-        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
-    let id = test_identifier();
+fn watchdog(test: &'static str) -> Watchdog {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if rx.recv_timeout(Duration::from_secs(30))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            eprintln!("{test}: still running after 30 s of real time -- aborting");
+            std::process::abort();
+        }
+    });
+    Watchdog(Some(tx))
+}
 
-    let tx_old = publish(&slot, &event_tx, &id);
-    next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("first publish must be subscribed");
-    tx_old.send(a_frame(0)).unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // The reconnect's Publish is lost: 40 noise events overflow the
-    // 16-slot ring behind it.
-    let _tx_new = publish(&slot, &event_tx, &id);
+/// Overflow the 16-slot broadcast ring: the receiver's next read lags.
+fn overflow(event_tx: &tokio::sync::broadcast::Sender<BroadcastEvent>) {
     for i in 0..40 {
         event_tx
             .send(BroadcastEvent::UnSubscribe {
@@ -614,19 +502,218 @@ async fn publish_lost_in_a_lag_while_streaming_is_found_when_the_session_ends() 
             })
             .unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // xiu closes the old connection's frame channel.
-    drop(tx_old);
-    let ended_at = tokio::time::Instant::now();
-    let sub = next_accepted(&mut log_rx, Duration::from_secs(5))
-        .await
-        .expect("the publisher whose Publish was lost in a lag must be found");
-    assert_eq!(sub.identifier, id);
-    assert!(
-        sub.at.duration_since(ended_at) <= Duration::from_millis(100),
-        "the probe must go out as soon as the old session ends"
-    );
-    tokio::task::yield_now().await;
-    assert!(state.is_connected(), "the found publisher starts a session");
 }
+
+// ---------------------------------------------------------------------------
+// #367 review round 3: the re-subscribe ladder, hub bookkeeping, audit rows.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retry_delay_grows_by_two_seconds_up_to_ten() {
+    let secs: Vec<u64> = (1..=7).map(|r| retry_delay(r).as_secs()).collect();
+    assert_eq!(secs, [2, 4, 6, 8, 10, 10, 10]);
+}
+
+#[test]
+fn phase_names_label_the_logs() {
+    assert_eq!(Phase::Idle.name(), "idle");
+    assert_eq!(
+        Phase::RetryWait {
+            at: tokio::time::Instant::now()
+        }
+        .name(),
+        "retry_wait"
+    );
+}
+
+#[test]
+fn frames_resuming_reports_and_resets_the_retry_count() {
+    let mut s = Session::new(test_identifier());
+    assert_eq!(s.frames_resumed(), None, "no retries pending");
+    s.retries = 3;
+    assert_eq!(s.frames_resumed(), Some(3));
+    assert_eq!(
+        s.retries, 0,
+        "frames flowing restart the re-subscribe ladder"
+    );
+    assert_eq!(s.frames_resumed(), None);
+}
+
+/// Every rejected Subscribe backs off 2, 4, 6, 8, then 10 s, and after
+/// MAX_RESUBSCRIBE_RETRIES attempts the session is given up: the inpoint
+/// reports disconnected and no further Subscribe goes out.
+#[tokio::test(start_paused = true)]
+async fn rejected_subscribes_back_off_then_give_up() {
+    let _wd = watchdog("rejected_subscribes_back_off_then_give_up");
+    let state = InpointState::new();
+    let (event_tx, _slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    // A Publish nothing serves: every Subscribe is rejected.
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: test_identifier(),
+        })
+        .unwrap();
+    let mut at = Vec::new();
+    for attempt in 0..MAX_RESUBSCRIBE_RETRIES {
+        let rec = tokio::time::timeout(Duration::from_secs(60), log_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("Subscribe attempt {attempt} never came"))
+            .expect("hub log open");
+        assert!(!rec.accepted);
+        at.push(rec.at);
+    }
+    let gaps: Vec<u64> = at
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]).as_secs())
+        .collect();
+    let mut expected = vec![2, 4, 6, 8];
+    expected.resize(MAX_RESUBSCRIBE_RETRIES as usize - 1, 10);
+    assert_eq!(gaps, expected, "the re-subscribe ladder");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(60), log_rx.recv())
+            .await
+            .is_err(),
+        "after MAX_RESUBSCRIBE_RETRIES the receiver gives up"
+    );
+    assert!(
+        !state.is_connected(),
+        "a given-up session reports the inpoint disconnected"
+    );
+}
+
+/// A hub that cannot take requests anymore (its event receiver is gone) is
+/// retried on the same ladder and then given up, never left "connected".
+#[tokio::test(start_paused = true)]
+async fn unreachable_hub_is_retried_then_given_up() {
+    let _wd = watchdog("unreachable_hub_is_retried_then_given_up");
+    let state = InpointState::new();
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(hub_rx);
+    let receiver = MediaReceiver::new(
+        event_rx,
+        hub_tx,
+        Arc::new(FlvChunkSink::new_null()),
+        state.clone(),
+    );
+    tokio::spawn(receiver.run());
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: test_identifier(),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(state.is_connected(), "the Publish starts a session");
+    // The whole ladder is 2 + 4 + 6 + 8 + 25 x 10 = 270 s.
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert!(
+        !state.is_connected(),
+        "an unreachable hub must be given up after the ladder"
+    );
+}
+
+/// A dropped live subscription is unsubscribed from the hub (xiu never
+/// prunes a dead frame sender on its own): the stalled subscriber is the one
+/// removed.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_subscription_is_unsubscribed_from_the_hub() {
+    let _wd = watchdog("a_stalled_subscription_is_unsubscribed_from_the_hub");
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receiver = MediaReceiver::new(
+        event_rx,
+        hub_tx,
+        Arc::new(FlvChunkSink::new_null()),
+        InpointState::new(),
+    );
+    let (slot, mut log_rx, mut unsubscribed) = spawn_recording_hub(hub_rx);
+    tokio::spawn(receiver.run());
+
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    let first = next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    tx.send(a_frame(0)).unwrap();
+    let (_tx_again, rx_again) = tokio::sync::mpsc::unbounded_channel();
+    *slot.lock().unwrap() = Some(rx_again);
+
+    let gone = tokio::time::timeout(FRAME_TIMEOUT + Duration::from_secs(5), unsubscribed.recv())
+        .await
+        .expect("a stalled subscription must be unsubscribed from the hub")
+        .expect("hub open");
+    assert_eq!(
+        gone, first.subscriber,
+        "the stalled subscriber is the one removed"
+    );
+    drop(tx);
+}
+
+/// The session start and end are audited (RtmpConnected with its trigger,
+/// RtmpDisconnected with its reason): the operator's ingest timeline.
+#[tokio::test(start_paused = true)]
+async fn session_start_and_end_are_audited() {
+    let _wd = watchdog("session_start_and_end_are_audited");
+    use rs_core::audit::{Action, Source};
+    let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel(64);
+    let state = InpointState::new().with_audit_tx(audit_tx);
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    drop(tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut rows = Vec::new();
+    while let Ok(row) = audit_rx.try_recv() {
+        rows.push(row);
+    }
+    let connected = rows
+        .iter()
+        .find(|r| r.action == Action::RtmpConnected)
+        .expect("the session start is audited");
+    assert_eq!(connected.source, Source::Inpoint);
+    assert_eq!(connected.detail["trigger"], "publish");
+    let disconnected = rows
+        .iter()
+        .find(|r| r.action == Action::RtmpDisconnected)
+        .expect("the session end is audited");
+    assert_eq!(disconnected.detail["reason"], "publisher_closed");
+}
+
+/// A re-subscribe after frames flowed re-anchors the chunker session: xiu
+/// gives no session id, so a new publisher can never be ruled out.
+#[tokio::test(start_paused = true)]
+async fn resubscribe_after_frames_reanchors_the_chunker_session() {
+    let _wd = watchdog("resubscribe_after_frames_reanchors_the_chunker_session");
+    let state = InpointState::new();
+    let sink = Arc::new(FlvChunkSink::new_null().with_ingest_state(state.clone(), 2_000));
+    let (event_tx, slot, mut log_rx) = running_receiver(sink, state.clone());
+
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    tx.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // start_new_session() clears the ingest-skew latch: raise it to observe.
+    state.set_ingest_skew_active(true);
+    let (_tx_again, rx_again) = tokio::sync::mpsc::unbounded_channel();
+    *slot.lock().unwrap() = Some(rx_again);
+
+    next_accepted(&mut log_rx, FRAME_TIMEOUT + Duration::from_secs(5))
+        .await
+        .expect("the stalled subscription must be re-subscribed");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !state.ingest_skew_active(),
+        "a re-subscribe after frames flowed must re-anchor the chunker session"
+    );
+    drop(tx);
+}
+
+#[path = "media_receiver_takeover_tests.rs"]
+mod takeover;
