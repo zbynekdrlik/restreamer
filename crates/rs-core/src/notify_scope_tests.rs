@@ -13,13 +13,14 @@
 
 use super::*;
 
-/// A delivery (VPS) begins or ends.
-const DELIVERY_BOUNDARIES: [Action; 4] = [
-    Action::DeliveryStarted,
-    Action::DeliveryStopped,
-    Action::VpsReady,
-    Action::VpsDeleted,
-];
+/// A delivery (VPS) ends. Only the END edges: a start request on an already
+/// live delivery reuses its instance yet still records `DeliveryStarted`
+/// and re-emits `VpsReady` (round-2 review finding 3), so start edges must
+/// not close the live delivery's episodes.
+const DELIVERY_BOUNDARIES: [Action; 2] = [Action::DeliveryStopped, Action::VpsDeleted];
+
+/// Start edges: recorded again on a reused, still-live delivery.
+const DELIVERY_START_EDGES: [Action; 2] = [Action::DeliveryStarted, Action::VpsReady];
 
 /// One endpoint's delivery begins anew or ends (rows carry the alias).
 const ENDPOINT_BOUNDARIES: [Action; 3] = [
@@ -257,4 +258,101 @@ fn an_ingest_skew_override_row_never_alerts_or_opens_an_episode() {
     assert!(n.observe(&detected, None).is_some());
     assert!(n.observe(&override_row, None).is_none());
     assert!(n.observe(&row(Action::IngestSkewRecovered), None).is_some());
+}
+
+// ---- round-2 review --------------------------------------------------
+
+/// Finding 3: a start request on a LIVE delivery reuses its instance but
+/// still records `DeliveryStarted` / re-emits `VpsReady`. Those start edges
+/// must not close the live delivery's episodes (its later `RescueRecovered`
+/// would then send no "recovered").
+#[test]
+fn a_start_edge_on_a_live_delivery_keeps_its_episodes() {
+    for edge in DELIVERY_START_EDGES {
+        let mut n = notifier();
+        let rescue_on = row_ep(Action::RescueActivated, "YT A");
+        let push = row_av(Action::AvInvariantViolated, "push", Some("FB B"));
+        let vps = row(Action::VpsUnreachable);
+        for r in [&rescue_on, &push, &vps] {
+            assert!(n.observe(r, None).is_some());
+        }
+        assert!(n.observe(&row(edge), None).is_none());
+        assert!(
+            n.observe(&push, None).is_none(),
+            "{edge:?} must not end the live push-side episode"
+        );
+        assert!(
+            n.observe(&vps, None).is_none(),
+            "{edge:?} must not end the live VPS reachability episode"
+        );
+        assert!(
+            n.observe(&row_ep(Action::RescueRecovered, "YT A"), None)
+                .is_some(),
+            "{edge:?}: the live rescue still ends with its own 'recovered'"
+        );
+    }
+}
+
+/// Finding 1: the delivery monitor's `VpsReachable` is the paired recovery
+/// of `VpsUnreachable`. Without it a self-healed VPS blip kept the episode
+/// open for the rest of the delivery and a later real VPS death was deduped.
+#[test]
+fn a_vps_recovery_ends_only_the_vps_reachability_episode() {
+    let mut n = notifier();
+    let vps = row_detail(
+        Action::VpsUnreachable,
+        serde_json::json!({ "consecutive_failures": 3 }),
+    );
+    let internet = row(Action::HostInternetUnreachable);
+    assert!(n.observe(&vps, None).is_some());
+    assert!(n.observe(&internet, None).is_some());
+    assert!(
+        n.observe(&row(Action::VpsReachable), None).is_some(),
+        "the VPS is back: one 'recovered' alert"
+    );
+    assert!(
+        n.observe(&row(Action::VpsReachable), None).is_none(),
+        "no second 'recovered' for a closed episode"
+    );
+    assert!(
+        n.observe(&vps, None).is_some(),
+        "a later VPS outage in the same delivery alerts again"
+    );
+    assert!(
+        n.observe(&internet, None).is_none(),
+        "a VPS recovery must not end the host internet episode"
+    );
+}
+
+/// Finding 2: a session reset CLEARS the ingest skew latch, but nothing has
+/// measured the source back in sync (the re-baselined detector absorbs a
+/// persisting constant offset). Its `IngestSkewRecovered` (`state: "reset"`)
+/// therefore ends the episode SILENTLY: no false "znova zosynchronizované",
+/// and the next desync alerts again.
+#[test]
+fn a_reset_recovery_closes_the_skew_episode_silently() {
+    let mut n = notifier();
+    let detected = row(Action::IngestSkewDetected);
+    let reset = row_detail(
+        Action::IngestSkewRecovered,
+        serde_json::json!({ "skew_ms": 2_500, "threshold_ms": 2_000, "state": "reset" }),
+    );
+    assert!(n.observe(&detected, None).is_some());
+    assert!(
+        n.observe(&reset, None).is_none(),
+        "a reset is not a measured recovery: no 'synced again' alert"
+    );
+    assert!(n.episodes.is_empty(), "but the episode is closed");
+    assert!(
+        n.observe(&detected, None).is_some(),
+        "the next desync alerts again"
+    );
+    let measured = row_detail(
+        Action::IngestSkewRecovered,
+        serde_json::json!({ "skew_ms": 100, "threshold_ms": 2_000, "state": "recovered" }),
+    );
+    assert!(
+        n.observe(&measured, None).is_some(),
+        "a MEASURED recovery still alerts"
+    );
 }

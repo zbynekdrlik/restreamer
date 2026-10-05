@@ -148,6 +148,7 @@ fn every_classified_action_has_its_own_text() {
         Action::IngestSkewRecovered,
         Action::AvInvariantRestored,
         Action::LongStreamWarning,
+        Action::VpsReachable,
     ];
     let mut seen = std::collections::HashSet::new();
     for action in routed {

@@ -344,6 +344,60 @@ async fn gop_cache_burst_never_trips_the_av_invariant_guard() {
     );
 }
 
+/// #367 review: the THIRD session-reset path, a backward source jump
+/// (`reanchor_session` in `flv_chunker_ingest.rs`), must also close a latched
+/// ingest skew with exactly one `IngestSkewRecovered` (`state: "reset"`),
+/// like `start_new_session` and `reset` (`flv_chunker_tests.rs`).
+#[tokio::test]
+async fn a_backward_jump_that_clears_a_latched_skew_records_its_recovery() {
+    use rs_core::audit::Action;
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let (sink, state, mut audit) = with_audit(new_sink(dir.path(), &clock));
+    seed_sequence_headers(&sink).await;
+    let a = av_frames(600_000, 602_000, |src| T0 + i64::from(src - 600_000));
+    feed(&sink, &clock, &a).await;
+    // Latch the skew monitor directly: a baseline chunk, then video 3 s
+    // ahead of audio (over the 2 s threshold) for the debounce window.
+    {
+        let mut inner = sink.inner.lock().await;
+        let m = &mut inner.skew_monitor;
+        m.observe_video(0);
+        m.observe_audio(0);
+        m.evaluate_chunk();
+        for chunk in 1..=(rs_rtmp_push::SKEW_DEBOUNCE_CHUNKS + 1) {
+            m.observe_video(chunk * 2_000 + 3_000);
+            m.observe_audio(chunk * 2_000);
+            m.evaluate_chunk();
+        }
+        assert!(
+            m.is_active(),
+            "test setup: the skew monitor must be latched"
+        );
+    }
+    let _ = drain_audit(&mut audit);
+
+    // A new publisher at source 0: the far-backward jump re-anchors.
+    let restart = T0 + 7_000;
+    let b = av_frames(0, 1_000, |src| restart + i64::from(src));
+    feed(&sink, &clock, &b).await;
+
+    let recovered: Vec<_> = drain_audit(&mut audit)
+        .into_iter()
+        .filter(|r| r.action == Action::IngestSkewRecovered)
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "exactly one IngestSkewRecovered for the re-anchor, got {recovered:?}"
+    );
+    assert_eq!(recovered[0].detail["state"], "reset");
+    assert!(
+        !state.ingest_skew_active(),
+        "the re-anchor clears the banner"
+    );
+}
+
 /// A constructed violation (a stage that moved audio 700 ms vs video) is
 /// LOUD at the next chunk flush: AvInvariantViolated audit row (stage
 /// ingest, a_rel/v_rel/delta) plus the #354 ingest banner. A session
