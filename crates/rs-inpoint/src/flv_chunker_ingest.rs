@@ -110,6 +110,12 @@ impl FlvChunkSink {
         }
         match step {
             SrcStep::Continue | SrcStep::FarBackward { .. } => {}
+            SrcStep::FarForward => warn!(
+                ?track,
+                src_ts,
+                "flv_chunker: far forward source-ts step -- written as is but not counted into \
+                 the chunk duration; the next tag shows whether it was a lone glitch (#367)"
+            ),
             SrcStep::ClampTiny { to } => warn!(
                 ?track,
                 src_ts,
@@ -199,8 +205,11 @@ impl FlvChunkSink {
         }
 
         // chunk_first_ts / chunk_last_ts / duration_ms derive from VIDEO
-        // tags only (#146).
-        inner.chunk_last_ts = ts;
+        // tags only (#146). A far forward step (most likely a lone glitch)
+        // never stretches the duration.
+        if !matches!(step, SrcStep::FarForward) {
+            inner.chunk_last_ts = ts;
+        }
         Self::write_tag(inner, FLV_TAG_VIDEO, ts, data);
         // Observe the SAME stamped ts the pusher's SkewTracker will see
         // downstream, so ingest and VPS agree on the number (#354).

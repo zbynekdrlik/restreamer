@@ -15,7 +15,17 @@
 //!   (`rs_rtmp_push`'s outlier isolation);
 //! - a far backward step (`FarBackward`) is only a CANDIDATE new timeline:
 //!   a lone LOW glitch looks the same. The chunker holds that tag and lets
-//!   the next one decide (`flv_chunker_ingest`).
+//!   the next one decide (`flv_chunker_ingest`);
+//! - a far forward step (`FarForward`) is written and recorded as is (its
+//!   successor tells whether it was a lone glitch), but it never stretches
+//!   the chunk's content duration.
+//!
+//! Known limit: TWO consecutive forward-glitched tags leave the second one
+//! as `before_last`, so the walk back is `FarBackward`, not `AfterGlitch`;
+//! the next tag then confirms it as a new timeline (one re-anchor). A
+//! bounded "pre-glitch anchor" could fix it, but it must expire, or a later
+//! real new publisher above that anchor would be missed. The pusher's
+//! outlier rules still keep the wire clean.
 
 /// A media track of the chunker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +47,9 @@ pub(crate) const GLITCH_JUMP_MS: u32 = 30_000;
 pub(crate) enum SrcStep {
     /// On the timeline: stamp it as is.
     Continue,
+    /// A forward step larger than `GLITCH_JUMP_MS`: stamped and recorded as
+    /// is, but it does not extend the chunk's content duration.
+    FarForward,
     /// A tiny backward step (jitter): stamp it at the track's last ts `to`.
     ClampTiny { to: u32 },
     /// The PREVIOUS tag was a lone forward glitch; this one is back on the
@@ -61,6 +74,9 @@ impl SrcTrack {
             return SrcStep::Continue;
         };
         if ts >= last {
+            if ts - last > GLITCH_JUMP_MS {
+                return SrcStep::FarForward;
+            }
             return SrcStep::Continue;
         }
         if let Some(before) = self.before_last {
@@ -77,7 +93,7 @@ impl SrcTrack {
     /// Record an accepted tag's source ts according to its step.
     pub(crate) fn record(&mut self, ts: u32, step: SrcStep) {
         match step {
-            SrcStep::Continue => {
+            SrcStep::Continue | SrcStep::FarForward => {
                 self.before_last = self.last;
                 self.last = Some(ts);
             }
@@ -162,6 +178,23 @@ mod tests {
         // more than the jitter tolerance from it is a far backward step.
         let t = track(&[360, 360 + GLITCH_JUMP_MS]);
         assert_eq!(t.classify(400), SrcStep::FarBackward { prev: 30_360 });
+    }
+
+    #[test]
+    fn a_forward_step_past_the_glitch_bound_is_far_forward() {
+        let mut t = track(&[360]);
+        assert_eq!(
+            t.classify(360 + GLITCH_JUMP_MS),
+            SrcStep::Continue,
+            "the bound is inclusive"
+        );
+        assert_eq!(t.classify(361 + GLITCH_JUMP_MS), SrcStep::FarForward);
+        t.record(40_400, SrcStep::FarForward);
+        assert_eq!(
+            t.classify(440),
+            SrcStep::AfterGlitch { glitch: 40_400 },
+            "recorded like a normal step, so its successor can tell a lone glitch"
+        );
     }
 
     #[test]
