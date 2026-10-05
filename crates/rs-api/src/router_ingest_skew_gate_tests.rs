@@ -126,6 +126,32 @@ async fn start_delivery_force_bypasses_ingest_skew_gate() {
     );
 }
 
+/// `force:true` with NO active skew bypasses nothing, so it must leave no
+/// override row: an `IngestSkewDetected` "override" row there would claim a
+/// desync the operator never overrode (and, as an alert onset before #367
+/// review B2, would have paged "restart OBS"). Kills the `&&` -> `||`
+/// mutant on the override condition.
+#[tokio::test]
+async fn start_delivery_force_without_active_skew_writes_no_override_row() {
+    let (state, mut audit_rx) = stable_state_with_audit().await;
+    // Skew latch clear (default).
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(start_req(serde_json::json!({"event_id": 1, "force": true})))
+        .await
+        .unwrap();
+    let json = body_to_json(resp.into_body()).await;
+    assert_ne!(json["error"], "ingest_skew_too_high");
+    while let Ok(row) = audit_rx.try_recv() {
+        assert_ne!(
+            row.action,
+            rs_core::audit::Action::IngestSkewDetected,
+            "no override row without an active skew, got {row:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn start_delivery_passes_gate_when_ingest_skew_clear() {
     let state = stable_state().await;
