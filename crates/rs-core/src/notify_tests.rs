@@ -43,8 +43,7 @@ fn notifier() -> OutageNotifier {
             url: "http://127.0.0.1:1/unused".to_string(),
         },
         client: reqwest::Client::new(),
-        in_outage: false,
-        alerted: HashSet::new(),
+        episodes: Episodes::default(),
     }
 }
 
@@ -52,37 +51,37 @@ fn notifier() -> OutageNotifier {
 fn classify_maps_outage_and_recovery_actions() {
     assert!(matches!(
         classify(Action::VpsUnreachable),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::S3UploadFailed),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::HostInternetUnreachable),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::RescueActivated),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::RescueRecovered),
-        Some(Signal::Recovery(_))
+        Some(Signal::Recovery(..))
     ));
     assert!(matches!(
         classify(Action::HostInternetRecovered),
-        Some(Signal::Recovery(_))
+        Some(Signal::Recovery(..))
     ));
     // #354: the ingest A/V-skew banner must alert too — the incident it
     // fixes is precisely a source desync that alerted NO ONE.
     assert!(matches!(
         classify(Action::IngestSkewDetected),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::IngestSkewRecovered),
-        Some(Signal::Recovery(_))
+        Some(Signal::Recovery(..))
     ));
     // Unrelated actions are ignored.
     assert!(classify(Action::EventStarted).is_none());
@@ -143,11 +142,11 @@ fn every_classified_action_has_its_own_text() {
 fn av_invariant_violation_alerts_then_restored_rearms() {
     assert!(matches!(
         classify(Action::AvInvariantViolated),
-        Some(Signal::Onset(_))
+        Some(Signal::Onset(..))
     ));
     assert!(matches!(
         classify(Action::AvInvariantRestored),
-        Some(Signal::Recovery(_))
+        Some(Signal::Recovery(..))
     ));
     assert!(!slovak_text(Action::AvInvariantViolated).is_empty());
     assert!(!slovak_text(Action::AvInvariantRestored).is_empty());
@@ -222,7 +221,7 @@ fn recovery_resets_and_rearms_onset_alerts() {
 fn unrelated_action_does_not_touch_state() {
     let mut n = notifier();
     assert!(n.observe(&row(Action::EventStarted), None).is_none());
-    assert!(!n.in_outage);
+    assert!(n.episodes.is_empty());
     // A real onset right after still fires (state was untouched).
     assert!(n.observe(&row(Action::S3UploadFailed), None).is_some());
 }
@@ -293,7 +292,10 @@ fn e2e_suppression_does_not_touch_episode_state() {
         n.observe(&row(Action::VpsUnreachable), Some("E2E-Test"))
             .is_none()
     );
-    assert!(!n.in_outage, "E2E event must not start an outage episode");
+    assert!(
+        n.episodes.is_empty(),
+        "E2E event must not start an outage episode"
+    );
     // A subsequent REAL onset still alerts (state was untouched).
     assert!(
         n.observe(&row(Action::VpsUnreachable), Some("Real Event"))
@@ -325,7 +327,7 @@ fn vps_unreachable_mirror_phase_is_suppressed() {
         "mirror-phase VpsUnreachable is telemetry-only and must not alert (#315)"
     );
     assert!(
-        !n.in_outage,
+        n.episodes.is_empty(),
         "a suppressed mirror poll must not start an outage episode"
     );
 }
@@ -391,7 +393,7 @@ fn s3_upload_failed_transient_suppressed_permanent_alerts() {
         "a single transient S3 retry must not alert (#315)"
     );
     assert!(
-        !n1.in_outage,
+        n1.episodes.is_empty(),
         "a suppressed transient S3 failure must not start an outage episode"
     );
     // A permanent (terminal) failure IS a real problem and alerts.
@@ -654,10 +656,9 @@ fn long_stream_warning_is_standalone_not_an_outage() {
     // Fires the heads-up...
     assert!(n.observe(&row(Action::LongStreamWarning), None).is_some());
     // ...but does NOT flip the notifier into an outage episode.
-    assert!(!n.in_outage, "standalone warning must not set in_outage");
     assert!(
-        n.alerted.is_empty(),
-        "standalone warning must not touch outage dedup set"
+        n.episodes.is_empty(),
+        "standalone warning must not open an outage episode or touch its dedup set"
     );
 
     // A subsequent recovery therefore emits NO spurious 'recovered'.

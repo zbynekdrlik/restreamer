@@ -189,10 +189,44 @@ enum AlertSink {
 pub struct OutageNotifier {
     sink: AlertSink,
     client: reqwest::Client,
+    /// Open outage episode(s) and their alerted onsets.
+    episodes: Episodes,
+}
+
+/// Outage-episode bookkeeping: whether an episode is open, and which onset
+/// actions already alerted in it (the dedup set).
+#[derive(Debug, Default)]
+struct Episodes {
     /// Whether an outage episode is currently active.
     in_outage: bool,
     /// Onset actions already alerted during the current episode (dedup key).
     alerted: HashSet<Action>,
+}
+
+impl Episodes {
+    /// Record an onset. True when this onset has not alerted yet in its
+    /// episode (the first occurrence alerts, repeats are deduped).
+    fn onset(&mut self, action: Action) -> bool {
+        self.in_outage = true;
+        self.alerted.insert(action)
+    }
+
+    /// End the episode. True when one was open: only then is a recovery
+    /// alert due (no spurious "recovered" when nothing was flagged as down).
+    fn recover(&mut self) -> bool {
+        if !self.in_outage {
+            return false;
+        }
+        self.in_outage = false;
+        self.alerted.clear();
+        true
+    }
+
+    /// No outage episode is open.
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        !self.in_outage
+    }
 }
 
 impl OutageNotifier {
@@ -222,8 +256,7 @@ impl OutageNotifier {
         Some(Self {
             sink,
             client: reqwest::Client::new(),
-            in_outage: false,
-            alerted: HashSet::new(),
+            episodes: Episodes::default(),
         })
     }
 
@@ -275,19 +308,16 @@ impl OutageNotifier {
                     );
                     return None;
                 }
-                self.in_outage = true;
                 // First occurrence of this onset in the episode alerts; repeats
                 // (the per-retry storm) are suppressed.
-                if self.alerted.insert(action) {
+                if self.episodes.onset(action) {
                     Some(build_alert(action, row))
                 } else {
                     None
                 }
             }
             Signal::Recovery(action) => {
-                if self.in_outage {
-                    self.in_outage = false;
-                    self.alerted.clear();
+                if self.episodes.recover() {
                     Some(build_alert(action, row))
                 } else {
                     // No spurious "recovered" when nothing was flagged as down.
