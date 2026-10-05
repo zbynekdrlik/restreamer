@@ -146,3 +146,68 @@ async fn sink_counts_connections_and_a_non_publisher_is_never_an_unpublish() {
     assert_eq!(c.bytes_received, 0);
     slot.reconcile(async { false }).await;
 }
+
+#[tokio::test]
+async fn dropping_the_slot_releases_the_port() {
+    let slot = TestFileSinkSlot::new("127.0.0.1:0");
+    slot.reconcile(async { true }).await;
+    let addr = slot.status().await.expect("sink running").local_addr;
+
+    // No explicit stop: dropping the owner (e.g. the AppState going away)
+    // must still tear the listener down instead of leaking the accept task.
+    drop(slot);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a dropped slot left a listener on {addr}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Two publishers on the SAME `live/<key>` at once are both accepted. The
+/// delivery's warmup / outage-rescue pushers reuse the endpoint's key, so a
+/// sink that rejected the second one (xiu `StreamsHub` answers `Exists`
+/// until the first session times out) would turn a rescue entry into
+/// refused pushes. This pins the per-connection responder design.
+#[tokio::test]
+async fn two_publishers_on_the_same_key_are_both_accepted() {
+    use rs_rtmp_push::{PusherConfig, RtmpPusher};
+
+    let slot = TestFileSinkSlot::new("127.0.0.1:0");
+    slot.reconcile(async { true }).await;
+    let addr = slot.status().await.expect("sink running").local_addr;
+    let url = format!("rtmp://{addr}/live/ci-fast");
+    let clip = crate::rescue_default::DEFAULT_RESCUE_FLV;
+
+    let mut first = RtmpPusher::new(url.clone(), PusherConfig::default());
+    let mut second = RtmpPusher::new(url.clone(), PusherConfig::default());
+    let (a, b) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(first.push_flv_bytes(clip), second.push_flv_bytes(clip))
+    })
+    .await
+    .expect("both pushes must finish");
+    assert!(a.is_ok(), "first publisher on {url} refused: {a:?}");
+    assert!(
+        b.is_ok(),
+        "second publisher on the same {url} refused: {b:?}"
+    );
+
+    let c = wait_counters(&slot, "both publishes", |c| c.publishes == 2).await;
+    assert_eq!(c.connections_accepted, 2, "{c:?}");
+    assert_eq!(c.active_connections, 2, "both still connected: {c:?}");
+    assert!(c.bytes_received > 0, "{c:?}");
+
+    first.close().await;
+    second.close().await;
+    let c = wait_counters(&slot, "both publishers to leave", |c| {
+        c.active_connections == 0
+    })
+    .await;
+    assert_eq!(c.unpublishes, 2, "{c:?}");
+    slot.reconcile(async { false }).await;
+}
