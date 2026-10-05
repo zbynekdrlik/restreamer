@@ -77,21 +77,24 @@ baseline-relative, so none of them saw it.
     (audited with the trigger); a failure (rejected or timed out) only logs
     and returns to Idle: never a "connected" inpoint, never a retry ladder.
   - Every stream the receiver LEAVES without seeing it end is remembered
-    (`remembered`, deduplicated, via `remember()`): a stalled / retrying
-    SESSION a takeover or an `on_publish` of ANOTHER stream supersedes, an
-    in-flight probe such a Publish abandons, a deferred Publish a newer one
-    overwrites, and the previous last stream with a pending lag when
-    another stream's session starts (`begin_session`). A stream seen ending
-    (publisher closed, given up) is NOT remembered. Each time the receiver
-    is Idle with no session, `settle()` probes ONE remembered stream (most
-    recent first), and only then a pending lag. Probing a stream or starting
-    its session forgets it. A stalled publisher stays registered at the hub
-    and can resume without a new Publish; two keys do reach stream.lan (OBS
-    `live/obs-e2e-test`, the CI ffmpeg `live/ci-e2e-test`). Each remembered
-    entry costs at most one probe and each lag at most one more: never a
+    (`remembered`, deduplicated, via `remember()`): a NON-streaming SESSION
+    (stalled, retrying, first Subscribe in flight) a takeover or an
+    `on_publish` of ANOTHER stream supersedes, an in-flight probe such a
+    Publish abandons, a deferred Publish a newer one overwrites, and the
+    previous last stream with a pending lag when another stream's session
+    starts (`begin_session`). Seeing a stream end (publisher closed, given
+    up, UnPublish) never remembers it by itself; a pending lag still can.
+    Each time the receiver is Idle with no session, `settle()` probes ONE
+    remembered stream (most recent first), and only then a pending lag.
+    Sending any probe of a stream or starting its session forgets it. A
+    stalled publisher stays registered at the hub and can resume without a
+    new Publish; two keys do reach stream.lan (OBS `live/obs-e2e-test`, the
+    CI ffmpeg `live/ci-e2e-test`). Each remembered entry costs at most one
+    probe, and a lag at most one probe per stream it can belong to: never a
     loop. Do not patch one more path with its own flag: feed `remember()`.
-    Accepted limit: nothing remembered is probed while a session runs its
-    retry ladder.
+    An UnPublish (streamhub 0.2.4 sends none) ends only the session of the
+    stream it names and drops a matching deferral. Accepted limit: nothing
+    remembered is probed while a session runs its retry ladder.
   - A successful re-subscribe after frames flowed (`dirty`) also re-anchors,
     because xiu has no session id.
   - streamhub NEVER broadcasts UnPublish; an end is a closed frame channel.
@@ -100,7 +103,8 @@ baseline-relative, so none of them saw it.
     nothing remembered is left) it probes `last_identifier`. A lag while
     streaming can hide the live stream's own reconnect Publish.
     `begin_session` (the ONE place the last stream changes) settles it:
-    another previous stream is remembered, the same one is covered. Sending
+    another previous stream is remembered; for the same one the Publish or
+    probe read after the lag is newer than anything it lost. Sending
     ANY probe of `last_identifier` clears it (`send_subscribe`); `settle`
     consumes it when it sends the lag probe; a lag during a probe sets it
     again. An accepted Subscribe sets it to `lagged`: a lag while that
