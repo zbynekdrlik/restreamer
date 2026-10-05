@@ -259,3 +259,70 @@ async fn an_overwritten_deferred_publish_is_remembered() {
         "the newest deferred Publish first, then the one it overwrote"
     );
 }
+
+/// Eighth review (#367): an UnPublish (streamhub 0.2.4 never sends one; the
+/// manifest allows any 0.2.x) ends only the session of the stream it names.
+/// An UnPublish of ANOTHER stream must leave the live one alone.
+#[tokio::test(start_paused = true)]
+async fn an_unpublish_of_another_stream_leaves_the_live_one_alone() {
+    let _wd = watchdog("an_unpublish_of_another_stream_leaves_the_live_one_alone");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    let frames_a = stream(&event_tx, &mut requests, &live).await;
+    event_tx
+        .send(BroadcastEvent::UnPublish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        state.is_connected(),
+        "an UnPublish of another stream must not end the live session"
+    );
+
+    event_tx
+        .send(BroadcastEvent::UnPublish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !state.is_connected(),
+        "an UnPublish of the live stream ends its session"
+    );
+    drop(frames_a);
+}
+
+/// Eighth review (#367): an UnPublish of a DEFERRED stream drops the
+/// deferral: once the live stream ends, nothing is taken over.
+#[tokio::test(start_paused = true)]
+async fn an_unpublish_drops_a_matching_deferred_publish() {
+    let _wd = watchdog("an_unpublish_drops_a_matching_deferred_publish");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+
+    let frames_a = stream(&event_tx, &mut requests, &live).await;
+    for event in [
+        BroadcastEvent::Publish {
+            identifier: other.clone(),
+        },
+        BroadcastEvent::UnPublish {
+            identifier: other.clone(),
+        },
+    ] {
+        event_tx.send(event).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    drop(frames_a);
+    assert_eq!(
+        rejected_probes(&mut requests, Duration::from_secs(60)).await,
+        Vec::<StreamIdentifier>::new(),
+        "an unpublished deferred stream is not taken over"
+    );
+}
