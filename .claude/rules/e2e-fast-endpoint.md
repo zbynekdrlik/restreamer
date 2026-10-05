@@ -5,6 +5,9 @@ paths:
   - "crates/rs-delivery/src/api.rs"
   - "crates/rs-delivery/src/test_file_sink*.rs"
   - "crates/rs-delivery/src/endpoint_rtmp_url.rs"
+  - "crates/rs-delivery/src/endpoint_start.rs"
+  - "crates/rs-delivery/src/endpoint_task.rs"
+  - "crates/rs-delivery/src/rescue.rs"
   - "crates/rs-delivery/tests/test_file_sink_e2e.rs"
   - "leptos-ui/src/components/endpoint_tree.rs"
   - "e2e/frontend.spec.ts"
@@ -26,6 +29,14 @@ paths:
   "Assert fast-endpoint audit (#192)" reads them and requires the byte
   counter to RISE (host `alive` alone is the blind spot that hid #192).
   Before #192 nothing listened, so TEST_FILE silently never delivered.
+- **Never fall back to `ServiceType::TestFile`.** Now that TEST_FILE is a real
+  discard sink, `parse().unwrap_or(TestFile)` would "deliver" an unknown
+  service type into a black hole while looking alive. `endpoint_loop` parses
+  the type ONCE (`endpoint_start::service_type_or_refuse`) and passes the
+  `ServiceType` down to warmup and the consumer; an unknown type refuses to
+  start: error log, `last_error` + `stall_reason = "unknown_service_type"` +
+  `delivery_mode = "refused"` in the VPS status, and an
+  `EndpointFfmpegRestartFailed` row with `phase: "service_type"`.
 - **Every alias a strict CI gate looks up must be seeded by CI itself.** The
   OBS-to-YouTube job creates `e2e fast` (TEST_FILE, key `ci-fast`, is_fast)
   in its pin step and attaches it; `e2e rtmp` is key-synced from

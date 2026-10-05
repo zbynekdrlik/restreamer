@@ -32,6 +32,12 @@ the MUTATED crate. Once it is real (integ-b3 76d9517e), any MISSED mutant
   each such test with a real-time watchdog that aborts the test process
   after 30 s (`media_receiver_tests.rs` `watchdog()`), and bound every loop
   over a channel by a count, not only by a virtual-time timeout.
+- **A test that reads state only AFTER the function returned misses a
+  mid-run mutant.** `run_warmup_loop`'s `if !ep_cfg.is_fast` -> `if
+  ep_cfg.is_fast` survived (#192): the fast-endpoint test read the stats after
+  warmup ended, when the end had already reset the mode to "normal". Probe
+  the state WHILE the loop runs (unreachable target + a probe task that sends
+  the stop), as `warmup_fast_endpoint_never_shows_warmup_while_filling` does.
 - **Equivalent mutants are not a reason to weaken the code.** If `x > 0` vs
   `x >= 0` truly changes nothing, restructure (`std::mem::take` + a tested
   helper) rather than leave a survivor.

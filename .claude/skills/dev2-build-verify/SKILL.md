@@ -522,3 +522,19 @@ node mock-api.js >/tmp/mock.log 2>&1 </dev/null & )`.
   ssh body with `export PATH="$HOME/.cargo/bin:$PATH"` (the `~/.cargo/bin/cargo`
   full-path trick works only for a direct `cargo` call, NOT for trunk shelling
   out to `cargo metadata`).
+- **Every frontend test fails in ~3 ms = the Playwright browser build is
+  missing, not a code bug** (#367 integration lane). The lane's
+  `e2e/node_modules/@playwright/test` version needs its own
+  `chromium_headless_shell-<NNNN>` under `~/.cache/ms-playwright`; a lane copied
+  from an older checkout can carry a newer Playwright than the installed
+  browsers. Run one spec in the foreground to see `browserType.launch:
+  Executable doesn't exist at .../chromium_headless_shell-NNNN/...`, then
+  `cd <lane>/e2e && npx playwright install chromium` (~110 MB, shared cache).
+- **`trunk build` writes to the REPO-ROOT `dist/`** (`leptos-ui/Trunk.toml`
+  `dist = "../dist"`), not `leptos-ui/dist`. The mock serves that root `dist/`.
+- **E2E in its own lane copy while cargo-mutants runs `--in-place`.** An
+  in-place mutants run edits the lane's sources, so build/test nothing else in
+  that checkout until it ends. Copy a SECOND lane (`cp -al` from a warm
+  checkout, then rsync the worktree) for trunk + Playwright. Before an
+  in-place run, `stat -c %h` the mutated files: link count 1 means rsync
+  already replaced them, so no hardlinked sibling checkout gets mutated too.
