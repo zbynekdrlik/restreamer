@@ -45,13 +45,24 @@ impl StallLog {
     /// already holds `max_bytes` or more. The record is `sync_data`'d: stall
     /// records are rare and are exactly the evidence that must survive a crash
     /// that may follow the freeze.
-    pub fn append(&self, record: &Value) -> std::io::Result<()> {
+    ///
+    /// A failed rotation (e.g. another process holds `stall.log.old` open)
+    /// must not cost the record: it is appended to the un-rotated file and the
+    /// rotation error comes back as `Ok(Some(warning))`. `Err` means the record
+    /// itself was not written.
+    pub fn append(&self, record: &Value) -> std::io::Result<Option<String>> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
+        let mut warning = None;
         if let Ok(meta) = fs::metadata(&self.path) {
             if meta.len() >= self.max_bytes {
-                fs::rename(&self.path, self.rotated_path())?;
+                if let Err(e) = fs::rename(&self.path, self.rotated_path()) {
+                    warning = Some(format!(
+                        "rotation to {} failed ({e:?}); appending to the un-rotated file",
+                        self.rotated_path().display()
+                    ));
+                }
             }
         }
         let mut line = serde_json::to_string(record)?;
@@ -61,7 +72,8 @@ impl StallLog {
             .append(true)
             .open(&self.path)?;
         file.write_all(line.as_bytes())?;
-        file.sync_data()
+        file.sync_data()?;
+        Ok(warning)
     }
 }
 
@@ -110,8 +122,9 @@ fn header(event: &str, at: WallAnchor) -> serde_json::Map<String, Value> {
     m
 }
 
-/// Written once when the detector thread starts, so an ABSENT `stall_start`
-/// line provably means "no stall" rather than "detector not running".
+/// Written once when the detector thread starts. With `detector_stopped`
+/// written on every exit path (stop, runtime shutdown, panic), an absent
+/// `stall_start` between the two means "no stall", never "detector not running".
 pub fn started_record(
     probe_interval: Duration,
     stall_threshold: Duration,
@@ -130,29 +143,43 @@ pub fn started_record(
     Value::Object(m)
 }
 
-/// Written the moment a stall is DETECTED — while it is (for a runtime
-/// starvation) still ongoing, so `resources` is the in-stall reading. The
-/// `baseline` is the last healthy sample, for before/after comparison.
-pub fn stall_start_record(
-    start: &StallStart,
-    resources: &ResourceSnapshot,
-    baseline: Option<(&ResourceSnapshot, Duration)>,
-    at: WallAnchor,
-) -> Value {
+/// Written on every detector exit: `stop_requested`, `runtime_shut_down`, or
+/// `panic: <message>` (the thread caught it; no later stall will be recorded).
+pub fn stopped_record(reason: &str, at: WallAnchor) -> Value {
+    let mut m = header("detector_stopped", at);
+    m.insert("reason".into(), json!(reason));
+    Value::Object(m)
+}
+
+/// Everything captured when a stall was DETECTED, kept until it ends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectedStall {
+    pub start: StallStart,
+    /// Read at detection: mid-stall for `runtime_starved`, right AFTER the
+    /// freeze for a `whole_process` stall (the detector could not run during it).
+    pub at_detect: ResourceSnapshot,
+    /// The last healthy sample and its age at detection: the pre-stall state.
+    pub baseline: Option<(ResourceSnapshot, Duration)>,
+}
+
+fn baseline_json(baseline: &Option<(ResourceSnapshot, Duration)>) -> Value {
+    match baseline {
+        Some((snap, age)) => json!({ "age_ms": ms(*age), "resources": snap.to_json() }),
+        None => Value::Null,
+    }
+}
+
+/// Written the moment a stall is DETECTED.
+pub fn stall_start_record(detected: &DetectedStall, at: WallAnchor) -> Value {
+    let start = &detected.start;
     let mut m = header("stall_start", at);
     m.insert("started_at".into(), json!(at.wall_of(start.started_at)));
     m.insert("detected_at".into(), json!(at.wall_of(start.detected_at)));
     m.insert("trigger".into(), json!(start.trigger.as_str()));
     m.insert("probe_age_ms".into(), json!(start.probe_age.map(ms)));
     m.insert("detector_late_ms".into(), json!(ms(start.detector_late)));
-    m.insert("resources".into(), resources.to_json());
-    m.insert(
-        "baseline".into(),
-        match baseline {
-            Some((snap, age)) => json!({ "age_ms": ms(age), "resources": snap.to_json() }),
-            None => Value::Null,
-        },
-    );
+    m.insert("resources".into(), detected.at_detect.to_json());
+    m.insert("baseline".into(), baseline_json(&detected.baseline));
     Value::Object(m)
 }
 
@@ -169,11 +196,12 @@ pub fn stall_end_record(
 }
 
 /// Detail JSON of the `ProcessStall` audit row: the report fields plus the
-/// in-stall and post-stall resource readings, where the full evidence lives,
-/// and any `stall.log` write error (which could not be logged mid-stall).
+/// pre-stall baseline, the reading at detection and the post-stall reading,
+/// where the full evidence lives, and any `stall.log` write error (which could
+/// not be logged mid-stall).
 pub fn audit_detail(
     report: &StallReport,
-    start: Option<(&StallStart, &ResourceSnapshot)>,
+    detected: Option<&DetectedStall>,
     end_resources: &ResourceSnapshot,
     log_path: &Path,
     write_error: Option<String>,
@@ -182,11 +210,15 @@ pub fn audit_detail(
     let mut m = report_fields(report, at);
     m.insert(
         "probe_age_at_detect_ms".into(),
-        json!(start.and_then(|(s, _)| s.probe_age).map(ms)),
+        json!(detected.and_then(|d| d.start.probe_age).map(ms)),
     );
     m.insert(
-        "resources_at_start".into(),
-        start.map_or(Value::Null, |(_, r)| r.to_json()),
+        "baseline".into(),
+        detected.map_or(Value::Null, |d| baseline_json(&d.baseline)),
+    );
+    m.insert(
+        "resources_at_detect".into(),
+        detected.map_or(Value::Null, |d| d.at_detect.to_json()),
     );
     m.insert("resources_at_end".into(), end_resources.to_json());
     m.insert("stall_log".into(), json!(log_path.display().to_string()));

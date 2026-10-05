@@ -45,7 +45,7 @@ pub mod resources;
 mod stall_log;
 
 use resources::ResourceSnapshot;
-pub use stall_log::{StallLog, WallAnchor};
+pub use stall_log::{DetectedStall, StallLog, WallAnchor};
 
 /// How often the detector wakes, and sends a runtime probe when none is in flight.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
@@ -112,8 +112,8 @@ pub enum StallTrigger {
     /// A probe WAS answered, but its round trip took `stall_threshold` or more:
     /// the detector was frozen too, so it only saw the late answer.
     ProbeSlow,
-    /// The detector's own wait overshot by `stall_threshold` with no probe in
-    /// flight. The probe usually answers in microseconds, so a freeze that
+    /// The detector's own wait lasted `stall_threshold` or longer with no probe
+    /// in flight. The probe usually answers in microseconds, so a freeze that
     /// starts between probes is visible ONLY this way.
     DetectorLate,
 }
@@ -186,8 +186,19 @@ struct Probe {
 struct OpenStall {
     started_at: Instant,
     trigger: StallTrigger,
+    /// The first probe whose answer proves the runtime responsive again.
+    close_seq: u64,
     max_late: Duration,
     total_late: Duration,
+}
+
+/// What a tick revealed: a stall beginning at `started_at`.
+#[derive(Debug, Clone, Copy)]
+struct Detection {
+    started_at: Instant,
+    trigger: StallTrigger,
+    probe_age: Option<Duration>,
+    close_seq: u64,
 }
 
 /// Pure stall state machine. Exactly one probe is in flight at a time, so a
@@ -235,10 +246,8 @@ impl StallTracker {
 
     pub fn observe(&mut self, obs: TickObservation) -> TickOutcome {
         let mut out = TickOutcome::default();
-        let late = obs
-            .now
-            .saturating_duration_since(obs.tick_start)
-            .saturating_sub(self.probe_interval);
+        let slept = obs.now.saturating_duration_since(obs.tick_start);
+        let late = slept.saturating_sub(self.probe_interval);
 
         // 1. Did the runtime answer the in-flight probe?
         let completed = match (self.outstanding, obs.latest_ack) {
@@ -253,27 +262,26 @@ impl StallTracker {
         if let Some(open) = self.open.as_mut() {
             open.max_late = open.max_late.max(late);
             open.total_late += late;
-        } else if let Some((started_at, trigger, probe_age)) = self.detect(&obs, completed, late) {
+        } else if let Some(d) = self.detect(&obs, completed, slept) {
             self.open = Some(OpenStall {
-                started_at,
-                trigger,
+                started_at: d.started_at,
+                trigger: d.trigger,
+                close_seq: d.close_seq,
                 max_late: late,
                 total_late: late,
             });
             out.started = Some(StallStart {
-                started_at,
+                started_at: d.started_at,
                 detected_at: obs.now,
-                trigger,
-                probe_age,
+                trigger: d.trigger,
+                probe_age: d.probe_age,
                 detector_late: late,
             });
         }
 
-        // 3. Close it once a probe sent at/after the stall began is answered.
-        // (A `DetectorLate` stall starts AFTER the last probe was answered, so
-        // it needs a fresh probe to prove the runtime is responsive again.)
+        // 3. Close it once its closing probe (or a later one) is answered.
         if let (Some(open), Some((probe, acked_at))) = (self.open, completed) {
-            if probe.sent_at >= open.started_at {
+            if probe.seq >= open.close_seq {
                 let class = if open.max_late >= self.tick_late_threshold {
                     StallClass::WholeProcess
                 } else {
@@ -299,38 +307,48 @@ impl StallTracker {
         out
     }
 
-    /// Returns `(started_at, trigger, probe_age)` when this tick reveals a stall.
+    /// The stall this tick reveals, if any. `slept` is how long the detector
+    /// itself was silent this tick.
     fn detect(
         &self,
         obs: &TickObservation,
         completed: Option<(Probe, Instant)>,
-        late: Duration,
-    ) -> Option<(Instant, StallTrigger, Option<Duration>)> {
+        slept: Duration,
+    ) -> Option<Detection> {
         let by_probe = match (completed, self.outstanding) {
             (Some((p, acked_at)), _) => {
                 let rtt = acked_at.saturating_duration_since(p.sent_at);
-                (rtt >= self.stall_threshold).then_some((
-                    p.sent_at,
-                    StallTrigger::ProbeSlow,
-                    Some(rtt),
-                ))
+                (rtt >= self.stall_threshold).then_some(Detection {
+                    started_at: p.sent_at,
+                    trigger: StallTrigger::ProbeSlow,
+                    probe_age: Some(rtt),
+                    close_seq: p.seq,
+                })
             }
             (None, Some(p)) => {
                 let age = obs.now.saturating_duration_since(p.sent_at);
-                (age >= self.stall_threshold).then_some((
-                    p.sent_at,
-                    StallTrigger::ProbeOverdue,
-                    Some(age),
-                ))
+                (age >= self.stall_threshold).then_some(Detection {
+                    started_at: p.sent_at,
+                    trigger: StallTrigger::ProbeOverdue,
+                    probe_age: Some(age),
+                    close_seq: p.seq,
+                })
             }
             (None, None) => None,
         };
+        // The detector itself was silent for the whole threshold: the same
+        // "no sign of life for 5 s" rule, measured from the last instant this
+        // thread was known to be running. No probe is in flight here (one
+        // would be at least as old, i.e. overdue), and the one answered before
+        // the freeze proves nothing about now: only the FRESH probe issued at
+        // the end of this tick may close it.
         by_probe.or_else(|| {
-            (late >= self.stall_threshold).then_some((
-                obs.tick_start + self.probe_interval,
-                StallTrigger::DetectorLate,
-                None,
-            ))
+            (slept >= self.stall_threshold).then_some(Detection {
+                started_at: obs.tick_start,
+                trigger: StallTrigger::DetectorLate,
+                probe_age: None,
+                close_seq: self.next_seq + 1,
+            })
         })
     }
 }
@@ -349,8 +367,9 @@ pub fn process_stall_audit_row(detail: Value) -> AuditRow {
     }
 }
 
-/// Stops the detector thread when dropped (it exits on its next wake-up; the
-/// drop never blocks, so it is safe at the end of an async fn).
+/// Stops the detector thread when dropped: dropping it drops the stop sender,
+/// and the thread exits on its next wake-up. The drop never blocks, so it is
+/// safe at the end of an async fn.
 #[derive(Debug)]
 pub struct StallDetectorGuard {
     stop_tx: Option<std_mpsc::Sender<()>>,
@@ -369,13 +388,6 @@ impl StallDetectorGuard {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-    }
-}
-
-impl Drop for StallDetectorGuard {
-    fn drop(&mut self) {
-        // Disconnects the stop channel; the thread sees it on its next wake-up.
-        self.stop_tx.take();
     }
 }
 
@@ -447,6 +459,12 @@ impl BaselineSchedule {
         }
     }
 
+    /// One detector tick: never refresh the baseline while a stall is open (it
+    /// must stay the PRE-stall state); otherwise count it as a healthy tick.
+    fn due(&mut self, in_stall: bool) -> bool {
+        !in_stall && self.tick()
+    }
+
     /// Count one healthy tick; true when a baseline sample is due now.
     fn tick(&mut self) -> bool {
         self.since += 1;
@@ -473,6 +491,33 @@ impl ProbeAck {
     }
 }
 
+/// Why the detector thread ended its loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopExit {
+    StopRequested,
+    RuntimeShutDown,
+}
+
+impl LoopExit {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StopRequested => "stop_requested",
+            Self::RuntimeShutDown => "runtime_shut_down",
+        }
+    }
+}
+
+/// The text of a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// The thread-side state: the pure tracker plus everything that does I/O.
 struct Detector {
     handle: Handle,
@@ -484,7 +529,7 @@ struct Detector {
     probe: Option<(u64, tokio::task::JoinHandle<()>)>,
     baseline: Option<(Instant, ResourceSnapshot)>,
     baseline_schedule: BaselineSchedule,
-    open: Option<(StallStart, ResourceSnapshot)>,
+    open: Option<DetectedStall>,
     write_error: Option<String>,
 }
 
@@ -509,7 +554,30 @@ impl Detector {
         }
     }
 
+    /// Thread body. Every exit path (stop, runtime shutdown, or a caught
+    /// panic) leaves a `detector_stopped` record, so silence in `stall.log`
+    /// is never ambiguous.
     fn run(mut self, stop_rx: std_mpsc::Receiver<()>) {
+        let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.start();
+            self.tick_loop(&stop_rx)
+        }));
+        let reason = match exit {
+            Ok(exit) => exit.as_str().to_string(),
+            Err(payload) => {
+                let reason = format!("panic: {}", panic_message(payload.as_ref()));
+                // The thread is ending either way; a blocked log call here
+                // cannot hide anything the detector would still have recorded.
+                log::error!(
+                    "process-stall detector died ({reason}); stalls are no longer recorded"
+                );
+                reason
+            }
+        };
+        self.write(&stall_log::stopped_record(&reason, WallAnchor::read()));
+    }
+
+    fn start(&mut self) {
         let snap = resources::sample();
         self.write(&stall_log::started_record(
             self.config.probe_interval,
@@ -518,8 +586,9 @@ impl Detector {
             &snap,
             WallAnchor::read(),
         ));
-        if let Some(err) = &self.write_error {
-            // Startup, not a stall: the log pipeline is safe to use.
+        // Startup, not a stall: the log pipeline is safe to use. Taken, so a
+        // later stall row reports only errors from ITS OWN records.
+        if let Some(err) = self.write_error.take() {
             log::warn!(
                 "process-stall detector cannot write its evidence file ({err}); stalls will reach the audit log only"
             );
@@ -528,16 +597,20 @@ impl Detector {
         self.baseline = Some((now, snap));
         let seq = self.tracker.start(now);
         self.send_probe(seq);
+    }
 
+    fn tick_loop(&mut self, stop_rx: &std_mpsc::Receiver<()>) -> LoopExit {
         loop {
             let tick_start = Instant::now();
             match stop_rx.recv_timeout(self.config.probe_interval) {
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {}
-                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    return LoopExit::StopRequested;
+                }
             }
             let now = Instant::now();
             if self.runtime_gone() {
-                return;
+                return LoopExit::RuntimeShutDown;
             }
             let outcome = self.tracker.observe(TickObservation {
                 tick_start,
@@ -580,40 +653,52 @@ impl Detector {
         }
 
         if let Some(start) = outcome.started {
-            let snap = resources::sample();
-            let baseline = self
-                .baseline
-                .as_ref()
-                .map(|(at, s)| (s, now.saturating_duration_since(*at)));
-            let record = stall_log::stall_start_record(&start, &snap, baseline, WallAnchor::read());
-            self.write(&record);
-            self.open = Some((start, snap));
+            let detected = DetectedStall {
+                start,
+                at_detect: resources::sample(),
+                baseline: self
+                    .baseline
+                    .as_ref()
+                    .map(|(at, snap)| (snap.clone(), now.saturating_duration_since(*at))),
+            };
+            self.write(&stall_log::stall_start_record(
+                &detected,
+                WallAnchor::read(),
+            ));
+            self.open = Some(detected);
         }
 
         if let Some(report) = outcome.ended {
             let snap = resources::sample();
             let at = WallAnchor::read();
             self.write(&stall_log::stall_end_record(&report, &snap, at));
-            let open = self.open.take();
+            let detected = self.open.take();
             let detail = stall_log::audit_detail(
                 &report,
-                open.as_ref().map(|(start, start_snap)| (start, start_snap)),
+                detected.as_ref(),
                 &snap,
                 self.log.path(),
                 self.write_error.take(),
                 at,
             );
             self.emit_after_recovery(&report, detail);
-        } else if !self.tracker.in_stall() && self.baseline_schedule.tick() {
+        } else if self.baseline_schedule.due(self.tracker.in_stall()) {
             self.baseline = Some((now, resources::sample()));
         }
     }
 
     fn write(&mut self, record: &Value) {
-        if let Err(e) = self.log.append(record) {
-            // No `log` here: this may run mid-stall. The error rides on the
-            // next ProcessStall audit row and its post-recovery warning.
-            self.write_error = Some(format!("{}: {e:?}", self.log.path().display()));
+        // No `log` here: this may run mid-stall. A failure (or a failed
+        // rotation) rides on the next ProcessStall audit row and its
+        // post-recovery warning instead.
+        match self.log.append(record) {
+            Ok(None) => {}
+            Ok(Some(warning)) => {
+                self.write_error = Some(format!("{}: {warning}", self.log.path().display()));
+            }
+            Err(e) => {
+                self.write_error = Some(format!("{}: {e:?}", self.log.path().display()));
+            }
         }
     }
 

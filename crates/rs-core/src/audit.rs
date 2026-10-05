@@ -176,9 +176,10 @@ pub enum Action {
     /// `whole_process` (the OS did not run the process at all). Severity::Warn,
     /// Source::System. Detail JSON: {class, trigger, started_at, ended_at,
     /// duration_ms, detector_max_late_ms, detector_total_late_ms,
-    /// probe_age_at_detect_ms, resources_at_start, resources_at_end, stall_log,
-    /// stall_log_error}. Full evidence (incl. a pre-stall baseline) is in
-    /// `logs/stall.log`.
+    /// probe_age_at_detect_ms, baseline {age_ms, resources} (the last healthy,
+    /// PRE-stall reading), resources_at_detect (mid-stall for runtime_starved,
+    /// right after the freeze for whole_process), resources_at_end, stall_log,
+    /// stall_log_error}. The same evidence is in `logs/stall.log`.
     ProcessStall,
     /// Local chunk-store volume crossed a disk-pressure threshold on the
     /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --

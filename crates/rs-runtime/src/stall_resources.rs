@@ -80,90 +80,69 @@ impl ResourceSnapshot {
     }
 }
 
+/// Raw `PROCESS_MEMORY_COUNTERS_EX` values, all bytes except the fault count.
+/// A plain struct so the mapping into a snapshot is testable on every platform.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessCounters {
+    pub working_set: usize,
+    pub private_usage: usize,
+    pub page_faults: u32,
+    pub paged_pool_quota: usize,
+    pub nonpaged_pool_quota: usize,
+}
+
+/// Raw `PERFORMANCE_INFORMATION` values. The memory figures are in PAGES of
+/// `page_size` bytes; the counts are plain counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PerformancePages {
+    pub commit_total: usize,
+    pub commit_limit: usize,
+    pub physical_total: usize,
+    pub physical_available: usize,
+    pub kernel_paged: usize,
+    pub kernel_nonpaged: usize,
+    pub page_size: usize,
+    pub handle_count: u32,
+    pub process_count: u32,
+    pub thread_count: u32,
+}
+
+impl ResourceSnapshot {
+    pub fn set_process_counters(&mut self, c: ProcessCounters) {
+        self.working_set_bytes = Some(c.working_set as u64);
+        self.private_bytes = Some(c.private_usage as u64);
+        self.page_fault_count = Some(u64::from(c.page_faults));
+        self.process_paged_pool_bytes = Some(c.paged_pool_quota as u64);
+        self.process_nonpaged_pool_bytes = Some(c.nonpaged_pool_quota as u64);
+    }
+
+    /// Scales the page-denominated memory figures to bytes.
+    pub fn set_performance(&mut self, p: PerformancePages) {
+        let page = p.page_size as u64;
+        self.commit_total_bytes = Some(p.commit_total as u64 * page);
+        self.commit_limit_bytes = Some(p.commit_limit as u64 * page);
+        self.physical_total_bytes = Some(p.physical_total as u64 * page);
+        self.physical_available_bytes = Some(p.physical_available as u64 * page);
+        self.kernel_paged_pool_bytes = Some(p.kernel_paged as u64 * page);
+        self.kernel_nonpaged_pool_bytes = Some(p.kernel_nonpaged as u64 * page);
+        self.system_handle_count = Some(u64::from(p.handle_count));
+        self.system_process_count = Some(u64::from(p.process_count));
+        self.system_thread_count = Some(u64::from(p.thread_count));
+    }
+}
+
 /// Take a snapshot of this process and the system. Never panics, never logs.
 pub fn sample() -> ResourceSnapshot {
     platform::sample()
 }
 
+// The Windows FFI lives in its own file: it only compiles for Windows, so the
+// ubuntu mutation job excludes it (ci.yml), and the windows-latest Test job
+// runs it for real (`resource_sample_reads_real_process_and_system_memory`).
+// All arithmetic stays in the cross-platform helpers above.
 #[cfg(windows)]
-mod platform {
-    use super::ResourceSnapshot;
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetPerformanceInfo, GetProcessMemoryInfo, PERFORMANCE_INFORMATION, PROCESS_MEMORY_COUNTERS,
-        PROCESS_MEMORY_COUNTERS_EX,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
-
-    fn os_error(api: &str) -> String {
-        format!("{api}: {}", std::io::Error::last_os_error())
-    }
-
-    pub(super) fn sample() -> ResourceSnapshot {
-        let mut s = ResourceSnapshot::default();
-
-        // SAFETY: `GetCurrentProcess` takes no arguments and returns a
-        // pseudo-handle for this process that is always valid and never needs
-        // closing.
-        let process = unsafe { GetCurrentProcess() };
-
-        let mut pmc = PROCESS_MEMORY_COUNTERS_EX {
-            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `pmc` is a properly aligned, writable PROCESS_MEMORY_COUNTERS_EX
-        // whose `cb` states its real size; the API accepts the EX layout through
-        // the base-struct pointer when `cb` says so (documented psapi contract).
-        let ok = unsafe {
-            GetProcessMemoryInfo(
-                process,
-                (&mut pmc as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
-                pmc.cb,
-            )
-        };
-        if ok != 0 {
-            s.working_set_bytes = Some(pmc.WorkingSetSize as u64);
-            s.private_bytes = Some(pmc.PrivateUsage as u64);
-            s.page_fault_count = Some(u64::from(pmc.PageFaultCount));
-            s.process_paged_pool_bytes = Some(pmc.QuotaPagedPoolUsage as u64);
-            s.process_nonpaged_pool_bytes = Some(pmc.QuotaNonPagedPoolUsage as u64);
-        } else {
-            s.errors.push(os_error("GetProcessMemoryInfo"));
-        }
-
-        let mut handles: u32 = 0;
-        // SAFETY: `process` is the current-process pseudo-handle and `handles`
-        // is a valid, writable u32 out-pointer.
-        if unsafe { GetProcessHandleCount(process, &mut handles) } != 0 {
-            s.handle_count = Some(u64::from(handles));
-        } else {
-            s.errors.push(os_error("GetProcessHandleCount"));
-        }
-
-        let mut perf = PERFORMANCE_INFORMATION {
-            cb: size_of::<PERFORMANCE_INFORMATION>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `perf` is a valid, writable PERFORMANCE_INFORMATION and `cb`
-        // states its real size.
-        if unsafe { GetPerformanceInfo(&mut perf, perf.cb) } != 0 {
-            // Memory figures are reported in PAGES; scale by the page size.
-            let page = perf.PageSize as u64;
-            s.commit_total_bytes = Some(perf.CommitTotal as u64 * page);
-            s.commit_limit_bytes = Some(perf.CommitLimit as u64 * page);
-            s.physical_total_bytes = Some(perf.PhysicalTotal as u64 * page);
-            s.physical_available_bytes = Some(perf.PhysicalAvailable as u64 * page);
-            s.kernel_paged_pool_bytes = Some(perf.KernelPaged as u64 * page);
-            s.kernel_nonpaged_pool_bytes = Some(perf.KernelNonpaged as u64 * page);
-            s.system_handle_count = Some(u64::from(perf.HandleCount));
-            s.system_process_count = Some(u64::from(perf.ProcessCount));
-            s.system_thread_count = Some(u64::from(perf.ThreadCount));
-        } else {
-            s.errors.push(os_error("GetPerformanceInfo"));
-        }
-
-        s
-    }
-}
+#[path = "stall_resources_windows.rs"]
+mod platform;
 
 #[cfg(not(windows))]
 mod platform {

@@ -13,9 +13,10 @@ On 2026-10-01 a 35.7 s freeze left only a hole in `restreamer.log`.
 `C:\ProgramData\Restreamer\logs\stall.log` (JSON lines, rotated to
 `stall.log.old` at 1 MB), plus `ProcessStall` audit rows (`/api/v1/audit?action=process_stall`).
 
-- Every process start writes a `detector_started` line. If that line is
-  there and no `stall_start` follows, there was no stall. It does NOT mean the
-  detector was missing.
+- Every process start writes a `detector_started` line, and every detector
+  exit writes `detector_stopped` with its reason. No `stall_start` between the
+  two (or after a still-running start) means there was no stall. It does NOT
+  mean the detector was missing.
 - `class` separates two kinds of stall:
   - `runtime_starved`: the OS kept running us, but tokio stopped polling.
   - `whole_process`: the detector thread itself was not scheduled.
@@ -40,11 +41,24 @@ On 2026-10-01 a 35.7 s freeze left only a hole in `restreamer.log`.
   cancels tasks spawned on (or owned by) a closed runtime; it does not panic.
   Read `JoinHandle::is_finished()` BEFORE the ack, or an answered probe can
   look cancelled. Never report shutdown as a stall.
-- **A `detector_late` stall closes only on a probe sent at or after
-  `started_at`.** The probe answered just before the freeze must not close it
-  (the rule is `probe.sent_at >= open.started_at`). Without the detector-late
-  trigger, a freeze that starts between probes is invisible, because probes
-  answer in microseconds.
+- **A stall closes only on its closing-probe SEQUENCE (`close_seq`), never on
+  a timestamp comparison.** For `probe_overdue` / `probe_slow` it is the probe
+  that revealed the stall. For `detector_late` it is the FRESH probe issued
+  after the freeze, because the probe answered just before the freeze proves
+  nothing about now.
+- **`detector_late` compares the detector's WHOLE silence (`now - tick_start`)
+  with the 5 s threshold, not just its overshoot past the 1 s wait.** Using only
+  the overshoot left a 5-6 s blind zone. Without this trigger at all, a freeze
+  that starts between probes is invisible, because probes answer in
+  microseconds.
+- **The Windows FFI (`stall_resources_windows.rs`) only copies raw fields.**
+  All arithmetic, including PERFORMANCE_INFORMATION pages × `PageSize`, lives
+  in the cross-platform `ResourceSnapshot::set_*` helpers. Those helpers are
+  unit-tested on Linux and mutation-tested by the ubuntu job, which excludes
+  the FFI file because it cannot compile it.
+- **Every exit writes `detector_stopped`** (`stop_requested`,
+  `runtime_shut_down`, or `panic: …`). The thread body runs under
+  `catch_unwind`, so silence in `stall.log` is never ambiguous.
 
 ## Testing
 

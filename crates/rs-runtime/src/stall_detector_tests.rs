@@ -16,9 +16,9 @@ fn cfg() -> StallDetectorConfig {
 }
 
 /// Drives a `StallTracker` the way the detector thread does, on a synthetic
-/// clock. `tick(sleep, ack_delay)` = the detector waits `sleep` (1 s when on
-/// time), and the runtime answers the in-flight probe `ack_delay` after it was
-/// sent (None = still unanswered at wake-up).
+/// clock. `tick(sleep)` = the detector waits `sleep` (1 s when on time);
+/// `answer_probe(after)` = the runtime runs the in-flight probe `after` its
+/// send time (until then the probe stays unanswered).
 struct Sim {
     tracker: StallTracker,
     now: Instant,
@@ -198,14 +198,14 @@ fn whole_process_freeze_between_probes_detected_by_detector_late() {
     let tick_start = sim.now;
 
     let out = sim.tick(ms_(36_000));
-    let start = out.started.expect("detector 35 s late = stall");
+    let start = out.started.expect("detector silent 36 s = stall");
     assert_eq!(start.trigger, StallTrigger::DetectorLate);
     assert_eq!(
-        start.started_at,
-        tick_start + S,
-        "when the tick should have fired"
+        start.started_at, tick_start,
+        "last instant the detector was known running"
     );
     assert_eq!(start.probe_age, None);
+    assert_eq!(start.detector_late, ms_(35_000));
     assert_eq!(out.ended, None, "the pre-freeze answer must not close it");
     let fresh = out.send_probe.expect("fresh probe after the freeze");
 
@@ -214,16 +214,69 @@ fn whole_process_freeze_between_probes_detected_by_detector_late() {
     let report = out.ended.expect("fresh probe answered");
     assert_eq!(report.class, StallClass::WholeProcess);
     assert_eq!(report.trigger, StallTrigger::DetectorLate);
-    assert_eq!(report.duration, ms_(35_002));
+    assert_eq!(report.duration, ms_(36_002));
     assert!(out.send_probe.is_some_and(|s| s > fresh));
 }
 
 #[test]
-fn detector_late_below_threshold_alone_is_not_a_stall() {
+fn detector_silent_below_threshold_alone_is_not_a_stall() {
     let mut sim = Sim::new();
     sim.answer_probe(ms_(1));
-    let out = sim.tick(ms_(5_999)); // 4.999 s late
+    let out = sim.tick(ms_(4_999));
     assert_eq!((out.started, out.ended), (None, None));
+}
+
+/// The no-sign-of-life rule counts the detector's WHOLE silence, not just its
+/// overshoot beyond the 1 s wait: 5 s silent is a stall, whatever the phase.
+#[test]
+fn detector_silent_for_exactly_the_threshold_is_a_stall() {
+    let mut sim = Sim::new();
+    sim.answer_probe(ms_(1));
+    let out = sim.tick(ms_(5_000));
+    let start = out.started.expect("5 s of detector silence");
+    assert_eq!(start.trigger, StallTrigger::DetectorLate);
+    assert_eq!(start.detector_late, ms_(4_000));
+    sim.answer_probe(ms_(1));
+    let report = sim.tick(S).ended.expect("fresh probe answered");
+    assert_eq!(report.class, StallClass::WholeProcess);
+    assert_eq!(report.duration, ms_(5_001));
+}
+
+/// `start()` must register the first probe as in flight: a runtime that never
+/// runs it is a stall that began at the detector's start.
+#[test]
+fn the_start_probe_is_in_flight_and_can_reveal_a_stall() {
+    let mut tracker = StallTracker::new(&cfg());
+    let t0 = Instant::now();
+    assert_eq!(tracker.start(t0), 1);
+    let mut now = t0;
+    for i in 1..=5 {
+        let tick_start = now;
+        now += S;
+        let out = tracker.observe(TickObservation {
+            tick_start,
+            now,
+            latest_ack: None,
+        });
+        assert_eq!(
+            out.send_probe, None,
+            "start probe still in flight (tick {i})"
+        );
+        if i < 5 {
+            assert_eq!(out.started, None);
+        } else {
+            let start = out.started.expect("start probe unanswered for 5 s");
+            assert_eq!(start.trigger, StallTrigger::ProbeOverdue);
+            assert_eq!(start.started_at, t0);
+        }
+    }
+    let out = tracker.observe(TickObservation {
+        tick_start: now,
+        now: now + S,
+        latest_ack: Some((1, t0 + ms_(5_500))),
+    });
+    assert_eq!(out.ended.expect("answered").duration, ms_(5_500));
+    assert_eq!(out.send_probe, Some(2));
 }
 
 #[test]
@@ -326,9 +379,11 @@ fn stall_log_rotates_to_old_once_the_file_reaches_the_cap() {
     // `{"event":"first"}` + newline is exactly 18 bytes: the file sits AT the
     // cap after one append, which must already trigger the rotation.
     let log = StallLog::new(path.clone(), 18);
-    log.append(&serde_json::json!({"event": "first"})).unwrap();
+    let first = log.append(&serde_json::json!({"event": "first"})).unwrap();
+    assert_eq!(first, None);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 18);
-    log.append(&serde_json::json!({"event": "b"})).unwrap();
+    let rotated = log.append(&serde_json::json!({"event": "b"})).unwrap();
+    assert_eq!(rotated, None, "a successful rotation is not a warning");
     log.append(&serde_json::json!({"event": "c"})).unwrap();
 
     assert_eq!(log.rotated_path(), dir.path().join("stall.log.old"));
@@ -339,6 +394,31 @@ fn stall_log_rotates_to_old_once_the_file_reaches_the_cap() {
     assert_eq!(current.len(), 2, "below the cap, appends continue in place");
     assert_eq!(current[0]["event"], "b");
     assert_eq!(current[1]["event"], "c");
+}
+
+/// Another process holding `stall.log.old` must not cost the evidence record.
+#[test]
+fn stall_log_failed_rotation_still_appends_and_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stall.log");
+    let log = StallLog::new(path.clone(), 18);
+    // A non-empty DIRECTORY at the rotation target makes the rename fail on
+    // every platform.
+    std::fs::create_dir(log.rotated_path()).unwrap();
+    std::fs::write(log.rotated_path().join("keep"), b"x").unwrap();
+
+    assert_eq!(
+        log.append(&serde_json::json!({"event": "first"})).unwrap(),
+        None
+    );
+    let warning = log
+        .append(&serde_json::json!({"event": "second"}))
+        .unwrap()
+        .expect("the failed rotation is reported");
+    assert!(warning.contains("rotation to"), "{warning}");
+    let lines = read_lines(&path);
+    assert_eq!(lines.len(), 2, "the record went to the un-rotated file");
+    assert_eq!(lines[1]["event"], "second");
 }
 
 #[test]
@@ -389,6 +469,72 @@ fn baseline_is_due_every_nth_healthy_tick() {
 }
 
 #[test]
+fn baseline_is_never_refreshed_inside_a_stall() {
+    let mut every2 = BaselineSchedule::new(2);
+    assert!(!every2.due(false), "1st healthy tick");
+    // A stall opens: the baseline must stay the PRE-stall reading, and stall
+    // ticks do not count towards the next refresh either.
+    for _ in 0..5 {
+        assert!(!every2.due(true));
+    }
+    assert!(every2.due(false), "2nd healthy tick");
+    assert!(!every2.due(false));
+    assert!(every2.due(false));
+}
+
+#[test]
+fn loop_exit_reasons_and_panic_messages_are_readable() {
+    assert_eq!(LoopExit::StopRequested.as_str(), "stop_requested");
+    assert_eq!(LoopExit::RuntimeShutDown.as_str(), "runtime_shut_down");
+    let p = std::panic::catch_unwind(|| panic!("boom {}", 7)).unwrap_err();
+    assert_eq!(panic_message(p.as_ref()), "boom 7");
+    let p = std::panic::catch_unwind(|| panic!("static")).unwrap_err();
+    assert_eq!(panic_message(p.as_ref()), "static");
+    let p = std::panic::catch_unwind(|| std::panic::panic_any(42u8)).unwrap_err();
+    assert_eq!(panic_message(p.as_ref()), "non-string panic payload");
+}
+
+#[test]
+fn raw_windows_counters_map_to_bytes() {
+    let mut s = ResourceSnapshot::default();
+    s.set_process_counters(resources::ProcessCounters {
+        working_set: 1_000,
+        private_usage: 2_000,
+        page_faults: 30,
+        paged_pool_quota: 400,
+        nonpaged_pool_quota: 50,
+    });
+    s.set_performance(resources::PerformancePages {
+        commit_total: 10,
+        commit_limit: 20,
+        physical_total: 30,
+        physical_available: 3,
+        kernel_paged: 7,
+        kernel_nonpaged: 5,
+        page_size: 4_096,
+        handle_count: 440_000,
+        process_count: 250,
+        thread_count: 4_000,
+    });
+    assert_eq!(s.working_set_bytes, Some(1_000));
+    assert_eq!(s.private_bytes, Some(2_000));
+    assert_eq!(s.page_fault_count, Some(30));
+    assert_eq!(s.process_paged_pool_bytes, Some(400));
+    assert_eq!(s.process_nonpaged_pool_bytes, Some(50));
+    // PERFORMANCE_INFORMATION memory figures are PAGES.
+    assert_eq!(s.commit_total_bytes, Some(40_960));
+    assert_eq!(s.commit_limit_bytes, Some(81_920));
+    assert_eq!(s.physical_total_bytes, Some(122_880));
+    assert_eq!(s.physical_available_bytes, Some(12_288));
+    assert_eq!(s.kernel_paged_pool_bytes, Some(28_672));
+    assert_eq!(s.kernel_nonpaged_pool_bytes, Some(20_480));
+    assert_eq!(s.system_handle_count, Some(440_000));
+    assert_eq!(s.system_process_count, Some(250));
+    assert_eq!(s.system_thread_count, Some(4_000));
+    assert!(s.errors.is_empty());
+}
+
+#[test]
 fn start_for_service_outside_a_runtime_starts_nothing() {
     let (tx, _rx) = mpsc::channel::<AuditRow>(1);
     let dir = tempfile::tempdir().unwrap();
@@ -420,7 +566,11 @@ fn start_for_service_runs_the_production_detector_under_data_dir() {
     guard.stop();
     assert!(!guard.is_running(), "stop() joins the thread");
 
-    let first = read_lines(&path).remove(0);
+    let records = read_lines(&path);
+    let last = records.last().expect("records");
+    assert_eq!(last["event"], "detector_stopped");
+    assert_eq!(last["reason"], "stop_requested");
+    let first = &records[0];
     assert_eq!(first["event"], "detector_started");
     assert_eq!(first["probe_interval_ms"], 1_000);
     assert_eq!(first["stall_threshold_ms"], 5_000);
@@ -454,8 +604,17 @@ fn records_carry_wall_times_classification_and_resources() {
         detector_late: ms_(35_000),
     };
     let snap = sample_snapshot();
+    let baseline = ResourceSnapshot {
+        handle_count: Some(1_000),
+        ..Default::default()
+    };
+    let detected = DetectedStall {
+        start: start.clone(),
+        at_detect: snap.clone(),
+        baseline: Some((baseline, ms_(9_000))),
+    };
 
-    let rec = stall_log::stall_start_record(&start, &snap, Some((&snap, ms_(9_000))), at);
+    let rec = stall_log::stall_start_record(&detected, at);
     assert_eq!(rec["event"], "stall_start");
     assert_eq!(rec["started_at"], "2026-10-01T15:08:24.480Z");
     assert_eq!(rec["detected_at"], "2026-10-01T15:09:00.170Z");
@@ -467,7 +626,21 @@ fn records_carry_wall_times_classification_and_resources() {
     assert_eq!(rec["resources"]["private_bytes"], serde_json::Value::Null);
     assert_eq!(rec["resources"]["errors"][0], "GetPerformanceInfo: denied");
     assert_eq!(rec["baseline"]["age_ms"], 9_000);
+    assert_eq!(rec["baseline"]["resources"]["handle_count"], 1_000);
     assert_eq!(rec["pid"], std::process::id());
+
+    let no_baseline = DetectedStall {
+        baseline: None,
+        ..detected.clone()
+    };
+    assert_eq!(
+        stall_log::stall_start_record(&no_baseline, at)["baseline"],
+        serde_json::Value::Null
+    );
+    let stopped = stall_log::stopped_record("runtime_shut_down", at);
+    assert_eq!(stopped["event"], "detector_stopped");
+    assert_eq!(stopped["reason"], "runtime_shut_down");
+    assert_eq!(stopped["ts"], "2026-10-01T15:09:00.180Z");
 
     let report = StallReport {
         started_at: start.started_at,
@@ -486,7 +659,7 @@ fn records_carry_wall_times_classification_and_resources() {
 
     let detail = stall_log::audit_detail(
         &report,
-        Some((&start, &snap)),
+        Some(&detected),
         &snap,
         Path::new("/x/logs/stall.log"),
         Some("disk full".into()),
@@ -495,10 +668,27 @@ fn records_carry_wall_times_classification_and_resources() {
     assert_eq!(detail["class"], "whole_process");
     assert_eq!(detail["detector_max_late_ms"], 35_000);
     assert_eq!(detail["probe_age_at_detect_ms"], 35_700);
-    assert_eq!(detail["resources_at_start"]["handle_count"], 440_000);
+    assert_eq!(detail["baseline"]["resources"]["handle_count"], 1_000);
+    assert_eq!(detail["baseline"]["age_ms"], 9_000);
+    assert_eq!(detail["resources_at_detect"]["handle_count"], 440_000);
     assert_eq!(detail["resources_at_end"]["working_set_bytes"], 512);
     assert_eq!(detail["stall_log"], "/x/logs/stall.log");
     assert_eq!(detail["stall_log_error"], "disk full");
+
+    let unknown_start = stall_log::audit_detail(
+        &report,
+        None,
+        &snap,
+        Path::new("/x/logs/stall.log"),
+        None,
+        at,
+    );
+    assert_eq!(
+        unknown_start["resources_at_detect"],
+        serde_json::Value::Null
+    );
+    assert_eq!(unknown_start["baseline"], serde_json::Value::Null);
+    assert_eq!(unknown_start["stall_log_error"], serde_json::Value::Null);
 }
 
 #[test]
