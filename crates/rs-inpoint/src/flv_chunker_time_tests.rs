@@ -228,6 +228,16 @@ async fn backward_source_jump_video_first_reanchors_both_tracks() {
         v, 400,
         "the new publisher's keyframe (source 0) must become the new shared session origin"
     );
+    assert_eq!(
+        chunks.len(),
+        2,
+        "the old session's partial chunk, then the new one"
+    );
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 601_000),
+        1_000,
+        "the re-anchor flushes the OLD session's partial chunk to disk"
+    );
 }
 
 /// Design test 4, other arrival order: the new publisher's AUDIO arrives
@@ -433,6 +443,11 @@ async fn tiny_backward_step_does_not_reanchor() {
         "origin unchanged"
     );
     assert_eq!(out_ts(&chunks, Kind::Audio, 800), 800);
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 560),
+        520,
+        "the jitter frame is stamped at the track's last ts (monotonic per track)"
+    );
 }
 
 /// ONE video frame whose source ts jumped 40 s ahead (a corrupt ts), with
@@ -512,4 +527,104 @@ async fn isolated_low_glitch_does_not_reanchor() {
         360,
         "the glitched frame is kept, stamped at the video track's last ts"
     );
+}
+
+/// The mirror of the constructed ingest violation above, with the VIDEO side
+/// moved: the audio sample comes from the real write path, so the guard must
+/// see real audio tags (a stage that skipped observing them would hide every
+/// violation).
+#[tokio::test]
+async fn constructed_video_side_violation_is_caught_against_real_audio() {
+    use rs_core::audit::Action;
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let (sink, state, mut audit) = with_audit(new_sink(dir.path(), &clock));
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    let frames = av_frames(0, 400, |src| T0 + i64::from(src));
+    feed(&sink, &clock, &frames).await;
+    // The latest video tag left the stage 700 ms later than the shared
+    // transform would have put it.
+    sink.inner
+        .lock()
+        .await
+        .av_invariant
+        .observe_video(400, 1_100);
+    sink.flush().await;
+    let _ = drain_chunks(&sink, &mut rx).await;
+
+    let rows = drain_audit(&mut audit);
+    let row = rows
+        .iter()
+        .find(|r| r.action == Action::AvInvariantViolated)
+        .expect("a constructed video-side violation must emit AvInvariantViolated");
+    assert_eq!(row.detail["a_rel_ms"], 0, "audio sample from the real path");
+    assert_eq!(row.detail["v_rel_ms"], 700);
+    assert_eq!(row.detail["delta_ms"], -700);
+    assert_eq!(state.ingest_skew_ms(), -700);
+}
+
+/// Audio content OLDER than the session's first keyframe (a GOP-cache
+/// replay can deliver it after the keyframe) has no place on the session
+/// timeline: it is dropped, never stamped below the origin.
+#[tokio::test]
+async fn audio_older_than_the_session_origin_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    sink.write_video(1_000, &body(Kind::KeyFrame, 1_000)).await;
+    sink.write_audio(980, &body(Kind::Audio, 980)).await;
+    sink.write_audio(1_000, &body(Kind::Audio, 1_000)).await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(out_ts(&chunks, Kind::Audio, 1_000), 0);
+    let marker = body(Kind::Audio, 980);
+    assert!(
+        chunks
+            .iter()
+            .all(|c| first_flv_tag_timestamp(c, FLV_TAG_AUDIO, &marker).is_none()),
+        "audio older than the session origin must not be written"
+    );
+}
+
+/// A tag held as a far-backward candidate belongs to no session once the
+/// session restarts (a Publish re-anchors): it must be dropped, never
+/// released into the new session at the OLD timeline's ts.
+#[tokio::test]
+async fn a_held_tag_is_dropped_by_a_session_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(T0);
+    let sink = new_sink(dir.path(), &clock);
+    let mut rx = sink.subscribe();
+    seed_sequence_headers(&sink).await;
+
+    feed(
+        &sink,
+        &clock,
+        &av_frames(10_000, 11_000, |src| T0 + i64::from(src - 10_000)),
+    )
+    .await;
+    // A far-backward KEYFRAME is held as a candidate...
+    sink.write_video(5, &body(Kind::KeyFrame, 5)).await;
+    // ...and the next thing is a new session (the receiver saw a Publish).
+    sink.start_new_session().await;
+    let restart = T0 + 5_000;
+    feed(
+        &sink,
+        &clock,
+        &av_frames(0, 1_000, |src| restart + i64::from(src)),
+    )
+    .await;
+    let chunks = drain_chunks(&sink, &mut rx).await;
+
+    assert_eq!(
+        out_ts(&chunks, Kind::InterFrame, 400),
+        400,
+        "the new session's own keyframe is its origin"
+    );
+    assert_eq!(out_ts(&chunks, Kind::Audio, 400), 400);
 }
