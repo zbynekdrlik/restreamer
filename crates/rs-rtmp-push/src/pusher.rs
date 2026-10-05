@@ -236,6 +236,13 @@ impl RtmpPusher {
     ///
     /// An outlier leaves the mapping and the trackers untouched; the caller
     /// clamps it onto its track's wire timeline.
+    ///
+    /// Known limit: in a NEW mapping, a genuine head cluster of fewer than
+    /// about 5 media tags followed by a > 30 s gap loses the 9-tag median to
+    /// the later cluster, so those real tags are clamped too. It needs a
+    /// reconnect's first chunk with a 30 s+ hole inside it; judging the head
+    /// against its immediate successor instead would let two consecutive
+    /// corrupt head tags pin the origin, which is the worse failure.
     fn track_input_ts(&mut self, track: Track, tags: &[crate::flv::FlvTag<'_>], i: usize) -> bool {
         let input_ts = tags[i].timestamp_ms;
         let prev = match track {

@@ -99,6 +99,11 @@ baseline-relative, so none of them saw it.
     - a jumped tag the rest of the chunk does not follow;
     - a head tag of a new mapping that its neighbourhood disagrees with.
 
+    Known limits (documented at the code, accepted): a real head cluster of
+    < ~5 tags before a 30 s+ hole in a reconnect's first chunk is clamped
+    too; in the chunker, TWO consecutive forward-glitched tags end as one
+    re-anchor.
+
 ## The guards — two kinds, both kept
 
 - **Absolute (`av_invariant.rs`, no baseline):** `(a_out - v_out) == (a_in -
