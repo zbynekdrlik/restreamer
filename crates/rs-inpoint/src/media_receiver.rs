@@ -28,25 +28,31 @@
 //!   inpoint "connected" and never runs a retry ladder against a publisher
 //!   that is gone.
 //! - A stream the receiver LEAVES without seeing it end is remembered
-//!   (`remembered`): the stream a takeover supersedes, a session or an
-//!   in-flight probe a Publish of another stream supersedes, and the last
-//!   stream when an accepted probe of another one would swallow its pending
-//!   lag. Every time the receiver is Idle with no session it probes ONE
-//!   remembered stream (most recent first): a stalled publisher stays
-//!   registered at the hub and can resume without a new Publish. Two keys do
-//!   reach stream.lan (OBS and the CI ffmpeg). A stream that gets its own
-//!   session again is forgotten. Each entry costs at most one probe.
+//!   (`remembered`): a stalled or retrying session a takeover or a Publish
+//!   of another stream supersedes, an in-flight probe such a Publish
+//!   abandons, a deferred Publish a newer one overwrites, and the last
+//!   stream with a pending lag when another stream's session starts. Every
+//!   time the receiver is Idle with no session it probes ONE remembered
+//!   stream (most recent first): a stalled publisher stays registered at the
+//!   hub and can resume without a new Publish. Two keys do reach stream.lan
+//!   (OBS and the CI ffmpeg). Probing a stream or starting its session
+//!   forgets it, so each entry costs at most one probe. A stream seen ending
+//!   (publisher closed, given up) is never remembered. Known limit: nothing
+//!   remembered is probed while a session runs its retry ladder (up to
+//!   ~4.5 min rejected, longer while a registered stream sends no frames).
 //! - Every successful (re)subscribe after frames have flowed re-anchors too.
 //!   xiu gives no session id, so a new publisher can never be ruled out, and
 //!   re-anchoring an unchanged session costs one benign discontinuity.
-//! - `Lagged` is logged and survived. The lag is remembered until the
-//!   receiver is next Idle with no session (and no remembered stream is
-//!   left), and then the last known stream is probed: the lag may have
-//!   swallowed its Publish, even the live stream's own reconnect. Sending
-//!   ANY probe of the last stream clears the flag (`send_subscribe`); an
-//!   accepted Subscribe sets it to whether a lag arrived while it was in
-//!   flight. Each lag during a probe adds at most one lag probe. A `Closed`
-//!   hub channel is an error, so the orchestrator restarts the RTMP server.
+//! - `Lagged` is logged and survived. The lag is kept until the receiver is
+//!   next Idle with no session and nothing remembered is left; then the
+//!   last known stream is probed: the lag may have swallowed its Publish,
+//!   even the live stream's own reconnect. `begin_session`, the one place
+//!   the last stream changes, settles it: another previous stream is
+//!   remembered, the same stream is covered by attaching. Sending ANY probe
+//!   of the last stream clears it too (`send_subscribe`), and an accepted
+//!   Subscribe sets it to whether a lag arrived while it was in flight.
+//!   Each lag adds at most one probe. A `Closed` hub channel is an error,
+//!   so the orchestrator restarts the RTMP server.
 //! - A dropped live subscription is explicitly unsubscribed from the hub.
 //!   xiu never prunes dead frame senders on its own; it would log a send
 //!   error on every frame.
@@ -222,8 +228,10 @@ pub struct MediaReceiver {
     pending_publish: Option<StreamIdentifier>,
     /// The last stream that published (target of a lost-Publish probe).
     last_identifier: Option<StreamIdentifier>,
-    /// A broadcast lag happened that no probe has covered yet: the next time
-    /// the receiver is Idle with no session, it probes `last_identifier`.
+    /// A broadcast lag happened that no probe has covered yet. It belongs to
+    /// `last_identifier`: probed once the receiver is Idle with no session
+    /// and nothing remembered is left; turned into a remembered stream when
+    /// another stream's session starts (`begin_session`).
     lag_unprobed: bool,
     /// Streams the receiver left without seeing them end, most recent last:
     /// each is probed ONCE when the receiver is Idle with no session, and
@@ -343,7 +351,9 @@ impl MediaReceiver {
                     "The live stream stopped streaming -- taking over the Publish deferred \
                      behind it, as a probe: {next} (#367)"
                 );
-                if let Some(left) = self.last_identifier.clone() {
+                // A stalled / retrying session is left without being seen
+                // to end; a session that already ended (Idle) is not.
+                if let Some(left) = self.session.as_ref().map(|s| s.identifier.clone()) {
                     self.remember(left, &next);
                 }
                 self.end_session("superseded_by_deferred_publish").await;
@@ -383,7 +393,10 @@ impl MediaReceiver {
                         "Publish of a different stream ({identifier}) while another one is \
                          streaming -- deferred until the live stream stops streaming (#367)"
                     );
-                    self.pending_publish = Some(identifier);
+                    // An older deferred Publish it replaces is remembered.
+                    if let Some(older) = self.pending_publish.replace(identifier.clone()) {
+                        self.remember(older, &identifier);
+                    }
                 } else {
                     self.on_publish(identifier).await;
                 }
@@ -452,9 +465,20 @@ impl MediaReceiver {
 
     /// Start a published-stream session: mark the inpoint connected, audit
     /// it and re-anchor audio+video onto a fresh shared session origin
-    /// (#255, #367): a new publisher's source ts restart. A remembered entry
-    /// for this stream is moot now.
+    /// (#255, #367): a new publisher's source ts restart.
+    ///
+    /// The ONE place `last_identifier` changes, so the pending lag is settled
+    /// here: it belongs to the previous last stream, which is remembered if
+    /// it is another one (its reconnect may hide behind the lag); for the
+    /// same stream, attaching covers it. The caller sets the flag again for
+    /// a lag that arrives while its Subscribe is in flight. A remembered
+    /// entry for this stream is moot now.
     async fn begin_session(&mut self, identifier: StreamIdentifier, trigger: &'static str) {
+        if std::mem::take(&mut self.lag_unprobed) {
+            if let Some(last) = self.last_identifier.clone() {
+                self.remember(last, &identifier);
+            }
+        }
         self.remembered.retain(|r| *r != identifier);
         self.last_identifier = Some(identifier.clone());
         self.inpoint_state.mark_connected().await;
@@ -489,6 +513,8 @@ impl MediaReceiver {
             if self.last_identifier.as_ref() == Some(&identifier) {
                 self.lag_unprobed = false;
             }
+            // A probe of a remembered stream covers its entry.
+            self.remembered.retain(|r| *r != identifier);
             Probe {
                 identifier: identifier.clone(),
                 trigger,
@@ -573,25 +599,17 @@ impl MediaReceiver {
             return;
         };
         if let Some(p) = probe {
-            // The pending lag belongs to the LAST stream. Attaching to
-            // another one does not cover it: remember the last stream.
-            if self.lag_unprobed {
-                if let Some(last) = self.last_identifier.clone() {
-                    self.remember(last, &p.identifier);
-                }
-            }
-            // Attached: a Publish a lag hid BEFORE this Subscribe went out
-            // is moot. A lag while it was in flight is not covered.
-            self.lag_unprobed = lagged;
             info!(
                 trigger = p.trigger,
                 "Probe found {} publishing -- starting its session (#367)", p.identifier
             );
+            // begin_session settles a lag from before this Subscribe.
             self.begin_session(p.identifier, p.trigger).await;
-        } else {
-            // Re-attached to the session's own stream (the last one): same.
-            self.lag_unprobed = lagged;
         }
+        // Attached: a Publish a lag hid BEFORE this Subscribe went out is moot
+        // (or kept as a remembered stream by begin_session). A lag while it
+        // was in flight is not covered.
+        self.lag_unprobed = lagged;
 
         // #367: xiu gives no session id, so ANY successful re-subscribe after
         // frames have flowed may be a new publisher (and will start with a
