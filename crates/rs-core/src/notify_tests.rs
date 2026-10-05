@@ -35,6 +35,18 @@ fn row_detail(action: Action, detail: Value) -> AuditRow {
     }
 }
 
+/// An A/V invariant edge shaped the way the stages emit it (#367): the
+/// `detail.stage` the shared row builders write, plus the endpoint alias a
+/// push-side row carries (`rs-delivery` `emit_av_invariant_event`; ingest
+/// rows have none).
+fn row_av(action: Action, stage: &str, ep: Option<&str>) -> AuditRow {
+    AuditRow {
+        endpoint: ep.map(str::to_string),
+        detail: serde_json::json!({ "stage": stage }),
+        ..row(action)
+    }
+}
+
 /// Notifier state constructed directly so the pure `observe` core can be
 /// exercised without a live webhook / bot endpoint.
 fn notifier() -> OutageNotifier {
@@ -152,8 +164,10 @@ fn av_invariant_violation_alerts_then_restored_rearms() {
     assert!(!slovak_text(Action::AvInvariantRestored).is_empty());
 
     let mut n = notifier();
+    let violated = row_av(Action::AvInvariantViolated, "push", Some("YT NLW 4k"));
+    let restored = row_av(Action::AvInvariantRestored, "push", Some("YT NLW 4k"));
     let alert = n
-        .observe(&row_ep(Action::AvInvariantViolated, "YT NLW 4k"), None)
+        .observe(&violated, None)
         .expect("first AvInvariantViolated must alert");
     assert!(
         alert.content.contains("YT NLW 4k"),
@@ -161,12 +175,12 @@ fn av_invariant_violation_alerts_then_restored_rearms() {
         alert.content
     );
     assert!(
-        n.observe(&row(Action::AvInvariantViolated), None).is_none(),
+        n.observe(&violated, None).is_none(),
         "deduped within the episode"
     );
-    assert!(n.observe(&row(Action::AvInvariantRestored), None).is_some());
+    assert!(n.observe(&restored, None).is_some());
     assert!(
-        n.observe(&row(Action::AvInvariantViolated), None).is_some(),
+        n.observe(&violated, None).is_some(),
         "a new violation after Restored alerts again"
     );
 }
