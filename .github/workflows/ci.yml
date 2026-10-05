@@ -1077,8 +1077,9 @@ jobs:
             if grep -qxF "$a" <<<"$created"; then
               continue
             fi
-            # (here-string, not `echo | grep -q`: under the runner's pipefail
-            # an early grep -q exit SIGPIPEs echo and reads as "no match")
+            # (here-string, not `echo | grep -q`: if this step ever runs with
+            # pipefail -- e.g. an explicit `shell: bash` -- an early grep -q exit
+            # SIGPIPEs echo and reads as "no match")
             if [ "$a" = "e2e rtmp" ] && grep -qF 'stream_key = $env:YOUTUBE_STREAM_KEY' <<<"$YT_BLOCK"; then
               continue
             fi
@@ -3223,6 +3224,9 @@ jobs:
           if ($fast2.service_type -ne 'TEST_FILE') { throw "FAILED (#192): 'e2e fast' must be service_type TEST_FILE (got '$($fast2.service_type)')" }
           if (-not $fast2.enabled) { throw "FAILED (#192): 'e2e fast' must be enabled (got $($fast2.enabled))" }
           if (-not $fast2.is_fast) { throw "FAILED (#192): 'e2e fast' is_fast did not stick (got $($fast2.is_fast))" }
+          # The API cannot set the pusher; only the Rust pusher dials the VPS
+          # loopback sink (the ffmpeg TEST_FILE path writes a file instead).
+          if ($fast2.pusher -ne 'rust') { throw "FAILED (#192): 'e2e fast' must use the Rust pusher (got '$($fast2.pusher)')" }
           if ($rtmp2 -and $rtmp2.is_fast) { throw "FAILED (#192): 'e2e rtmp' should be is_fast=false (got $($rtmp2.is_fast))" }
           Write-Host "OK (#192): 'e2e fast' (TEST_FILE, id=$($fast2.id)) is_fast=true, 'e2e rtmp' is_fast=false"
 
@@ -3957,6 +3961,39 @@ jobs:
             Write-Host "::warning::#192: zero-gap this run -- fast_endpoint_jumped_to_live_edge did not fire (no chunks accrued in the pre-transition window). Fast-jump path not exercised this run; is_fast gating still verified."
           }
 
+          # #192: POSITIVE proof that 'e2e fast' really DELIVERS. Host `alive`
+          # only means the endpoint task has not finished -- the blind spot
+          # that hid the dead 127.0.0.1:1935 socket for months. Read the VPS
+          # /api/status directly (bearer token from the host DB, like the
+          # crash-exhaustion gate): its TEST_FILE loopback sink must have
+          # accepted a publish and its byte counter must RISE (bounded: up to
+          # 6 samples 10 s apart, so one reconnect gap cannot red the step).
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+          if (-not $instances -or @($instances).Count -lt 1) { throw "FAILED (#192): no delivery instance for the TEST_FILE sink check" }
+          $vpsBase = "http://$($instances[0].ipv4):8000"
+          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
+          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $token) { throw "FAILED (#192): could not read the VPS auth_token from the host DB" }
+          $vpsHeaders = @{ Authorization = "Bearer $token" }
+          $sink0 = (Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10).test_file_sink
+          if (-not $sink0) {
+            throw "FAILED (#192): VPS /api/status has no test_file_sink -- the TEST_FILE loopback sink is not running although 'e2e fast' is attached"
+          }
+          Write-Host "#192 sink: $($sink0.local_addr) publishes=$($sink0.counters.publishes) active=$($sink0.counters.active_connections) bytes=$($sink0.counters.bytes_received)"
+          $rose = $false
+          for ($i = 1; $i -le 6 -and -not $rose; $i++) {
+            Start-Sleep -Seconds 10
+            $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            $sink = $st.test_file_sink
+            $fastEp = $st.endpoints | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+            Write-Host "#192 sink sample ${i}: publishes=$($sink.counters.publishes) active=$($sink.counters.active_connections) bytes=$($sink.counters.bytes_received) | e2e fast chunks=$($fastEp.chunks_processed) push_age_ms=$($fastEp.last_push_ok_age_ms) mode=$($fastEp.delivery_mode)"
+            if ($sink -and [int64]$sink.counters.publishes -ge 1 -and [int64]$sink.counters.bytes_received -gt [int64]$sink0.counters.bytes_received) { $rose = $true }
+          }
+          if (-not $rose) {
+            throw "FAILED (#192): the VPS TEST_FILE sink received no new bytes in 60 s -- 'e2e fast' is not delivering"
+          }
+          Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
+
       - name: Verify delivery progression
         shell: powershell
         timeout-minutes: 10
@@ -4104,7 +4141,7 @@ jobs:
           }
 
           if ($epReadings.Count -eq 0) {
-            throw "FAILED: No CI-owned non-fast endpoints (e2e rtmp / e2e fast) found in delivery status"
+            throw "FAILED: No CI-owned non-fast endpoint (e2e rtmp) found in delivery status ('e2e fast' is fast and skipped here)"
           }
 
           # Assert EACH endpoint advanced >= 3 chunks over 45s
