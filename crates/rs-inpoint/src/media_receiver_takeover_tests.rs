@@ -149,16 +149,26 @@ async fn stale_deferred_publish_is_probed_and_not_reported_connected() {
     // A ends: the deferred Publish of B is stale now.
     drop(tx_a);
     let mut b_subscribes = 0;
+    let mut probed = Vec::new();
     for _ in 0..50 {
         match tokio::time::timeout(Duration::from_secs(60), log_rx.recv()).await {
-            Ok(Some(rec)) if rec.identifier == other => b_subscribes += 1,
-            Ok(Some(_)) => {}
+            Ok(Some(rec)) => {
+                if rec.identifier == other {
+                    b_subscribes += 1;
+                }
+                probed.push(rec.identifier);
+            }
             _ => break,
         }
     }
     assert_eq!(
         b_subscribes, 1,
         "a stale deferred Publish must be probed once, not retried"
+    );
+    assert_eq!(
+        probed,
+        vec![other, live],
+        "the takeover probe, ONE fallback probe of the ended live stream, then silence"
     );
     assert!(
         !state.is_connected(),
@@ -302,16 +312,7 @@ fn spawn_manual_hub(
 async fn a_lag_during_a_probe_is_covered_after_it() {
     let _wd = watchdog("a_lag_during_a_probe_is_covered_after_it");
     let state = InpointState::new();
-    let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
-    let (hub_tx, hub_rx) = tokio::sync::mpsc::unbounded_channel();
-    let receiver = MediaReceiver::new(
-        event_rx,
-        hub_tx,
-        Arc::new(FlvChunkSink::new_null()),
-        state.clone(),
-    );
-    let mut requests = spawn_manual_hub(hub_rx);
-    tokio::spawn(receiver.run());
+    let (event_tx, mut requests) = manual_receiver(state.clone());
     let id = test_identifier();
     let within = Duration::from_secs(5);
 
@@ -325,14 +326,7 @@ async fn a_lag_during_a_probe_is_covered_after_it() {
         .await
         .expect("the Publish is subscribed")
         .unwrap();
-    let (frames_tx, frames_rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = reply.send(Ok((
-        DataReceiver {
-            frame_receiver: Some(frames_rx),
-            packet_receiver: None,
-        },
-        None,
-    )));
+    let frames_tx = accept(reply);
     frames_tx.send(a_frame(0)).unwrap();
     drop(frames_tx);
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -448,6 +442,10 @@ async fn a_stale_deferred_publish_falls_back_to_the_stalled_live_stream() {
         .expect("a stale takeover must fall back to the stalled live stream")
         .unwrap();
     assert_eq!(again, live);
+    assert!(
+        !state.is_connected(),
+        "a probe in flight is not a session: the inpoint is not connected yet"
+    );
     let frames_a2 = accept(a_reply);
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(state.is_connected(), "the live stream is attached again");
@@ -543,4 +541,53 @@ async fn a_fallback_probe_also_covers_an_earlier_lag() {
         "the takeover probe, then ONE fallback probe that also covers the lag"
     );
     drop(frames_a);
+}
+
+/// Fourth review (#367): a takeover probe the hub never answers times out
+/// after SUBSCRIPTION_TIMEOUT and fails like a rejected one: it falls back
+/// to the stalled live stream.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_takeover_probe_falls_back_like_a_rejected_one() {
+    let _wd = watchdog("a_timed_out_takeover_probe_falls_back_like_a_rejected_one");
+    let state = InpointState::new();
+    let (event_tx, mut requests) = manual_receiver(state.clone());
+    let live = identifier_named("live-a");
+    let other = identifier_named("other-b");
+    let within = Duration::from_secs(5);
+
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: live.clone(),
+        })
+        .unwrap();
+    let (_, reply) = tokio::time::timeout(within, requests.recv())
+        .await
+        .expect("the live stream is subscribed")
+        .unwrap();
+    let frames_a = accept(reply);
+    frames_a.send(a_frame(0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    event_tx
+        .send(BroadcastEvent::Publish {
+            identifier: other.clone(),
+        })
+        .unwrap();
+
+    // A stalls: B is taken over, and the hub never answers B's probe.
+    let (probed, b_reply) = tokio::time::timeout(FRAME_TIMEOUT + within, requests.recv())
+        .await
+        .expect("the deferred stream is probed at the stall")
+        .unwrap();
+    assert_eq!(probed, other);
+    let sent_at = tokio::time::Instant::now();
+    let (again, a_reply) = tokio::time::timeout(SUBSCRIPTION_TIMEOUT + within, requests.recv())
+        .await
+        .expect("a timed-out takeover probe falls back to the live stream")
+        .unwrap();
+    assert_eq!(again, live);
+    assert!(
+        sent_at.elapsed() >= SUBSCRIPTION_TIMEOUT,
+        "the fallback goes out only once the probe timed out"
+    );
+    drop((b_reply, a_reply, frames_a));
 }
