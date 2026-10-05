@@ -94,12 +94,15 @@ enum Phase {
     /// No publisher, or gave up on it. Only a hub event moves us on.
     Idle,
     /// A Subscribe request is in flight; `probe` is set when no session
-    /// stands behind it yet.
+    /// stands behind it yet. `lagged`: a broadcast lag arrived while it was
+    /// in flight, which its acceptance does NOT cover (that lag can hide a
+    /// Publish newer than the attachment).
     Subscribing {
         reply: oneshot::Receiver<SubscribeReply>,
         info: SubscriberInfo,
         deadline: Instant,
         probe: Option<Probe>,
+        lagged: bool,
     },
     /// Subscribed: frames are flowing, or stalled until FRAME_TIMEOUT.
     Streaming {
@@ -254,6 +257,9 @@ impl MediaReceiver {
                          the last stream is probed once the receiver is idle (#367)"
                     );
                     self.lag_unprobed = true;
+                    if let Phase::Subscribing { lagged, .. } = &mut self.phase {
+                        *lagged = true;
+                    }
                 }
                 Wake::Hub(Err(RecvError::Closed)) => {
                     error!("Hub broadcast event channel closed -- media receiver cannot continue");
@@ -269,8 +275,10 @@ impl MediaReceiver {
                         "Subscription timeout after {}s",
                         SUBSCRIPTION_TIMEOUT.as_secs()
                     );
-                    self.drop_subscription();
-                    self.schedule_retry("subscription_timeout").await;
+                    match self.drop_subscription() {
+                        Some(probe) => self.probe_failed(probe, "timed_out").await,
+                        None => self.schedule_retry("subscription_timeout").await,
+                    }
                 }
                 Wake::Frame(Some(frame)) => self.on_frame(frame).await,
                 Wake::Frame(None) => {
@@ -453,6 +461,7 @@ impl MediaReceiver {
             info,
             deadline: Instant::now() + SUBSCRIPTION_TIMEOUT,
             probe,
+            lagged: false,
         };
     }
 
@@ -460,8 +469,13 @@ impl MediaReceiver {
         &mut self,
         reply: Result<SubscribeReply, oneshot::error::RecvError>,
     ) {
-        let (info, probe) = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Subscribing { info, probe, .. } => (info, probe),
+        let (info, probe, lagged) = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Subscribing {
+                info,
+                probe,
+                lagged,
+                ..
+            } => (info, probe, lagged),
             other => {
                 // Cannot happen: a reply only wakes us in Subscribing.
                 self.phase = other;
@@ -481,16 +495,14 @@ impl MediaReceiver {
         };
         let Some(frames) = frames else {
             match probe {
-                Some(p) => info!(
-                    trigger = p.trigger,
-                    "Probe found nothing publishing on {} -- staying idle (#367)", p.identifier
-                ),
+                Some(p) => self.probe_failed(p, "rejected").await,
                 None => self.schedule_retry("subscription_failed").await,
             }
             return;
         };
-        // Attached again: a Publish an earlier lag may have hidden is moot.
-        self.lag_unprobed = false;
+        // Attached again: a Publish a lag hid BEFORE this Subscribe went out
+        // is moot. A lag while it was in flight is not covered.
+        self.lag_unprobed = lagged;
         if let Some(p) = probe {
             info!(
                 trigger = p.trigger,
@@ -590,20 +602,18 @@ impl MediaReceiver {
     }
 
     /// Leave the current subscription (or pending subscribe): tell the hub to
-    /// drop our frame sender so xiu stops sending to a dead channel.
-    fn drop_subscription(&mut self) {
+    /// drop our frame sender so xiu stops sending to a dead channel. Returns
+    /// the probe that was in flight, if the abandoned Subscribe was one.
+    fn drop_subscription(&mut self) -> Option<Probe> {
         let (info, probe) = match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Streaming { info, .. } => (info, None),
-            Phase::Subscribing { info, probe, .. } => (info, probe.map(|p| p.identifier)),
-            Phase::Idle | Phase::RetryWait { .. } => return,
+            Phase::Subscribing { info, probe, .. } => (info, probe),
+            Phase::Idle | Phase::RetryWait { .. } => return None,
         };
-        let Some(identifier) = self
-            .session
-            .as_ref()
-            .map(|s| s.identifier.clone())
-            .or(probe)
-        else {
-            return;
+        let identifier = match (&self.session, &probe) {
+            (Some(s), _) => s.identifier.clone(),
+            (None, Some(p)) => p.identifier.clone(),
+            (None, None) => return probe,
         };
         debug!(subscriber_id = %info.id, "Unsubscribing from hub: {identifier}");
         if self
@@ -612,6 +622,28 @@ impl MediaReceiver {
             .is_err()
         {
             warn!("Failed to send unsubscribe request to hub");
+        }
+        probe
+    }
+
+    /// A probe found nothing publishing (rejected or timed out). A taken-over
+    /// deferred Publish can be stale while the stream it superseded is still
+    /// up: a stalled live publisher stays registered at the hub and can
+    /// resume on its connection WITHOUT a new Publish. So a failed probe of
+    /// any other stream falls back to ONE probe of the last stream that had a
+    /// session. A failed probe of that stream ends it: no probe loop.
+    async fn probe_failed(&mut self, probe: Probe, why: &'static str) {
+        info!(
+            trigger = probe.trigger,
+            why, "Probe found nothing publishing on {} -- staying idle (#367)", probe.identifier
+        );
+        let fallback = self
+            .last_identifier
+            .clone()
+            .filter(|last| *last != probe.identifier);
+        if let Some(last) = fallback {
+            warn!("Falling back to probing the last live stream {last} (#367)");
+            self.send_subscribe(last, Some("fallback_probe")).await;
         }
     }
 
