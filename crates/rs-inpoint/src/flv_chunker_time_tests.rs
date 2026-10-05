@@ -375,6 +375,9 @@ async fn a_backward_jump_that_clears_a_latched_skew_records_its_recovery() {
             "test setup: the skew monitor must be latched"
         );
     }
+    // The monitor was latched directly, so raise the banner it would have
+    // raised: the end of the test then proves the re-anchor clears it.
+    state.set_ingest_skew_active(true);
     let _ = drain_audit(&mut audit);
 
     // A new publisher at source 0: the far-backward jump re-anchors.
