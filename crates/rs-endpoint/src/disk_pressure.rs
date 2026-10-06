@@ -275,4 +275,55 @@ mod tests {
         // monitor simply skips that tick — `None` is an acceptable outcome,
         // so we do not fail the test on `None`.
     }
+
+    /// #368 design test (iv). `sysinfo`'s volume enumeration is a blocking
+    /// call. Run inline on an async worker every 10 s, a slow enumeration
+    /// stalls every other task on that worker, the RTMP ingest included.
+    /// Here the runtime has ONE worker: a concurrent timer task must keep
+    /// its schedule while a 1.5 s enumeration is running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_volume_enumeration_never_delays_other_tasks() {
+        const SLOW: Duration = Duration::from_millis(1_500);
+        const TICK: Duration = Duration::from_millis(20);
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe: VolumeProbe = {
+            let entered = Arc::clone(&entered);
+            Arc::new(move |_: &Path| {
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(SLOW);
+                Some((1, 10))
+            })
+        };
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let monitor = tokio::spawn(run_disk_monitor_with(
+            VolumeSampler::new(probe, Duration::from_millis(10)),
+            PathBuf::from("/chunks"),
+            None,
+            None,
+            None,
+            shutdown_rx,
+        ));
+
+        let mut worst_late = Duration::ZERO;
+        let watch_until = std::time::Instant::now() + SLOW + Duration::from_millis(500);
+        while std::time::Instant::now() < watch_until {
+            let asked = std::time::Instant::now();
+            tokio::time::sleep(TICK).await;
+            worst_late = worst_late.max(asked.elapsed().saturating_sub(TICK));
+        }
+        assert!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            "the monitor never sampled the volume"
+        );
+        assert!(
+            worst_late < Duration::from_millis(500),
+            "a timer task on the same runtime ran {worst_late:?} late while the volume \
+             enumeration ran: the blocking call must not run on an async worker (#368)"
+        );
+        shutdown_tx.send(()).expect("the monitor is listening");
+        tokio::time::timeout(Duration::from_secs(10), monitor)
+            .await
+            .expect("the monitor stops on shutdown")
+            .expect("the monitor must not panic");
+    }
 }

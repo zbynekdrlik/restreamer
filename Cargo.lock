@@ -2765,6 +2765,7 @@ dependencies = [
  "rs-core",
  "rs-endpoint",
  "rs-inpoint",
+ "rs-rtmp-push",
  "serde_json",
  "sqlx",
  "sysinfo",

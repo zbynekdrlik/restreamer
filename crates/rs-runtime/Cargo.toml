@@ -40,3 +40,5 @@ tokio = { workspace = true }
 rs-core = { workspace = true }
 rs-inpoint = { workspace = true }
 rs-api = { workspace = true }
+# #368: the in-process RTMP publisher for the ingest-isolation tests.
+rs-rtmp-push = { workspace = true }

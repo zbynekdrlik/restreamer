@@ -56,3 +56,7 @@ impl InpointService {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "inpoint_service_tests.rs"]
+mod tests;
