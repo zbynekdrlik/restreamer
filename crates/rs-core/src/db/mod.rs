@@ -12,6 +12,7 @@ pub use templates::*;
 pub mod v2;
 pub use v2::*;
 
+pub mod av_gate;
 pub mod oauth_device_grants;
 pub mod youtube_oauth;
 

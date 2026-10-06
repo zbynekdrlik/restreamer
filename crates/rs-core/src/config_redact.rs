@@ -67,11 +67,16 @@ const SECRET_MARKERS: &[&str] = &[
 /// - `api.tls_cert` — also a path (`cert.pem`). It matches no marker today, so
 ///   the exemption is inert; it is listed so the cert/key pair stays together
 ///   and a future `cert`/`pem` marker cannot silently mask a path.
+/// - `av_gate.oauth_file` / `av_gate.api_token_file` — file *paths* (#357).
+///   The secrets live IN those files, never in the config, so the paths are
+///   safe to show. If either ever holds the secret inline, delete it here.
 const READABLE_PATHS: &[&str] = &[
     "hetzner.ssh_key_name",
     "hetzner.extra_ssh_key_names",
     "api.tls_cert",
     "api.tls_key",
+    "av_gate.oauth_file",
+    "av_gate.api_token_file",
 ];
 
 /// True when the field at `path` (whose leaf name is `key`) holds a credential.
@@ -222,11 +227,16 @@ fn join_path(parent: &str, key: &str) -> String {
 /// signing keys and accept THEIR tokens from the internet on the next restart.
 /// That would turn momentary LAN presence into permanent remote access.
 ///
+/// `av_gate` (#357) points at the file holding the av-gate bearer token and at
+/// the manage-scope YouTube grant. A `PATCH` repointing `api_token_file` at a
+/// file the caller can write would hand them the token, so the subtree is
+/// immutable for the same reason as `api.access`.
+///
 /// Changing these values is a deliberate act on the box: edit
 /// `C:\ProgramData\Restreamer\config.json` and restart. That is exactly the
 /// property the design depends on, so it is enforced here rather than
 /// described in a comment.
-const IMMUTABLE_PATHS: &[&[&str]] = &[&["api", "access"]];
+const IMMUTABLE_PATHS: &[&[&str]] = &[&["api", "access"], &["av_gate"]];
 
 /// Everything `PATCH /api/v1/config` must do to an incoming merged config
 /// before it is deserialized and saved.
@@ -520,6 +530,13 @@ mod tests {
         ("api.tls", false),
         ("api.tls_cert", false),
         ("api.tls_key", false),
+        ("av_gate.api_token_file", false),
+        ("av_gate.daily_quota_budget", false),
+        ("av_gate.event_name", false),
+        ("av_gate.idle_timeout_secs", false),
+        ("av_gate.oauth_file", false),
+        ("av_gate.processing_timeout_secs", false),
+        ("av_gate.stream_title", false),
         ("client_uuid", false),
         ("delivery.delivery_delay_secs", false),
         ("delivery.long_stream_warn_secs", false),
@@ -727,6 +744,22 @@ mod tests {
             "unrelated fields must still change"
         );
         assert_eq!(patched["api"]["access"], current["api"]["access"]);
+    }
+
+    #[test]
+    fn a_patch_cannot_repoint_the_av_gate_token_file() {
+        // #357: pointing `api_token_file` at a file the caller wrote would hand
+        // them the av-gate bearer token.
+        let current = json!({
+            "av_gate": { "api_token_file": "C:/ProgramData/Restreamer/av-gate/api-token" },
+            "api": { "port": 8910 }
+        });
+        let mut patched = current.clone();
+        patched["av_gate"]["api_token_file"] = json!("C:/Users/Public/mine.txt");
+        patched["api"]["port"] = json!(9999);
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(patched["av_gate"], current["av_gate"]);
+        assert_eq!(patched["api"]["port"], 9999);
     }
 
     #[test]

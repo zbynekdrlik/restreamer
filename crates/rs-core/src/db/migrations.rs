@@ -22,7 +22,7 @@ use migration_sql::*;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 29;
+pub const MAX_SCHEMA_VERSION: i32 = 30;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -385,6 +385,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             27 => migrate_v27(&mut tx).await?,
             28 => migrate_v28(&mut tx).await?,
             29 => migrate_v29(&mut tx).await?,
+            30 => execute_sql_statements(&mut tx, MIGRATION_V30_SQL).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")

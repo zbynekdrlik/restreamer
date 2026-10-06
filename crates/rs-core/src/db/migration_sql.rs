@@ -166,3 +166,32 @@ CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
     ON delivery_instances(event_id, id DESC)
     WHERE status != 'deleted';
 "#;
+
+/// V30 (#357): one row per YouTube A/V-gate session. The row is the durable
+/// record the boot reconcile reads after a crash: a session left in
+/// `starting`/`ready` still owns a live broadcast and a delivery VPS, and must
+/// be torn down. `quota_units` backs the rolling-24h quota guard.
+pub(crate) const MIGRATION_V30_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS av_gate_sessions (
+    id                TEXT    PRIMARY KEY,
+    requester         TEXT    NOT NULL,
+    title             TEXT    NOT NULL,
+    state             TEXT    NOT NULL,
+    broadcast_id      TEXT,
+    stream_id         TEXT,
+    event_id          INTEGER,
+    went_live         INTEGER NOT NULL DEFAULT 0,
+    vod_id            TEXT,
+    reason            TEXT,
+    quota_units       INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL,
+    ready_at          TEXT,
+    stop_requested_at TEXT,
+    processing_at     TEXT,
+    finished_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_av_gate_sessions_created
+    ON av_gate_sessions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_av_gate_sessions_state
+    ON av_gate_sessions(state);
+"#;

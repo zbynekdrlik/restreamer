@@ -25,6 +25,99 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub stall_detector: StallDetectorSettings,
+    #[serde(default)]
+    pub av_gate: AvGateConfig,
+}
+
+/// YouTube A/V-gate session API (#357, `/api/v1/av-gate/session`).
+///
+/// No value here is a credential. The two secrets the API needs live in FILES
+/// beside each other in the `av-gate` directory (ACL SYSTEM + Administrators
+/// on stream.lan), never in `config.json`:
+/// - `oauth_file`: JSON `{refresh_token, scope, ...}`, the manage-scope
+///   (`youtube`) grant for the CI channel, refreshed with
+///   `youtube.device_flow`'s client credentials;
+/// - `api_token_file`: the bearer token every av-gate request must carry.
+///
+/// Both are PATHS, classified `readable` in CONFIG_INVENTORY. The whole subtree
+/// is immutable through `PATCH /api/v1/config` (`config_redact::IMMUTABLE_PATHS`)
+/// so a request through the API cannot repoint the token file at a file the
+/// caller wrote. Read once at startup (restart to apply).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvGateConfig {
+    #[serde(default = "default_av_gate_oauth_file")]
+    pub oauth_file: String,
+    #[serde(default = "default_av_gate_api_token_file")]
+    pub api_token_file: String,
+    /// The Restreamer event the session activates (CI's own test event).
+    #[serde(default = "default_av_gate_event_name")]
+    pub event_name: String,
+    /// Title of the reusable YouTube stream every session binds to.
+    #[serde(default = "default_av_gate_stream_title")]
+    pub stream_title: String,
+    /// A session with no `stop` this long after it was created is reaped:
+    /// broadcast completed, delivery torn down.
+    #[serde(default = "default_av_gate_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// How long `processing` may wait for YouTube to finish the VOD.
+    #[serde(default = "default_av_gate_processing_timeout_secs")]
+    pub processing_timeout_secs: u64,
+    /// YouTube Data API units the av-gate sessions may spend per rolling
+    /// 24 h. A new session is refused when the spend plus one session's
+    /// estimate would exceed it (the project budget is 10,000/day, shared with
+    /// the health polling).
+    #[serde(default = "default_av_gate_daily_quota_budget")]
+    pub daily_quota_budget: u32,
+}
+
+/// `<config dir>\av-gate`, i.e. `C:\ProgramData\Restreamer\av-gate` on Windows.
+fn av_gate_dir() -> PathBuf {
+    Config::default_path()
+        .parent()
+        .map(|p| p.join("av-gate"))
+        .unwrap_or_else(|| PathBuf::from("av-gate"))
+}
+
+fn default_av_gate_oauth_file() -> String {
+    av_gate_dir()
+        .join("oauth.json")
+        .to_string_lossy()
+        .into_owned()
+}
+fn default_av_gate_api_token_file() -> String {
+    av_gate_dir()
+        .join("api-token")
+        .to_string_lossy()
+        .into_owned()
+}
+fn default_av_gate_event_name() -> String {
+    "E2E-Test".to_string()
+}
+fn default_av_gate_stream_title() -> String {
+    "e2e rtmp".to_string()
+}
+fn default_av_gate_idle_timeout_secs() -> u64 {
+    45 * 60
+}
+fn default_av_gate_processing_timeout_secs() -> u64 {
+    2 * 60 * 60
+}
+fn default_av_gate_daily_quota_budget() -> u32 {
+    4_000
+}
+
+impl Default for AvGateConfig {
+    fn default() -> Self {
+        Self {
+            oauth_file: default_av_gate_oauth_file(),
+            api_token_file: default_av_gate_api_token_file(),
+            event_name: default_av_gate_event_name(),
+            stream_title: default_av_gate_stream_title(),
+            idle_timeout_secs: default_av_gate_idle_timeout_secs(),
+            processing_timeout_secs: default_av_gate_processing_timeout_secs(),
+            daily_quota_budget: default_av_gate_daily_quota_budget(),
+        }
+    }
 }
 
 /// Process-stall detector tiers (#368). Both runtimes (main and ingest) are
@@ -726,6 +819,7 @@ impl Config {
             },
             notifications: NotificationsConfig::default(),
             stall_detector: StallDetectorSettings::default(),
+            av_gate: AvGateConfig::default(),
         }
     }
 }
@@ -750,6 +844,7 @@ impl Default for Config {
             obs: ObsConfig::default(),
             notifications: NotificationsConfig::default(),
             stall_detector: StallDetectorSettings::default(),
+            av_gate: AvGateConfig::default(),
         }
     }
 }

@@ -45,12 +45,15 @@ const SECRET_MARKERS: &[&str] = &[
 ];
 
 /// Dotted paths that match a marker but are NOT credentials and must stay
-/// readable: a Hetzner SSH key *name* and TLS *file paths*.
+/// readable: a Hetzner SSH key *name*, TLS *file paths*, and the *path* of the
+/// av-gate token file (#357: the token lives in that file, never in the
+/// config).
 const READABLE_PATHS: &[&str] = &[
     "hetzner.ssh_key_name",
     "hetzner.extra_ssh_key_names",
     "api.tls_cert",
     "api.tls_key",
+    "av_gate.api_token_file",
 ];
 
 fn is_secretish(path: &str, key: &str) -> bool {

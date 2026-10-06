@@ -350,6 +350,34 @@ pub enum Action {
     /// silent 2026-06-19 event 9316 case). Detail JSON: {event_id, event_name}.
     /// Pairs with the dashboard `NoRescueVideoBanner`.
     NoRescueVideoConfigured,
+    /// #357: a YouTube A/V-gate session was created: broadcast inserted and
+    /// bound, test event activated, delivery started. Info, `Source::System`.
+    /// Detail: {session_id, requester, broadcast_id, stream_id, event_id}.
+    /// Every `AvGateSession*` row carries `session_id`.
+    AvGateSessionStarted,
+    /// #357: delivery is delivering, the YouTube stream is active and the
+    /// broadcast was transitioned to `live`. Info. Detail: {session_id,
+    /// broadcast_id}.
+    AvGateSessionReady,
+    /// #357: the caller asked the session to stop; the cache drain begins.
+    /// Info. Detail: {session_id, drain_secs}.
+    AvGateSessionStopRequested,
+    /// #357: broadcast completed, delivery stopped, event deactivated, zero
+    /// Hetzner servers left; waiting for YouTube to process the VOD. Info.
+    /// Detail: {session_id, broadcast_id}.
+    AvGateSessionProcessing,
+    /// #357: YouTube finished processing the VOD. Info. Detail: {session_id,
+    /// vod_id}.
+    AvGateSessionDone,
+    /// #357: the session ended without a VOD. Warn. Detail: {session_id,
+    /// reason}. The teardown already ran (or its own failures are in
+    /// `reason`).
+    AvGateSessionFailed,
+    /// #357: the reaper tore a session down on its own: no stop within the
+    /// idle timeout (`cause: "idle_timeout"`), a session found unfinished at
+    /// boot (`"boot_reconcile"`), or a driver task that died
+    /// (`"driver_died"`). Warn. Detail: {session_id, cause}.
+    AvGateSessionReaped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +613,28 @@ mod tests {
             serde_json::to_string(&Action::NoRescueVideoConfigured).unwrap(),
             r#""no_rescue_video_configured""#
         );
+        // #357: the A/V-gate callers (both CI gates) read these from
+        // /api/v1/audit?action=…, so their strings are a contract.
+        for (action, wire) in [
+            (Action::AvGateSessionStarted, "av_gate_session_started"),
+            (Action::AvGateSessionReady, "av_gate_session_ready"),
+            (
+                Action::AvGateSessionStopRequested,
+                "av_gate_session_stop_requested",
+            ),
+            (
+                Action::AvGateSessionProcessing,
+                "av_gate_session_processing",
+            ),
+            (Action::AvGateSessionDone, "av_gate_session_done"),
+            (Action::AvGateSessionFailed, "av_gate_session_failed"),
+            (Action::AvGateSessionReaped, "av_gate_session_reaped"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&action).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
     }
 
     #[test]
