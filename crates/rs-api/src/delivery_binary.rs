@@ -90,10 +90,18 @@ enum BinarySource {
     GitHubRelease(String),
 }
 
+/// The release-asset URL prefix: [`RELEASE_BASE`], or the
+/// `RESTREAMER_RELEASE_BASE_URL` override (tests point it at a mock server,
+/// like `FB_GRAPH_API_BASE` / `YOUTUBE_API_BASE`).
+fn release_base() -> String {
+    std::env::var("RESTREAMER_RELEASE_BASE_URL").unwrap_or_else(|_| RELEASE_BASE.to_string())
+}
+
 /// GitHub release URL of the `rs-delivery-{version}-linux-amd64` asset — the
 /// single derivation used by both the fallback source and the download.
 fn github_release_url(client_version: &str) -> String {
-    format!("{RELEASE_BASE}{client_version}/rs-delivery-{client_version}-linux-amd64")
+    let base = release_base();
+    format!("{base}{client_version}/rs-delivery-{client_version}-linux-amd64")
 }
 
 /// Resolve where the versioned binary bytes come from when the S3 key is
@@ -125,14 +133,13 @@ fn bundled_candidates(exe_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     ]
 }
 
-/// Locate the bundled Linux delivery binary shipped with this install, if any.
-/// Searches next to the running executable; `None` when no bundle is present
-/// (dev builds, older installs, or an unexpected placement) so the caller falls
-/// back to the GitHub release.
-fn find_bundled_binary() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    bundled_candidates(exe_dir)
+/// Locate the bundled Linux delivery binary shipped with the install whose
+/// executable is `exe` (the running one in production), if any. Searches next
+/// to the executable; `None` when no bundle is present (dev builds, older
+/// installs, or an unexpected placement) so the caller falls back to the
+/// GitHub release.
+fn find_bundled_binary(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    bundled_candidates(exe.parent()?)
         .into_iter()
         .find(|p| p.is_file())
 }
@@ -215,7 +222,10 @@ pub async fn ensure_bucket_binary(
     // this install — uploading it needs NO external network, so event start
     // never depends on github.com (#246). Fall back to the GitHub release only
     // when no bundle is present (dev builds, older installs).
-    match resolve_binary_source(find_bundled_binary(), client_version) {
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| find_bundled_binary(&exe));
+    match resolve_binary_source(bundled, client_version) {
         BinarySource::Bundled(path) => {
             warn!(
                 client_version,
@@ -572,6 +582,10 @@ pub fn post_boot_mismatch_audit(
         ts_override: None,
     }
 }
+
+#[cfg(test)]
+#[path = "delivery_binary_io_tests.rs"]
+mod io_tests;
 
 #[cfg(test)]
 mod tests {
