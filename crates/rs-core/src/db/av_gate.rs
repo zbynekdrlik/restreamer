@@ -24,6 +24,8 @@ pub struct AvGateSessionRow {
     /// The broadcast was transitioned to `live`, so it MUST be completed on
     /// every exit path (owner rule, 2026-10-05).
     pub went_live: bool,
+    /// The teardown failed; the cleanup sweep retries it until clean.
+    pub cleanup_pending: bool,
     pub vod_id: Option<String>,
     pub reason: Option<String>,
     /// YouTube Data API units this session spent (quota guard input).
@@ -47,6 +49,7 @@ impl AvGateSessionRow {
             stream_id: None,
             event_id: None,
             went_live: false,
+            cleanup_pending: false,
             vod_id: None,
             reason: None,
             quota_units: 0,
@@ -60,7 +63,7 @@ impl AvGateSessionRow {
 }
 
 const COLUMNS: &str = "id, requester, title, state, broadcast_id, stream_id, event_id, went_live, \
-     vod_id, reason, quota_units, created_at, ready_at, stop_requested_at, processing_at, \
+     cleanup_pending, vod_id, reason, quota_units, created_at, ready_at, stop_requested_at, processing_at, \
      finished_at";
 
 fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
@@ -73,6 +76,7 @@ fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
         stream_id: r.get("stream_id"),
         event_id: r.get("event_id"),
         went_live: r.get::<i64, _>("went_live") != 0,
+        cleanup_pending: r.get::<i64, _>("cleanup_pending") != 0,
         vod_id: r.get("vod_id"),
         reason: r.get("reason"),
         quota_units: r.get("quota_units"),
@@ -90,9 +94,9 @@ fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
 pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
     sqlx::query(
         "INSERT INTO av_gate_sessions (id, requester, title, state, broadcast_id, stream_id, \
-             event_id, went_live, vod_id, reason, quota_units, created_at, ready_at, \
-             stop_requested_at, processing_at, finished_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             event_id, went_live, cleanup_pending, vod_id, reason, quota_units, created_at, \
+             ready_at, stop_requested_at, processing_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(id) DO UPDATE SET
              requester = excluded.requester,
              title = excluded.title,
@@ -101,6 +105,7 @@ pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
              stream_id = excluded.stream_id,
              event_id = excluded.event_id,
              went_live = excluded.went_live,
+             cleanup_pending = excluded.cleanup_pending,
              vod_id = excluded.vod_id,
              reason = excluded.reason,
              quota_units = excluded.quota_units,
@@ -118,6 +123,7 @@ pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
     .bind(&s.stream_id)
     .bind(s.event_id)
     .bind(i64::from(s.went_live))
+    .bind(i64::from(s.cleanup_pending))
     .bind(&s.vod_id)
     .bind(&s.reason)
     .bind(s.quota_units)
@@ -148,6 +154,17 @@ pub async fn list_unfinished(pool: &SqlitePool) -> Result<Vec<AvGateSessionRow>>
     let rows = sqlx::query(&format!(
         "SELECT {COLUMNS} FROM av_gate_sessions \
          WHERE state NOT IN ('done', 'failed') ORDER BY created_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_session).collect())
+}
+
+/// Sessions whose teardown failed and must be retried, oldest first.
+pub async fn list_cleanup_pending(pool: &SqlitePool) -> Result<Vec<AvGateSessionRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM av_gate_sessions \
+         WHERE cleanup_pending != 0 ORDER BY created_at ASC"
     ))
     .fetch_all(pool)
     .await?;

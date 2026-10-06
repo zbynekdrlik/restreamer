@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use rs_core::db;
+use rs_core::models::StreamingEvent;
 use rs_youtube::manage::{ManageClient, ManageCredentials};
 
 use crate::av_gate::{AvGateRig, AvGateTimings, RigDelivery, RigEvent, StartEventError};
-use crate::av_gate_driver::SessionCtx;
+use crate::av_gate_driver::{ClientFactory, SessionCtx, run_maintenance};
 use crate::state::AppState;
 use crate::stream_handlers::{StartStreamQuery, start_stream, stop_stream};
 
@@ -43,20 +44,28 @@ pub(crate) fn server_selector(client_uuid: &str, event_id: i64) -> String {
     format!("app=restreamer,client_uuid={client_uuid},event_id={event_id}")
 }
 
+/// True while an event receives or delivers.
+pub(crate) fn is_active(e: &StreamingEvent) -> bool {
+    e.receiving_activated || e.delivering_activated
+}
+
 #[async_trait]
 impl AvGateRig for AppRig {
-    /// Find the CI event by name. Refuses while ANY other event is live, so a
-    /// session never touches YouTube while a real service is streaming.
+    /// Find the CI event by name, BEFORE any YouTube write. Refuses while ANY
+    /// event is active, the CI event included: another event means a real
+    /// service may be streaming, and an active CI event belongs to another run
+    /// (restreamer's own CI E2E uses the same event). Also refuses when no
+    /// delivery can start, so a refused session leaves no broadcast behind.
     async fn resolve_event(&self, name: &str) -> Result<RigEvent, String> {
+        if self.state.delivery_orchestrator.is_none() {
+            return Err("delivery is not configured (no Hetzner token)".to_string());
+        }
         let events = db::list_streaming_events(&self.state.pool)
             .await
             .map_err(|e| format!("listing events failed: {e}"))?;
-        if let Some(live) = events
-            .iter()
-            .find(|e| e.name != name && (e.receiving_activated || e.delivering_activated))
-        {
+        if let Some(live) = events.iter().find(|e| is_active(e)) {
             return Err(format!(
-                "another event is active ({:?}); the gate never runs beside it",
+                "event {:?} is active; the gate runs only when no event is",
                 live.name
             ));
         }
@@ -147,8 +156,10 @@ impl AvGateRig for AppRig {
 }
 
 /// Build the YouTube manage client from the configured oauth file and the
-/// device-flow client credentials.
+/// device-flow client credentials. It draws from the same project quota
+/// bucket as the YouTube health polling (`youtube_quota_tracker`).
 pub(crate) fn manage_client(state: &AppState) -> Result<ManageClient, String> {
+    let tracker = crate::delivery_status::youtube_quota_tracker();
     let cfg = &state.config;
     let creds = ManageCredentials::from_oauth_file(
         Path::new(&cfg.av_gate.oauth_file),
@@ -158,13 +169,12 @@ pub(crate) fn manage_client(state: &AppState) -> Result<ManageClient, String> {
     .map_err(|e| e.to_string())?;
     #[cfg(test)]
     if let Some(seam) = state.av_gate.seam.lock().expect("seam").clone() {
-        return Ok(ManageClient::with_endpoints(
-            creds,
-            &seam.api_base,
-            &seam.token_uri,
-        ));
+        return Ok(
+            ManageClient::with_endpoints(creds, &seam.api_base, &seam.token_uri)
+                .with_quota_tracker(tracker),
+        );
     }
-    Ok(ManageClient::new(creds))
+    Ok(ManageClient::new(creds).with_quota_tracker(tracker))
 }
 
 /// The session context for `state`: the production rig and timings.
@@ -189,13 +199,15 @@ pub(crate) fn session_ctx(state: &AppState) -> Arc<SessionCtx> {
     })
 }
 
-/// Boot reconcile (#357): tear down any session a crash left `starting` or
-/// `ready`, resume the VOD wait of a `processing` one. Called by the runtime
-/// AFTER the delivery boot reconcile, so the delivery it re-attached for the
-/// session's event is the one stopped here.
-pub async fn reconcile_av_gate_on_boot(state: AppState) {
-    let yt = manage_client(&state).map(Arc::new);
-    crate::av_gate_driver::reconcile_on_boot(session_ctx(&state), yt).await;
+/// The av-gate maintenance task (#357), spawned by the runtime AFTER the
+/// delivery boot reconcile, so the delivery it re-attached for a session's
+/// event is the one stopped here: the boot reconcile (tear down `starting`/
+/// `ready` sessions a crash left, resume `processing` ones, then open the API),
+/// followed by the retry loop for failed teardowns. Runs until shutdown.
+pub async fn run_av_gate_maintenance(state: AppState) {
+    let ctx = session_ctx(&state);
+    let clients: ClientFactory = Arc::new(move || manage_client(&state));
+    run_maintenance(ctx, clients).await;
 }
 
 #[cfg(test)]

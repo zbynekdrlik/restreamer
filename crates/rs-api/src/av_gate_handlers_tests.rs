@@ -43,6 +43,7 @@ async fn api_with(rig: FakeRig, timings: AvGateTimings, access_mode: &str) -> Ap
     rs_core::db::run_migrations(&pool).await.unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let state = AppState::new_for_tests(pool, config, ws_tx);
+    state.av_gate.registry.mark_reconciled();
     let yt_state = Arc::new(YtState::default());
     let server = fake_youtube(Arc::clone(&yt_state)).await;
     *state.av_gate.seam.lock().unwrap() = Some(TestSeam {
@@ -131,20 +132,20 @@ fn bearer_reads_only_a_bearer_authorization() {
     assert_eq!(bearer(&h), None);
 }
 
-#[test]
-fn read_api_token_trims_and_refuses_short_or_missing_files() {
+#[tokio::test]
+async fn read_api_token_trims_and_refuses_short_or_missing_files() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t");
-    assert!(read_api_token(&p).unwrap_err().contains("unreadable"));
+    assert!(read_api_token(&p).await.unwrap_err().contains("unreadable"));
     std::fs::write(&p, format!("\u{FEFF} {TOKEN}\n")).unwrap();
-    assert_eq!(read_api_token(&p).unwrap(), TOKEN);
+    assert_eq!(read_api_token(&p).await.unwrap(), TOKEN);
     let short = "x".repeat(MIN_TOKEN_CHARS - 1);
     std::fs::write(&p, &short).unwrap();
-    let err = read_api_token(&p).unwrap_err();
+    let err = read_api_token(&p).await.unwrap_err();
     assert!(err.contains("fewer than 32"), "{err}");
     assert!(!err.contains(&short), "the error must not quote the file");
     std::fs::write(&p, "y".repeat(MIN_TOKEN_CHARS)).unwrap();
-    assert!(read_api_token(&p).is_ok());
+    assert!(read_api_token(&p).await.is_ok());
 }
 
 // ---- auth through the router ----------------------------------------------------
@@ -372,4 +373,32 @@ async fn get_of_an_unknown_session_is_404() {
     let (status, body) = send(&a.state, authed("GET", "/api/v1/av-gate/session/nope", "")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "not_found");
+}
+
+#[tokio::test]
+async fn create_is_503_until_the_boot_reconcile_ran() {
+    let a = api().await;
+    let mut state = a.state.clone();
+    state.av_gate = Arc::new(crate::av_gate::AvGateHub::default());
+    *state.av_gate.seam.lock().unwrap() = a.state.av_gate.seam.lock().unwrap().clone();
+    let (status, body) = send(&state, authed("POST", "/api/v1/av-gate/session", CREATE)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "starting_up");
+}
+
+#[tokio::test]
+async fn create_is_409_while_a_failed_teardown_is_pending() {
+    let a = api().await;
+    let mut row = AvGateSessionRow::new_starting("stuck", "r", "t", "2026-10-06T10:00:00.000Z");
+    row.state = "failed".to_string();
+    row.cleanup_pending = true;
+    store::save(&a.state.pool, &row).await.unwrap();
+    let (status, body) = send(&a.state, authed("POST", "/api/v1/av-gate/session", CREATE)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "cleanup_pending", "sessions": ["stuck"]})
+    );
+    let (_, view) = send(&a.state, authed("GET", "/api/v1/av-gate/session/stuck", "")).await;
+    assert_eq!(view["cleanup_pending"], true);
 }

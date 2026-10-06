@@ -335,7 +335,7 @@ async fn boot_reconcile_tears_down_a_session_left_ready() {
     let mut h = Harness::new().await;
     seed(&h, "s1", "ready", true).await;
     *h.yt_state.life.lock().unwrap() = "live".to_string();
-    reconcile_on_boot(Arc::clone(&h.ctx), Ok(h.yt())).await;
+    reconcile_on_boot(&h.ctx, &h.clients()).await;
     let row = h.row("s1").await;
     assert_eq!(row.state, "failed");
     assert_eq!(reason(&row), "Restreamer restarted during the session");
@@ -353,7 +353,7 @@ async fn boot_reconcile_tears_down_a_session_left_ready() {
 async fn boot_reconcile_resumes_the_vod_wait_of_a_processing_session() {
     let h = Harness::new().await;
     seed(&h, "s1", "processing", true).await;
-    reconcile_on_boot(Arc::clone(&h.ctx), Ok(h.yt())).await;
+    reconcile_on_boot(&h.ctx, &h.clients()).await;
     let row = h.wait_state("s1", SessionState::Done).await;
     assert_eq!(row.vod_id.as_deref(), Some("bc-1"));
     assert!(h.rig.calls().is_empty());
@@ -364,7 +364,8 @@ async fn boot_reconcile_without_youtube_still_stops_the_delivery() {
     let h = Harness::new().await;
     seed(&h, "s1", "starting", true).await;
     seed(&h, "s2", "processing", true).await;
-    reconcile_on_boot(Arc::clone(&h.ctx), Err("oauth file missing".to_string())).await;
+    let no_client: ClientFactory = Arc::new(|| Err("oauth file missing".to_string()));
+    reconcile_on_boot(&h.ctx, &no_client).await;
     let row = h.row("s1").await;
     assert_eq!(row.state, "failed");
     assert!(reason(&row).contains("no YouTube manage client"), "{row:?}");
@@ -378,9 +379,158 @@ async fn boot_reconcile_leaves_finished_sessions_alone() {
     let h = Harness::new().await;
     seed(&h, "s-done", "done", true).await;
     seed(&h, "s-failed", "failed", true).await;
-    reconcile_on_boot(Arc::clone(&h.ctx), Ok(h.yt())).await;
+    reconcile_on_boot(&h.ctx, &h.clients()).await;
     assert_eq!(h.row("s-done").await.state, "done");
     assert_eq!(h.row("s-failed").await.state, "failed");
     assert!(h.rig.calls().is_empty());
     assert!(h.yt_state.transitions().is_empty());
+}
+
+// ---- failed teardowns stay pending until a retry is clean ----------------------
+
+#[tokio::test]
+async fn a_failed_teardown_blocks_new_sessions_until_a_retry_cleans_it() {
+    let rig = FakeRig::default();
+    *rig.servers.lock().unwrap() = VecDeque::from([Ok(1)]);
+    let mut h = Harness::with(rig, timings()).await;
+    h.ready_session("s1").await;
+    let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
+    assert!(row.cleanup_pending, "{row:?}");
+    assert_eq!(
+        h.create("s2").await,
+        CreateOutcome::CleanupPending(vec!["s1".to_string()])
+    );
+
+    // Still failing: stays pending.
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 1);
+    assert!(h.row("s1").await.cleanup_pending);
+
+    *h.rig.servers.lock().unwrap() = VecDeque::from([Ok(0)]);
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
+    let row = h.row("s1").await;
+    assert!(!row.cleanup_pending);
+    assert_eq!(row.state, "failed");
+    assert!(
+        reason(&row).ends_with("; cleanup completed on a later retry"),
+        "{row:?}"
+    );
+    let reaped = h
+        .actions()
+        .iter()
+        .filter(|a| **a == Action::AvGateSessionReaped)
+        .count();
+    assert_eq!(reaped, 2, "one audit row per retry");
+    *h.yt_state.life.lock().unwrap() = "ready".to_string();
+    h.ready_session("s2").await;
+}
+
+#[tokio::test]
+async fn a_clean_teardown_leaves_nothing_pending() {
+    let h = Harness::new().await;
+    h.ready_session("s1").await;
+    let row = stop_and_wait(&h, "s1", SessionState::Done).await;
+    assert!(!row.cleanup_pending);
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
+}
+
+#[tokio::test]
+async fn the_maintenance_loop_reconciles_then_retries_until_clean() {
+    let rig = FakeRig::default();
+    *rig.servers.lock().unwrap() = VecDeque::from([Ok(1), Ok(1), Ok(1), Ok(1), Ok(1), Ok(0)]);
+    let h = Harness::with(rig, timings()).await;
+    seed(&h, "s1", "ready", true).await;
+    let ctx = Arc::new(SessionCtx {
+        pool: h.ctx.pool.clone(),
+        audit_tx: h.ctx.audit_tx.clone(),
+        registry: Arc::new(AvGateRegistry::default()),
+        rig: h.rig.clone(),
+        timings: AvGateTimings {
+            servers_gone_timeout: Duration::from_millis(1),
+            ..timings()
+        },
+        event_name: "E2E-Test".to_string(),
+        stream_title: "e2e rtmp".to_string(),
+        daily_quota_budget: 4_000,
+    });
+    let task = tokio::spawn(run_maintenance(Arc::clone(&ctx), h.clients()));
+    let clean = async {
+        loop {
+            let row = h.row("s1").await;
+            if row.state == "failed" && !row.cleanup_pending {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let row = tokio::time::timeout(Duration::from_secs(8), clean)
+        .await
+        .expect("the loop must eventually clean the session");
+    task.abort();
+    assert!(ctx.registry.is_reconciled());
+    assert!(reason(&row).starts_with("Restreamer restarted during the session"));
+    assert!(reason(&row).ends_with("cleanup completed on a later retry"));
+}
+
+#[tokio::test]
+async fn a_boot_reconcile_that_cannot_list_keeps_the_api_closed() {
+    let h = Harness::new().await;
+    let ctx = Arc::new(SessionCtx {
+        pool: h.ctx.pool.clone(),
+        audit_tx: h.ctx.audit_tx.clone(),
+        registry: Arc::new(AvGateRegistry::default()),
+        rig: h.rig.clone(),
+        timings: timings(),
+        event_name: "E2E-Test".to_string(),
+        stream_title: "e2e rtmp".to_string(),
+        daily_quota_budget: 4_000,
+    });
+    sqlx::query("ALTER TABLE av_gate_sessions RENAME TO av_gate_sessions_gone")
+        .execute(&h.ctx.pool)
+        .await
+        .unwrap();
+    reconcile_on_boot(&ctx, &h.clients()).await;
+    assert!(!ctx.registry.is_reconciled());
+    assert_eq!(retry_cleanups(&ctx, &h.clients()).await, 1);
+}
+
+#[tokio::test]
+async fn a_reaped_session_counts_its_own_client_spend_once() {
+    let h = Harness::new().await;
+    let yt = h.yt();
+    yt.stream_status("st-e2e").await.unwrap();
+    assert_eq!(yt.units_used(), 1);
+    let mut row = AvGateSessionRow::new_starting("s1", "r", "t", &now_ts());
+    row.state = "processing".to_string();
+    row.broadcast_id = Some("bc-1".to_string());
+    row.quota_units = 10;
+    store::save(&h.ctx.pool, &row).await.unwrap();
+    reap_dead_driver(Arc::clone(&h.ctx), Some(yt), "s1").await;
+    assert_eq!(h.row("s1").await.quota_units, 10);
+}
+
+#[tokio::test]
+async fn a_processing_session_persists_its_quota_spend_as_it_polls() {
+    let h = Harness::new().await;
+    h.ready_session("s1").await;
+    *h.yt_state.video.lock().unwrap() = "processing".to_string();
+    let processing = stop_and_wait(&h, "s1", SessionState::Processing).await;
+    let grew = async {
+        while h.row("s1").await.quota_units <= processing.quota_units + 2 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), grew)
+        .await
+        .expect("each VOD poll must persist its unit");
+    assert_eq!(h.row("s1").await.state, "processing");
+}
+
+#[tokio::test]
+async fn an_upload_status_of_processed_also_completes_the_session() {
+    let h = Harness::new().await;
+    h.ready_session("s1").await;
+    *h.yt_state.video.lock().unwrap() = "processing".to_string();
+    *h.yt_state.upload.lock().unwrap() = "processed".to_string();
+    let row = stop_and_wait(&h, "s1", SessionState::Done).await;
+    assert_eq!(row.vod_id.as_deref(), Some("bc-1"));
 }

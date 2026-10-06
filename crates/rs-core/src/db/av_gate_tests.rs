@@ -19,6 +19,7 @@ fn full_row(id: &str, created_at: &str, state: &str, units: i64) -> AvGateSessio
         stream_id: Some("st-1".to_string()),
         event_id: Some(9278),
         went_live: true,
+        cleanup_pending: true,
         vod_id: Some("bc-1".to_string()),
         reason: Some("why".to_string()),
         quota_units: units,
@@ -44,6 +45,7 @@ async fn new_starting_row_round_trips_with_empty_optionals() {
     let row = AvGateSessionRow::new_starting("s2", "restreamer-ci", "t", "2026-10-06T10:00:00Z");
     assert_eq!(row.state, "starting");
     assert!(!row.went_live);
+    assert!(!row.cleanup_pending);
     assert_eq!(row.quota_units, 0);
     save(&p, &row).await.unwrap();
     assert_eq!(get(&p, "s2").await.unwrap(), Some(row));
@@ -134,4 +136,31 @@ async fn quota_units_since_sums_only_sessions_at_or_after_the_cutoff() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn list_cleanup_pending_returns_only_flagged_rows_oldest_first() {
+    let p = pool().await;
+    let mut clean = full_row("clean", "2026-10-06T09:00:00.000Z", "failed", 0);
+    clean.cleanup_pending = false;
+    save(&p, &clean).await.unwrap();
+    save(
+        &p,
+        &full_row("late", "2026-10-06T11:00:00.000Z", "failed", 0),
+    )
+    .await
+    .unwrap();
+    save(
+        &p,
+        &full_row("early", "2026-10-06T10:00:00.000Z", "failed", 0),
+    )
+    .await
+    .unwrap();
+    let ids: Vec<String> = list_cleanup_pending(&p)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec!["early", "late"]);
 }

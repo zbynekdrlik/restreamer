@@ -211,8 +211,8 @@ async fn the_access_token_is_refreshed_once_and_reused() {
         .mount(&s)
         .await;
     let c = client(&s);
-    assert_eq!(c.video_processing_status("v").await.unwrap(), None);
-    assert_eq!(c.video_processing_status("v").await.unwrap(), None);
+    assert_eq!(c.vod_status("v").await.unwrap(), VodStatus::default());
+    assert_eq!(c.vod_status("v").await.unwrap(), VodStatus::default());
 }
 
 #[tokio::test]
@@ -224,8 +224,8 @@ async fn a_token_shorter_lived_than_the_margin_is_refreshed_every_call() {
         .mount(&s)
         .await;
     let c = client(&s);
-    c.video_processing_status("v").await.unwrap();
-    c.video_processing_status("v").await.unwrap();
+    c.vod_status("v").await.unwrap();
+    c.vod_status("v").await.unwrap();
 }
 
 #[tokio::test]
@@ -352,6 +352,7 @@ async fn find_stream_by_title_reports_absence_and_non_reusable_streams() {
         .await;
     let c = client(&s);
     assert_eq!(c.find_stream_by_title("e2e rtmp").await.unwrap(), None);
+    assert_eq!(c.units_used(), 1, "an empty nextPageToken ends the lookup");
     let one_off = c.find_stream_by_title("one-off").await.unwrap().unwrap();
     assert!(!one_off.is_reusable);
     assert_eq!(one_off.stream_status, "");
@@ -482,10 +483,11 @@ async fn status_reads_return_the_value_or_none() {
         .await;
     Mock::given(method("GET"))
         .and(path("/yt/videos"))
-        .and(query_param("part", "processingDetails"))
+        .and(query_param("part", "processingDetails,status"))
         .and(query_param("id", "bc-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{"processingDetails": {"processingStatus": "succeeded"}}]
+            "items": [{"processingDetails": {"processingStatus": "succeeded"},
+                       "status": {"uploadStatus": "processed"}}]
         })))
         .mount(&s)
         .await;
@@ -502,8 +504,11 @@ async fn status_reads_return_the_value_or_none() {
     );
     assert_eq!(c.broadcast_life_cycle("gone").await.unwrap(), None);
     assert_eq!(
-        c.video_processing_status("bc-1").await.unwrap().as_deref(),
-        Some("succeeded")
+        c.vod_status("bc-1").await.unwrap(),
+        VodStatus {
+            processing: Some("succeeded".to_string()),
+            upload: Some("processed".to_string()),
+        }
     );
     assert_eq!(c.stream_status("gone").await.unwrap(), None);
     assert_eq!(c.units_used(), 4);
@@ -515,4 +520,23 @@ fn new_targets_the_real_google_endpoints() {
     assert_eq!(c.api_base, DEFAULT_API_BASE);
     assert_eq!(c.token_uri, DEFAULT_TOKEN_URI);
     assert_eq!(c.units_used(), 0);
+}
+
+#[tokio::test]
+async fn an_attached_quota_tracker_refuses_a_call_it_cannot_pay() {
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts/bind"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    static BUCKET: std::sync::OnceLock<crate::quota::QuotaTracker> = std::sync::OnceLock::new();
+    let bucket = BUCKET.get_or_init(|| crate::quota::QuotaTracker::new(60));
+    let c = client(&s).with_quota_tracker(bucket);
+    c.bind_broadcast("bc-1", "st").await.unwrap();
+    let err = c.bind_broadcast("bc-1", "st").await.unwrap_err();
+    assert!(err.to_string().contains("quota exhausted"), "{err}");
+    assert_eq!(c.units_used(), units::BIND, "a refused call is not charged");
+    assert_eq!(bucket.remaining(), 10);
 }

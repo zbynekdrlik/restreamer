@@ -13,7 +13,13 @@
 //!
 //! Every call charges its YouTube quota cost ([`units`]) to a counter BEFORE
 //! the request (Google bills failed calls too), so the session can enforce its
-//! daily budget from real spend.
+//! daily budget from real spend. With [`ManageClient::with_quota_tracker`] it
+//! also draws from the process-wide project bucket the health polling uses, so
+//! the two together can never plan past Google's per-project quota.
+//!
+//! The token refresh does not reuse `oauth::refresh_access_token`: that one
+//! copies Google's response body into its error, and a body can echo request
+//! data. Here only Google's error CODE leaves the refresh.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -24,6 +30,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::quota::QuotaTracker;
 use crate::{Result, YouTubeError};
 
 /// The scope that allows inserting and transitioning broadcasts.
@@ -157,6 +164,8 @@ pub struct ManageClient {
     creds: ManageCredentials,
     cached: Mutex<Option<CachedToken>>,
     units: AtomicU32,
+    /// The project-wide bucket shared with the health polling, if attached.
+    quota: Option<&'static QuotaTracker>,
 }
 
 /// Google's `{"error": {"message", "errors": [{"reason"}]}}` as
@@ -203,7 +212,15 @@ impl ManageClient {
             creds,
             cached: Mutex::new(None),
             units: AtomicU32::new(0),
+            quota: None,
         }
+    }
+
+    /// Draw every call's cost from `tracker` too; a call the bucket cannot
+    /// pay is refused before it is sent.
+    pub fn with_quota_tracker(mut self, tracker: &'static QuotaTracker) -> Self {
+        self.quota = Some(tracker);
+        self
     }
 
     /// Quota units charged so far by this client.
@@ -265,6 +282,10 @@ impl ManageClient {
         body: Option<&Value>,
         cost: u32,
     ) -> Result<(u16, String)> {
+        if let Some(q) = self.quota {
+            q.acquire(cost)
+                .map_err(|e| YouTubeError::Other(e.to_string()))?;
+        }
         self.units.fetch_add(cost, Ordering::Relaxed);
         let token = self.access_token().await?;
         let mut req = self
@@ -444,22 +465,36 @@ impl ManageClient {
             .map(str::to_string))
     }
 
-    /// `processingDetails.processingStatus` of a video (`processing`,
-    /// `succeeded`, `failed`, `terminated`), or `None` if YouTube has none yet.
-    pub async fn video_processing_status(&self, video_id: &str) -> Result<Option<String>> {
+    /// Where YouTube is with the VOD of `video_id`.
+    pub async fn vod_status(&self, video_id: &str) -> Result<VodStatus> {
         let v = self
             .call(
                 Method::GET,
                 "videos",
-                &[("part", "processingDetails"), ("id", video_id)],
+                &[("part", "processingDetails,status"), ("id", video_id)],
                 None,
                 units::LIST,
             )
             .await?;
-        Ok(v["items"][0]["processingDetails"]["processingStatus"]
-            .as_str()
-            .map(str::to_string))
+        let item = &v["items"][0];
+        Ok(VodStatus {
+            processing: item["processingDetails"]["processingStatus"]
+                .as_str()
+                .map(str::to_string),
+            upload: item["status"]["uploadStatus"].as_str().map(str::to_string),
+        })
     }
+}
+
+/// `videos.list` facts about a VOD. Both fields are read because Google does
+/// not document which one a live archive reports while it is processed:
+/// `processingDetails.processingStatus` (`processing|succeeded|failed|
+/// terminated`) and `status.uploadStatus` (`uploaded|processed|failed|
+/// rejected|deleted`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VodStatus {
+    pub processing: Option<String>,
+    pub upload: Option<String>,
 }
 
 #[cfg(test)]

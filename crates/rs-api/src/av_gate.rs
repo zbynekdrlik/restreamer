@@ -76,6 +76,9 @@ pub struct SessionView {
     pub vod_id: Option<String>,
     pub reason: Option<String>,
     pub quota_units: i64,
+    /// The teardown failed and is being retried; no new session starts
+    /// until it is clean.
+    pub cleanup_pending: bool,
     pub timestamps: SessionTimestamps,
 }
 
@@ -99,6 +102,7 @@ impl From<AvGateSessionRow> for SessionView {
             vod_id: r.vod_id,
             reason: r.reason,
             quota_units: r.quota_units,
+            cleanup_pending: r.cleanup_pending,
             timestamps: SessionTimestamps {
                 created: r.created_at,
                 ready: r.ready_at,
@@ -124,13 +128,25 @@ struct Active {
 
 /// One session at a time. A session holds the slot from admission until its
 /// teardown finished (`processing` or `failed`): the reusable stream, the CI
-/// event and stream OBS are single resources.
+/// event and stream OBS are single resources. Closed until the boot reconcile
+/// has dealt with whatever a restart left behind.
 #[derive(Default)]
 pub struct AvGateRegistry {
     active: Mutex<Option<Active>>,
+    reconciled: std::sync::atomic::AtomicBool,
 }
 
 impl AvGateRegistry {
+    /// Open the API: the boot reconcile finished.
+    pub fn mark_reconciled(&self) {
+        self.reconciled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_reconciled(&self) -> bool {
+        self.reconciled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Take the slot for `holder`, or return whoever has it. On success the
     /// returned receiver flips to `true` when a stop is requested.
     pub fn claim(&self, holder: Holder) -> Result<watch::Receiver<bool>, Holder> {
@@ -218,8 +234,7 @@ pub enum RigDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartEventError {
     /// Refused before touching anything (another event is live, delivery not
-    /// configured). The teardown must NOT stop the event or count servers: a
-    /// production event may be the one that is running.
+    /// configured, the event is gone). Nothing of the event needs stopping.
     Refused(String),
     /// Something may have been started (flags set, a VPS created).
     Failed(String),
@@ -254,6 +269,9 @@ pub struct AvGateTimings {
     /// VOD processing polling.
     pub processing_poll: Duration,
     pub processing_timeout: Duration,
+    /// First wait before a failed teardown is retried; doubles per failed
+    /// round, capped at 24x.
+    pub cleanup_retry: Duration,
 }
 
 impl AvGateTimings {
@@ -265,6 +283,7 @@ impl AvGateTimings {
             servers_gone_timeout: Duration::from_secs(180),
             processing_poll: Duration::from_secs(30),
             processing_timeout: Duration::from_secs(cfg.processing_timeout_secs),
+            cleanup_retry: Duration::from_secs(5 * 60),
         }
     }
 }

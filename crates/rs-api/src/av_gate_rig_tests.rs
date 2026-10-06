@@ -67,9 +67,37 @@ fn the_server_selector_is_scoped_to_this_box_and_event() {
     );
 }
 
+/// A state whose delivery orchestrator points at an unused mock Hetzner.
+async fn hetzner_state() -> (AppState, MockServer) {
+    let hetzner = MockServer::start().await;
+    let s = with_hetzner(state().await, &hetzner.uri());
+    (s, hetzner)
+}
+
+fn ev(receiving: bool, delivering: bool) -> rs_core::models::StreamingEvent {
+    rs_core::models::StreamingEvent {
+        id: 1,
+        name: "x".to_string(),
+        received_bytes: 0,
+        receiving_activated: receiving,
+        delivering_activated: delivering,
+        cache_delay_secs: None,
+        created_from: None,
+        rescue_video_url: None,
+    }
+}
+
+#[test]
+fn an_event_is_active_when_it_receives_or_delivers() {
+    assert!(!is_active(&ev(false, false)));
+    assert!(is_active(&ev(true, false)));
+    assert!(is_active(&ev(false, true)));
+    assert!(is_active(&ev(true, true)));
+}
+
 #[tokio::test]
 async fn resolve_event_takes_the_drain_from_the_event_or_the_default() {
-    let s = state().await;
+    let (s, _h) = hetzner_state().await;
     let id = event(&s, "E2E-Test", Some(30), false).await;
     event(&s, "Sunday", None, false).await;
     let rig = AppRig::new(s.clone());
@@ -96,23 +124,28 @@ async fn resolve_event_takes_the_drain_from_the_event_or_the_default() {
 
 #[tokio::test]
 async fn resolve_event_refuses_while_another_event_is_live() {
-    let s = state().await;
+    let (s, _h) = hetzner_state().await;
     event(&s, "E2E-Test", None, false).await;
     event(&s, "Sunday", None, true).await;
     let err = AppRig::new(s).resolve_event("E2E-Test").await.unwrap_err();
-    assert!(
-        err.contains("another event is active (\"Sunday\")"),
-        "{err}"
-    );
+    assert!(err.contains("event \"Sunday\" is active"), "{err}");
 }
 
 #[tokio::test]
-async fn resolve_event_accepts_its_own_event_already_active() {
+async fn resolve_event_refuses_its_own_event_in_use_by_another_run() {
+    let (s, _h) = hetzner_state().await;
+    event(&s, "E2E-Test", Some(5), true).await;
+    let err = AppRig::new(s).resolve_event("E2E-Test").await.unwrap_err();
+    assert!(err.contains("event \"E2E-Test\" is active"), "{err}");
+}
+
+#[tokio::test]
+async fn resolve_event_refuses_without_a_hetzner_token() {
     let s = state().await;
-    let id = event(&s, "E2E-Test", Some(5), true).await;
+    event(&s, "E2E-Test", None, false).await;
     assert_eq!(
-        AppRig::new(s).resolve_event("E2E-Test").await.unwrap().id,
-        id
+        AppRig::new(s).resolve_event("E2E-Test").await,
+        Err("delivery is not configured (no Hetzner token)".to_string())
     );
 }
 
@@ -299,7 +332,8 @@ async fn session_ctx_uses_the_production_rig_and_the_config() {
     config.av_gate.stream_title = "gate stream".to_string();
     config.av_gate.daily_quota_budget = 1_234;
     config.av_gate.idle_timeout_secs = 99;
-    let s = state_with(config).await;
+    let hetzner = MockServer::start().await;
+    let s = with_hetzner(state_with(config).await, &hetzner.uri());
     let ctx = session_ctx(&s);
     assert_eq!(ctx.event_name, "Gate-Event");
     assert_eq!(ctx.stream_title, "gate stream");
@@ -312,12 +346,24 @@ async fn session_ctx_uses_the_production_rig_and_the_config() {
 }
 
 #[tokio::test]
-async fn the_boot_reconcile_fails_a_session_left_starting() {
+async fn the_maintenance_task_fails_a_session_left_starting_and_opens_the_api() {
     let s = state().await;
     let row = AvGateSessionRow::new_starting("s1", "r", "t", "2026-10-06T10:00:00.000Z");
     store::save(&s.pool, &row).await.unwrap();
-    reconcile_av_gate_on_boot(s.clone()).await;
+    assert!(!s.av_gate.registry.is_reconciled());
+    let task = tokio::spawn(run_av_gate_maintenance(s.clone()));
+    let reconciled = async {
+        while !s.av_gate.registry.is_reconciled() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), reconciled)
+        .await
+        .unwrap();
+    // Read BEFORE aborting: an abort in the middle of the task's own query
+    // can leave the single in-memory connection unusable.
     let row = store::get(&s.pool, "s1").await.unwrap().unwrap();
+    task.abort();
     assert_eq!(row.state, "failed");
     assert_eq!(
         row.reason.as_deref(),

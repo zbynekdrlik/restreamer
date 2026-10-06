@@ -28,6 +28,9 @@ pub(crate) struct FakeRig {
     pub stop: StdMutex<Result<(), String>>,
     pub servers: StdMutex<VecDeque<Result<usize, String>>>,
     pub panic_on_delivery: AtomicBool,
+    pub panic_on_start: AtomicBool,
+    /// When set, `start_event` waits for a notification first.
+    pub start_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl Default for FakeRig {
@@ -43,6 +46,8 @@ impl Default for FakeRig {
             stop: StdMutex::new(Ok(())),
             servers: StdMutex::new(VecDeque::from([Ok(0)])),
             panic_on_delivery: AtomicBool::new(false),
+            panic_on_start: AtomicBool::new(false),
+            start_gate: StdMutex::new(None),
         }
     }
 }
@@ -76,6 +81,14 @@ impl AvGateRig for FakeRig {
     }
     async fn start_event(&self, event_id: i64) -> Result<(), StartEventError> {
         self.log(format!("start:{event_id}"));
+        let gate = self.start_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        assert!(
+            !self.panic_on_start.load(Ordering::SeqCst),
+            "scripted start panic"
+        );
         self.start.lock().unwrap().clone()
     }
     async fn delivery(&self, event_id: i64) -> Result<RigDelivery, String> {
@@ -108,6 +121,8 @@ pub(crate) struct YtState {
     /// The life cycle a successful `transition live` lands in.
     pub live_lands_as: StdMutex<String>,
     pub video: StdMutex<String>,
+    /// `status.uploadStatus` of the VOD.
+    pub upload: StdMutex<String>,
     /// Calls that answer an error: lookup, insert, bind, stream, live,
     /// complete, life, video.
     pub fail: StdMutex<HashSet<&'static str>>,
@@ -124,6 +139,7 @@ impl Default for YtState {
             life: StdMutex::new("ready".to_string()),
             live_lands_as: StdMutex::new("live".to_string()),
             video: StdMutex::new("succeeded".to_string()),
+            upload: StdMutex::new("uploaded".to_string()),
             fail: StdMutex::new(HashSet::new()),
             transitions: StdMutex::new(Vec::new()),
             inserts: AtomicU32::new(0),
@@ -264,8 +280,10 @@ pub(crate) async fn fake_youtube(state: Arc<YtState>) -> MockServer {
                 return api_error("backendError");
             }
             let video = st.video.lock().unwrap().clone();
+            let upload = st.upload.lock().unwrap().clone();
             ResponseTemplate::new(200).set_body_json(
-                json!({"items": [{"processingDetails": {"processingStatus": video}}]}),
+                json!({"items": [{"processingDetails": {"processingStatus": video},
+                                  "status": {"uploadStatus": upload}}]}),
             )
         })
         .mount(&s)
@@ -300,6 +318,7 @@ pub(crate) fn timings() -> AvGateTimings {
         servers_gone_timeout: Duration::from_millis(150),
         processing_poll: Duration::from_millis(5),
         processing_timeout: Duration::from_secs(3),
+        cleanup_retry: Duration::from_millis(20),
     }
 }
 
@@ -328,7 +347,11 @@ impl Harness {
         let ctx = Arc::new(SessionCtx {
             pool,
             audit_tx,
-            registry: Arc::new(AvGateRegistry::default()),
+            registry: {
+                let r = AvGateRegistry::default();
+                r.mark_reconciled();
+                Arc::new(r)
+            },
             rig: rig.clone(),
             timings,
             event_name: "E2E-Test".to_string(),
@@ -347,6 +370,19 @@ impl Harness {
 
     pub fn yt(&self) -> Arc<ManageClient> {
         yt_client(&self.server, &self.dir)
+    }
+
+    /// A factory that builds a fresh client per call (as the boot reconcile
+    /// and the cleanup retries do).
+    pub fn clients(&self) -> ClientFactory {
+        let api = format!("{}/yt", self.server.uri());
+        let token = format!("{}/token", self.server.uri());
+        let oauth = oauth_file(&self.dir);
+        Arc::new(move || {
+            let creds = ManageCredentials::from_oauth_file(&oauth, "cid", "cs-fake")
+                .map_err(|e| e.to_string())?;
+            Ok(ManageClient::with_endpoints(creds, &api, &token))
+        })
     }
 
     pub async fn create(&self, id: &str) -> CreateOutcome {
@@ -428,15 +464,47 @@ fn life_action_classifies_every_life_cycle() {
     }
 }
 
+fn vod(processing: Option<&str>, upload: Option<&str>) -> VodStatus {
+    VodStatus {
+        processing: processing.map(str::to_string),
+        upload: upload.map(str::to_string),
+    }
+}
+
 #[test]
-fn vod_step_maps_processing_status() {
-    assert_eq!(vod_step(Some("succeeded")), VodStep::Done);
-    assert!(matches!(vod_step(Some("failed")), VodStep::Failed(r) if r.contains("(failed)")));
-    assert!(
-        matches!(vod_step(Some("terminated")), VodStep::Failed(r) if r.contains("(terminated)"))
+fn vod_step_reads_both_processing_and_upload_status() {
+    assert_eq!(vod_step(&vod(Some("succeeded"), None)), VodStep::Done);
+    assert_eq!(
+        vod_step(&vod(Some("processing"), Some("processed"))),
+        VodStep::Done
     );
-    assert_eq!(vod_step(Some("processing")), VodStep::Pending);
-    assert_eq!(vod_step(None), VodStep::Pending);
+    for (p, u, word) in [
+        (Some("failed"), None, "(failed)"),
+        (Some("terminated"), Some("uploaded"), "(terminated)"),
+        (None, Some("failed"), "(failed)"),
+        (Some("processing"), Some("rejected"), "(rejected)"),
+        (None, Some("deleted"), "(deleted)"),
+    ] {
+        assert!(
+            matches!(vod_step(&vod(p, u)), VodStep::Failed(r) if r.contains(word)),
+            "{p:?} {u:?}"
+        );
+    }
+    assert_eq!(
+        vod_step(&vod(Some("processing"), Some("uploaded"))),
+        VodStep::Pending
+    );
+    assert_eq!(vod_step(&vod(None, None)), VodStep::Pending);
+}
+
+#[test]
+fn cleanup_retries_back_off_to_a_two_hour_cap() {
+    let base = Duration::from_secs(300);
+    assert_eq!(cleanup_retry_delay(base, 0), Duration::from_secs(300));
+    assert_eq!(cleanup_retry_delay(base, 1), Duration::from_secs(600));
+    assert_eq!(cleanup_retry_delay(base, 4), Duration::from_secs(4_800));
+    assert_eq!(cleanup_retry_delay(base, 5), Duration::from_secs(7_200));
+    assert_eq!(cleanup_retry_delay(base, 40), Duration::from_secs(7_200));
 }
 
 #[test]
@@ -538,18 +606,17 @@ async fn a_transition_still_starting_is_not_ready_yet() {
         h.create("s-ls").await,
         CreateOutcome::Created { .. }
     ));
-    let wait_live = async {
-        while h.yt_state.transitions().is_empty() {
+    let wait_went_live = async {
+        while !h.row("s-ls").await.went_live {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), wait_live)
+    tokio::time::timeout(Duration::from_secs(5), wait_went_live)
         .await
         .unwrap();
+    // Several more polls see `liveStarting`; the session must stay starting.
     tokio::time::sleep(Duration::from_millis(40)).await;
-    let row = h.row("s-ls").await;
-    assert_eq!(row.state, "starting");
-    assert!(row.went_live, "the live transition was sent");
+    assert_eq!(h.row("s-ls").await.state, "starting");
     *h.yt_state.life.lock().unwrap() = "live".to_string();
     h.wait_state("s-ls", SessionState::Ready).await;
     assert_eq!(h.yt_state.transitions(), vec!["live"], "live is sent once");
@@ -851,6 +918,111 @@ async fn the_quota_guard_admits_a_session_that_exactly_fits() {
         h.create("s1").await,
         CreateOutcome::Created { .. }
     ));
+}
+
+#[tokio::test]
+async fn nothing_starts_before_the_boot_reconcile_ran() {
+    let h = Harness::new().await;
+    let fresh = SessionCtx {
+        pool: h.ctx.pool.clone(),
+        audit_tx: h.ctx.audit_tx.clone(),
+        registry: Arc::new(AvGateRegistry::default()),
+        rig: h.rig.clone(),
+        timings: timings(),
+        event_name: "E2E-Test".to_string(),
+        stream_title: "e2e rtmp".to_string(),
+        daily_quota_budget: 4_000,
+    };
+    let outcome = create_session(
+        Arc::new(fresh),
+        h.yt(),
+        "s1".to_string(),
+        "r".to_string(),
+        "t".to_string(),
+    )
+    .await;
+    assert_eq!(outcome, CreateOutcome::NotReady);
+    assert!(h.rig.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_dropped_create_request_still_runs_the_session_to_its_end() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let h = Harness::with(rig, timings()).await;
+    let handle = spawn_create(
+        Arc::clone(&h.ctx),
+        h.yt(),
+        "s1".to_string(),
+        "camera-box".to_string(),
+        "t".to_string(),
+    );
+    let wait_start = async {
+        while !h.rig.called(&format!("start:{EVENT}")) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), wait_start)
+        .await
+        .unwrap();
+    // The client disconnects: axum drops the handler, and with it the handle.
+    drop(handle);
+    gate.notify_one();
+    h.wait_state("s1", SessionState::Ready).await;
+    assert_eq!(
+        h.ctx.registry.holder().map(|h| h.session_id).as_deref(),
+        Some("s1"),
+        "the session is driven (and will be reaped) even without its caller"
+    );
+}
+
+#[tokio::test]
+async fn a_start_that_panics_is_reaped() {
+    let rig = FakeRig::default();
+    rig.panic_on_start.store(true, Ordering::SeqCst);
+    let h = Harness::with(rig, timings()).await;
+    let outcome = spawn_create(
+        Arc::clone(&h.ctx),
+        h.yt(),
+        "s1".to_string(),
+        "camera-box".to_string(),
+        "t".to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&outcome, CreateOutcome::Internal(e) if e.contains("start died")),
+        "{outcome:?}"
+    );
+    let row = h.row("s1").await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(reason(&row), "the session driver died");
+    assert_eq!(row.event_id, Some(EVENT), "recorded before the start");
+    assert!(h.rig.called(&format!("stop:{EVENT}")));
+    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    assert_eq!(h.ctx.registry.holder(), None);
+}
+
+#[tokio::test]
+async fn spawn_create_returns_the_outcome() {
+    let h = Harness::new().await;
+    let outcome = spawn_create(
+        Arc::clone(&h.ctx),
+        h.yt(),
+        "s1".to_string(),
+        "camera-box".to_string(),
+        "t".to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        CreateOutcome::Created {
+            session_id: "s1".to_string(),
+            broadcast_id: "bc-1".to_string()
+        }
+    );
 }
 
 #[path = "av_gate_driver_stop_tests.rs"]

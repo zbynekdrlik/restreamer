@@ -437,9 +437,9 @@ impl ServiceCore {
             });
         }
 
-        // #357: tear down an A/V-gate session a crash left running. After the
+        // #357: A/V-gate boot reconcile + failed-teardown retries. After the
         // delivery reconcile above, so the delivery it re-attached is stopped.
-        tokio::spawn(rs_api::av_gate_rig::reconcile_av_gate_on_boot(
+        tokio::spawn(rs_api::av_gate_rig::run_av_gate_maintenance(
             boot_av_gate_state,
         ));
 

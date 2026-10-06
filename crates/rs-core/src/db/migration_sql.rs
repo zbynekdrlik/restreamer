@@ -170,7 +170,10 @@ CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
 /// V30 (#357): one row per YouTube A/V-gate session. The row is the durable
 /// record the boot reconcile reads after a crash: a session left in
 /// `starting`/`ready` still owns a live broadcast and a delivery VPS, and must
-/// be torn down. `quota_units` backs the rolling-24h quota guard.
+/// be torn down. `cleanup_pending` marks a session whose teardown failed (a
+/// broadcast possibly still live, a VPS possibly still billing): it is retried
+/// until clean, and no new session starts meanwhile. `quota_units` backs the
+/// rolling-24h quota guard.
 pub(crate) const MIGRATION_V30_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS av_gate_sessions (
     id                TEXT    PRIMARY KEY,
@@ -181,6 +184,7 @@ CREATE TABLE IF NOT EXISTS av_gate_sessions (
     stream_id         TEXT,
     event_id          INTEGER,
     went_live         INTEGER NOT NULL DEFAULT 0,
+    cleanup_pending   INTEGER NOT NULL DEFAULT 0,
     vod_id            TEXT,
     reason            TEXT,
     quota_units       INTEGER NOT NULL DEFAULT 0,

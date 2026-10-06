@@ -39,6 +39,14 @@ fn the_registry_holds_one_session_at_a_time() {
 }
 
 #[test]
+fn the_registry_opens_only_once_reconciled() {
+    let r = AvGateRegistry::default();
+    assert!(!r.is_reconciled());
+    r.mark_reconciled();
+    assert!(r.is_reconciled());
+}
+
+#[test]
 fn a_stop_reaches_only_the_holding_session() {
     let r = AvGateRegistry::default();
     assert!(!r.request_stop("a"), "nobody holds the slot");
@@ -95,6 +103,7 @@ fn timings_come_from_the_config() {
             servers_gone_timeout: Duration::from_secs(180),
             processing_poll: Duration::from_secs(30),
             processing_timeout: Duration::from_secs(62),
+            cleanup_retry: Duration::from_secs(300),
         }
     );
 }
@@ -110,6 +119,7 @@ fn the_view_carries_every_row_field() {
         stream_id: Some("st".to_string()),
         event_id: Some(1),
         went_live: true,
+        cleanup_pending: true,
         vod_id: Some("v".to_string()),
         reason: Some("why".to_string()),
         quota_units: 9,
@@ -125,6 +135,7 @@ fn the_view_carries_every_row_field() {
         serde_json::json!({
             "session_id": "s", "state": "done", "requester": "r", "title": "t",
             "broadcast_id": "b", "vod_id": "v", "reason": "why", "quota_units": 9,
+            "cleanup_pending": true,
             "timestamps": {"created": "c", "ready": "r1", "stop_requested": "s1",
                            "processing": "p1", "finished": "f1"}
         })

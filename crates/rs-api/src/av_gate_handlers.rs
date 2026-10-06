@@ -32,7 +32,7 @@ use tracing::warn;
 
 use crate::access::{Origin, classify};
 use crate::av_gate::{SESSION_QUOTA_ESTIMATE, SessionState, SessionView, validate_request};
-use crate::av_gate_driver::{CreateOutcome, create_session};
+use crate::av_gate_driver::{CreateOutcome, spawn_create};
 use crate::av_gate_rig::{manage_client, session_ctx};
 use crate::state::AppState;
 
@@ -48,9 +48,10 @@ struct CreateRequest {
     title: Option<String>,
 }
 
-/// The configured token. The error names the problem, never the content.
-pub(crate) fn read_api_token(path: &Path) -> Result<String, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| {
+/// The configured token, read per request (a rotated file applies at once).
+/// The error names the problem, never the content.
+pub(crate) async fn read_api_token(path: &Path) -> Result<String, String> {
+    let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
         format!(
             "av-gate token file {} unreadable: {}",
             path.display(),
@@ -130,13 +131,14 @@ impl IntoResponse for Denied {
 }
 
 /// LAN origin + the bearer token.
-fn authorize(state: &AppState, peer: &Peer, headers: &HeaderMap) -> Result<(), Denied> {
+async fn authorize(state: &AppState, peer: &Peer, headers: &HeaderMap) -> Result<(), Denied> {
     let addr = peer.as_ref().map(|Extension(ConnectInfo(a))| a);
     if classify(addr, headers) != Origin::Local {
         warn!("av-gate: refused a non-LAN request");
         return Err(Denied::NotLan);
     }
     let expected = read_api_token(Path::new(&state.config.av_gate.api_token_file))
+        .await
         .map_err(Denied::NotProvisioned)?;
     match bearer(headers) {
         Some(given) if tokens_match(given, &expected) => Ok(()),
@@ -154,7 +156,7 @@ pub async fn create(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(denied) = authorize(&state, &peer, &headers) {
+    if let Err(denied) = authorize(&state, &peer, &headers).await {
         return denied.into_response();
     }
     let req: CreateRequest = match serde_json::from_slice(&body) {
@@ -171,7 +173,12 @@ pub async fn create(
         Ok(c) => Arc::new(c),
         Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, "not_provisioned", e),
     };
-    match create_session(session_ctx(&state), yt, session_id, requester, title).await {
+    let start = spawn_create(session_ctx(&state), yt, session_id, requester, title);
+    let outcome = match start.await {
+        Ok(outcome) => outcome,
+        Err(e) => CreateOutcome::Internal(format!("the session start task failed: {e}")),
+    };
+    match outcome {
         CreateOutcome::Created {
             session_id,
             broadcast_id,
@@ -183,6 +190,16 @@ pub async fn create(
         CreateOutcome::Busy(holder) => (
             StatusCode::CONFLICT,
             Json(json!({ "error": "busy", "holder": holder })),
+        )
+            .into_response(),
+        CreateOutcome::NotReady => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "starting_up",
+            "the boot reconcile of earlier sessions has not finished",
+        ),
+        CreateOutcome::CleanupPending(sessions) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "cleanup_pending", "sessions": sessions })),
         )
             .into_response(),
         CreateOutcome::QuotaExceeded { spent, budget } => (
@@ -215,7 +232,7 @@ pub async fn get(
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
 ) -> Response {
-    if let Err(denied) = authorize(&state, &peer, &headers) {
+    if let Err(denied) = authorize(&state, &peer, &headers).await {
         return denied.into_response();
     }
     match store::get(&state.pool, &id).await {
@@ -234,7 +251,7 @@ pub async fn stop(
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
 ) -> Response {
-    if let Err(denied) = authorize(&state, &peer, &headers) {
+    if let Err(denied) = authorize(&state, &peer, &headers).await {
         return denied.into_response();
     }
     let row = match store::get(&state.pool, &id).await {

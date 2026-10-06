@@ -2,8 +2,10 @@
 //! overview and the cleanup guarantee.
 //!
 //! One driver task per session owns it from creation to `done`/`failed`. Every
-//! exit path funnels through [`Session::teardown`], and a supervisor task
-//! tears the session down if the driver itself dies.
+//! exit path funnels through [`Session::teardown`]; a supervisor task tears the
+//! session down if its creation or its driver dies; a teardown that fails
+//! leaves `cleanup_pending` on the row, and the maintenance loop retries it
+//! (with backoff) until clean, refusing new sessions meanwhile.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,10 +13,11 @@ use std::time::Duration;
 use chrono::{SecondsFormat, Utc};
 use rs_core::audit::{self, Action, AuditRow, Severity, Source};
 use rs_core::db::av_gate::{self as store, AvGateSessionRow};
-use rs_youtube::manage::{BroadcastTransition, ManageClient};
+use rs_youtube::manage::{BroadcastTransition, ManageClient, VodStatus};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::av_gate::{
@@ -28,6 +31,13 @@ const MAX_POLL_ERRORS: u32 = 5;
 const MAX_LIVE_ATTEMPTS: u32 = 3;
 /// Attempts to complete the broadcast during a teardown.
 const COMPLETE_ATTEMPTS: u32 = 3;
+/// The cleanup retry backoff doubles up to this many times (5 min -> 160 min,
+/// then capped at 24 x the base: 2 h).
+const MAX_BACKOFF_DOUBLINGS: u32 = 5;
+
+/// Builds a fresh manage client (one per resumed session, so each row's quota
+/// spend is its own). `Err` when the oauth file is unusable.
+pub type ClientFactory = Arc<dyn Fn() -> Result<ManageClient, String> + Send + Sync>;
 
 /// Everything a session needs, shared by its driver and its supervisor.
 pub struct SessionCtx {
@@ -49,6 +59,11 @@ pub enum CreateOutcome {
         broadcast_id: String,
     },
     Busy(Holder),
+    /// The boot reconcile has not finished: an unfinished session from before
+    /// the restart may still own the event.
+    NotReady,
+    /// An earlier session's teardown failed and is being retried.
+    CleanupPending(Vec<String>),
     QuotaExceeded {
         spent: i64,
         budget: u32,
@@ -96,7 +111,7 @@ fn life_action(life_cycle: &str) -> LifeAction {
     }
 }
 
-/// Map a VOD `processingStatus` to the session's next step.
+/// Map what YouTube says about the VOD to the session's next step.
 #[derive(Debug, PartialEq, Eq)]
 enum VodStep {
     Done,
@@ -104,14 +119,25 @@ enum VodStep {
     Pending,
 }
 
-fn vod_step(status: Option<&str>) -> VodStep {
-    match status {
-        Some("succeeded") => VodStep::Done,
-        Some(s @ ("failed" | "terminated")) => {
+fn vod_step(status: &VodStatus) -> VodStep {
+    let processing = status.processing.as_deref();
+    let upload = status.upload.as_deref();
+    if processing == Some("succeeded") || upload == Some("processed") {
+        return VodStep::Done;
+    }
+    match (processing, upload) {
+        (Some(s @ ("failed" | "terminated")), _)
+        | (_, Some(s @ ("failed" | "rejected" | "deleted"))) => {
             VodStep::Failed(format!("YouTube could not process the VOD ({s})"))
         }
         _ => VodStep::Pending,
     }
+}
+
+/// The wait before the next cleanup retry after `failed_rounds` failed ones.
+fn cleanup_retry_delay(base: Duration, failed_rounds: u32) -> Duration {
+    let doubled = base * 2u32.pow(failed_rounds.min(MAX_BACKOFF_DOUBLINGS));
+    doubled.min(base * 24)
 }
 
 /// One session in flight: its durable row plus the client it spends quota on.
@@ -133,8 +159,11 @@ enum Wake {
 
 impl Session {
     fn new(ctx: Arc<SessionCtx>, yt: Option<Arc<ManageClient>>, row: AvGateSessionRow) -> Self {
+        // The client may already have spent units that the row includes (the
+        // reaper reuses the session's own client): count them once.
+        let spent = yt.as_ref().map_or(0, |c| i64::from(c.units_used()));
         Self {
-            base_units: row.quota_units,
+            base_units: row.quota_units - spent,
             ctx,
             yt,
             row,
@@ -209,16 +238,19 @@ impl Session {
         yt.bind_broadcast(&broadcast_id, &stream.id)
             .await
             .map_err(|e| format!("liveBroadcasts.bind failed: {e}"))?;
-        match self.ctx.rig.start_event(event.id).await {
-            Ok(()) => self.row.event_id = Some(event.id),
-            Err(StartEventError::Refused(r)) => return Err(r),
-            Err(StartEventError::Failed(r)) => {
-                self.row.event_id = Some(event.id);
-                return Err(r);
-            }
-        }
+        // Recorded BEFORE the start, so a crash inside it still leaves the
+        // boot reconcile an event to stop.
+        self.row.event_id = Some(event.id);
         self.persist().await;
-        Ok(event.drain)
+        match self.ctx.rig.start_event(event.id).await {
+            Ok(()) => Ok(event.drain),
+            Err(StartEventError::Refused(r)) => {
+                self.row.event_id = None;
+                self.persist().await;
+                Err(r)
+            }
+            Err(StartEventError::Failed(r)) => Err(r),
+        }
     }
 
     /// One readiness poll while `starting`. `Ok(true)` = ready.
@@ -366,7 +398,8 @@ impl Session {
     }
 
     /// Release everything the session took. Returns the problems; empty means
-    /// clean. Runs on EVERY exit path.
+    /// clean, anything else leaves `cleanup_pending` set for the retry loop.
+    /// Runs on EVERY exit path.
     async fn teardown(&mut self) -> Vec<String> {
         let mut problems = Vec::new();
         if let Some(bid) = self.row.broadcast_id.clone() {
@@ -382,9 +415,7 @@ impl Session {
                 problems.push(e);
             }
         }
-        if !problems.is_empty() {
-            error!(session = %self.row.id, "av-gate: teardown problems: {problems:?}");
-        }
+        self.row.cleanup_pending = !problems.is_empty();
         problems
     }
 
@@ -421,7 +452,8 @@ impl Session {
         );
     }
 
-    /// Wait for YouTube to finish the VOD.
+    /// Wait for YouTube to finish the VOD. Every poll persists the quota
+    /// spend, so the next admission sees it.
     async fn await_vod(&mut self) {
         let Some(bid) = self.row.broadcast_id.clone() else {
             return self
@@ -433,31 +465,39 @@ impl Session {
                 .finish_failed("cannot wait for the VOD: no YouTube manage client".to_string())
                 .await;
         };
+        let deadline = tokio::time::Instant::now() + self.ctx.timings.processing_timeout;
         let mut errors = 0;
-        let poll = async {
-            loop {
-                tokio::time::sleep(self.ctx.timings.processing_poll).await;
-                match yt.video_processing_status(&bid).await {
-                    Ok(status) => {
-                        errors = 0;
-                        match vod_step(status.as_deref()) {
-                            VodStep::Done => return Ok(()),
-                            VodStep::Failed(r) => return Err(r),
-                            VodStep::Pending => {}
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if exhausted(errors, MAX_POLL_ERRORS) {
-                            return Err(format!("VOD status polling failed: {e}"));
-                        }
+        let outcome = loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    let secs = self.ctx.timings.processing_timeout.as_secs();
+                    break Err(format!("the VOD was not processed within {secs} s"));
+                }
+                _ = tokio::time::sleep(self.ctx.timings.processing_poll) => {}
+            }
+            let step = match yt.vod_status(&bid).await {
+                Ok(status) => {
+                    errors = 0;
+                    vod_step(&status)
+                }
+                Err(e) => {
+                    errors += 1;
+                    if exhausted(errors, MAX_POLL_ERRORS) {
+                        VodStep::Failed(format!("VOD status polling failed: {e}"))
+                    } else {
+                        VodStep::Pending
                     }
                 }
+            };
+            self.persist().await;
+            match step {
+                VodStep::Pending => {}
+                VodStep::Done => break Ok(()),
+                VodStep::Failed(reason) => break Err(reason),
             }
         };
-        let outcome = tokio::time::timeout(self.ctx.timings.processing_timeout, poll).await;
         match outcome {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 self.row.vod_id = Some(bid.clone());
                 self.row.finished_at = Some(now_ts());
                 self.set_state(SessionState::Done).await;
@@ -467,12 +507,7 @@ impl Session {
                     json!({ "vod_id": bid }),
                 );
             }
-            Ok(Err(reason)) => self.finish_failed(reason).await,
-            Err(_) => {
-                let secs = self.ctx.timings.processing_timeout.as_secs();
-                self.finish_failed(format!("the VOD was not processed within {secs} s"))
-                    .await
-            }
+            Err(reason) => self.finish_failed(reason).await,
         }
     }
 
@@ -532,17 +567,17 @@ fn spawn_driver(session: Session, stop_rx: watch::Receiver<bool>, drain: Duratio
     });
 }
 
-/// The driver task died (a panic): clean up from the durable row.
+/// The driver (or the creation) died: clean up from the durable row.
 pub(crate) async fn reap_dead_driver(
     ctx: Arc<SessionCtx>,
     yt: Option<Arc<ManageClient>>,
     session_id: &str,
 ) {
-    error!(session = %session_id, "av-gate: the session driver died");
+    error!(session = %session_id, "av-gate: the session task died");
     let row = match store::get(&ctx.pool, session_id).await {
         Ok(Some(r)) => r,
         other => {
-            error!(session = %session_id, "av-gate: dead driver's row unreadable: {other:?}");
+            error!(session = %session_id, "av-gate: dead session's row unreadable: {other:?}");
             ctx.registry.release(session_id);
             return;
         }
@@ -558,14 +593,24 @@ pub(crate) async fn reap_dead_driver(
         .await;
 }
 
-/// `POST /api/v1/av-gate/session`. `requester`/`title` are already validated.
-pub async fn create_session(
+/// The admission checks and the start. Callers use [`spawn_create`].
+async fn create_session(
     ctx: Arc<SessionCtx>,
     yt: Arc<ManageClient>,
     session_id: String,
     requester: String,
     title: String,
 ) -> CreateOutcome {
+    if !ctx.registry.is_reconciled() {
+        return CreateOutcome::NotReady;
+    }
+    match store::list_cleanup_pending(&ctx.pool).await {
+        Ok(rows) if rows.is_empty() => {}
+        Ok(rows) => {
+            return CreateOutcome::CleanupPending(rows.into_iter().map(|r| r.id).collect());
+        }
+        Err(e) => return CreateOutcome::Internal(format!("cleanup lookup failed: {e}")),
+    }
     let spent = match store::quota_units_since(&ctx.pool, &quota_window_start()).await {
         Ok(v) => v,
         Err(e) => return CreateOutcome::Internal(format!("quota lookup failed: {e}")),
@@ -619,11 +664,42 @@ pub async fn create_session(
     }
 }
 
+/// `POST /api/v1/av-gate/session`, off the request future: the start keeps
+/// going (and ends in a driver or a teardown) even if the HTTP client
+/// disconnects and the handler is dropped, and a panic in it is reaped. A
+/// caller that lost the response learns the session id from the 409 holder.
+pub fn spawn_create(
+    ctx: Arc<SessionCtx>,
+    yt: Arc<ManageClient>,
+    session_id: String,
+    requester: String,
+    title: String,
+) -> JoinHandle<CreateOutcome> {
+    tokio::spawn(async move {
+        let start = tokio::spawn(create_session(
+            Arc::clone(&ctx),
+            Arc::clone(&yt),
+            session_id.clone(),
+            requester,
+            title,
+        ));
+        match start.await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                reap_dead_driver(ctx, Some(yt), &session_id).await;
+                CreateOutcome::Internal(format!("the session start died: {e}"))
+            }
+        }
+    })
+}
+
 /// After a restart: a session left `starting`/`ready` still owns a broadcast
 /// and a delivery, so it is torn down and failed; a `processing` one resumes
-/// its VOD wait. `yt` is `Err` when the oauth file is unusable: the rig is
-/// still torn down, and the reason says the broadcast could not be completed.
-pub async fn reconcile_on_boot(ctx: Arc<SessionCtx>, yt: Result<Arc<ManageClient>, String>) {
+/// its VOD wait. Each row gets its own client; when the oauth file is unusable
+/// the rig is still torn down and the reason says the broadcast was not
+/// completed. Opens the API (`mark_reconciled`) only if the sessions could be
+/// listed.
+pub async fn reconcile_on_boot(ctx: &Arc<SessionCtx>, clients: &ClientFactory) {
     let rows = match store::list_unfinished(&ctx.pool).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -631,13 +707,9 @@ pub async fn reconcile_on_boot(ctx: Arc<SessionCtx>, yt: Result<Arc<ManageClient
             return;
         }
     };
-    if let Err(e) = &yt {
-        if !rows.is_empty() {
-            warn!("av-gate boot reconcile: no YouTube client: {e}");
-        }
-    }
     for row in rows {
-        let mut s = Session::new(Arc::clone(&ctx), yt.as_ref().ok().cloned(), row);
+        let yt = clients().ok().map(Arc::new);
+        let mut s = Session::new(Arc::clone(ctx), yt, row);
         if s.row.state == SessionState::Processing.as_str() {
             info!(session = %s.row.id, "av-gate boot reconcile: resuming the VOD wait");
             tokio::spawn(async move { s.await_vod().await });
@@ -646,6 +718,58 @@ pub async fn reconcile_on_boot(ctx: Arc<SessionCtx>, yt: Result<Arc<ManageClient
         s.reaped("boot_reconcile");
         s.teardown_and_fail("Restreamer restarted during the session".to_string())
             .await;
+    }
+    ctx.registry.mark_reconciled();
+}
+
+/// Retry every failed teardown once. Returns how many are still pending.
+pub async fn retry_cleanups(ctx: &Arc<SessionCtx>, clients: &ClientFactory) -> usize {
+    let rows = match store::list_cleanup_pending(&ctx.pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("av-gate cleanup retry: listing sessions failed: {e}");
+            return 1;
+        }
+    };
+    let mut pending = 0;
+    for row in rows {
+        let yt = clients().ok().map(Arc::new);
+        let mut s = Session::new(Arc::clone(ctx), yt, row);
+        let problems = s.teardown().await;
+        s.audit(
+            Severity::Warn,
+            Action::AvGateSessionReaped,
+            json!({ "cause": "cleanup_retry", "problems": problems }),
+        );
+        if problems.is_empty() {
+            let reason = s.row.reason.take().unwrap_or_default();
+            s.row.reason = Some(format!("{reason}; cleanup completed on a later retry"));
+        } else {
+            pending += 1;
+        }
+        s.persist().await;
+    }
+    pending
+}
+
+/// The av-gate maintenance task: the boot reconcile, then failed teardowns
+/// retried with backoff (`cleanup_retry`, doubling, capped at 24x) for as long
+/// as Restreamer runs. A failed boot reconcile is retried on the same cadence.
+pub async fn run_maintenance(ctx: Arc<SessionCtx>, clients: ClientFactory) {
+    let mut failed_rounds = 0;
+    loop {
+        if !ctx.registry.is_reconciled() {
+            reconcile_on_boot(&ctx, &clients).await;
+        }
+        failed_rounds = match retry_cleanups(&ctx, &clients).await {
+            0 => 0,
+            _ => failed_rounds + 1,
+        };
+        tokio::time::sleep(cleanup_retry_delay(
+            ctx.timings.cleanup_retry,
+            failed_rounds,
+        ))
+        .await;
     }
 }
 
