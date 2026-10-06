@@ -60,6 +60,9 @@ mod status;
 pub use status::StatusResponse;
 pub use status::get_status;
 
+mod oauth;
+pub use oauth::{link_endpoint_oauth, list_oauth_grants, oauth_suggest};
+
 /// Log entry from the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -241,8 +244,41 @@ pub struct EndpointConfig {
     pub position_last: i64,
     pub delivered_bytes: i64,
     pub is_fast: bool,
+    /// FK into `youtube_oauth(id)` — which OAuth grant this YT endpoint is
+    /// linked to. `#[serde(default)]` keeps parsing responses that predate
+    /// the field. `None` => not linked.
+    #[serde(default)]
+    pub youtube_oauth_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One authorized YouTube OAuth grant (from `GET /youtube/oauths`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthGrant {
+    pub id: i64,
+    pub label: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub connected_at: Option<String>,
+}
+
+/// Auto-suggest verdict for one endpoint (from
+/// `GET /endpoints/{id}/oauth-suggest`) — computed server-side so the raw
+/// stream-key inventory never reaches the browser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct OauthSuggest {
+    /// The grant that uniquely owns this endpoint's stream key, or `None`.
+    #[serde(default)]
+    pub oauth_id: Option<i64>,
+    /// How many grants own the key (0, 1, or >1).
+    #[serde(default)]
+    pub owners: usize,
+    /// Whether every grant probed successfully (a "no owner" verdict is only
+    /// trustworthy — and the "authorize the channel" hint only shown — when true).
+    #[serde(default)]
+    pub probed_ok: bool,
 }
 
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
@@ -431,6 +467,28 @@ pub struct StateRender {
 /// Get current upload telemetry snapshot (1-minute window) from backend.
 pub async fn fetch_upload_stats() -> Result<UploadStats, String> {
     http_get("/uploads/stats").await
+}
+
+/// One finalized outgoing-throughput bucket. Mirrors
+/// `rs_endpoint::throughput::Sample` (issue #77). `t_ms` is the bucket start
+/// (unix ms); `mbps` is the average outgoing megabits/sec over that window.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Default)]
+pub struct ThroughputSample {
+    pub t_ms: i64,
+    pub mbps: f64,
+}
+
+/// The outgoing-Mbps history payload. Mirrors
+/// `rs_endpoint::throughput::ThroughputSeries`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct ThroughputSeries {
+    pub interval_ms: i64,
+    pub samples: Vec<ThroughputSample>,
+}
+
+/// Fetch the retained outgoing-Mbps time-series for the dashboard graph (#77).
+pub async fn fetch_throughput() -> Result<ThroughputSeries, String> {
+    http_get("/uploads/throughput").await
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -765,6 +823,8 @@ pub struct CachedDeliveryEndpoint {
     pub rescue_eta_secs: Option<u64>,
     #[serde(default)]
     pub youtube_health: Option<crate::store::YoutubeHealth>,
+    #[serde(default)]
+    pub facebook_health: Option<crate::store::FacebookHealth>,
     #[serde(default)]
     pub lifecycle: crate::store::EndpointLifecycle,
 }

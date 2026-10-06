@@ -88,7 +88,7 @@ pub use endpoint_handle::EndpointHandle;
 
 use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
-pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url_pub;
+pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url as build_rtmp_url_pub;
 
 // `producer_task` was extracted to `crate::endpoint_producer` so this file
 // stays under the 1000-line CI cap while `consumer_task` keeps room to grow.
@@ -105,11 +105,15 @@ pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url_pub;
 /// pacing layer (removed 2026-04-21) was a workaround for the normalizer not
 /// rebasing the first chunk per process -- it fought `-re` and caused
 /// cumulative drift + cascading cache growth after ffmpeg restarts.
+///
+/// `service_type` is the endpoint's service type, parsed ONCE by
+/// `endpoint_loop` (#192): an unknown type never reaches this task.
 #[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
     ep_cfg: EndpointConfig,
+    service_type: ServiceType,
     delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
@@ -119,14 +123,6 @@ async fn consumer_task<P: OutputProcessFactory>(
 ) {
     let alias = ep_cfg.alias.clone();
     let service_type_str = ep_cfg.service_type.clone();
-
-    let service_type: ServiceType = match ep_cfg.service_type.parse() {
-        Ok(st) => st,
-        Err(e) => {
-            tracing::error!(alias = %alias, "Unknown service type '{}': {e}", ep_cfg.service_type);
-            return;
-        }
-    };
 
     let mut flv_normalizer = FlvStreamNormalizer::new();
     // `proc` is the ffmpeg-path output handle (None when using Rust pusher).
@@ -142,9 +138,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     // Last delivered chunk id, recorded in the rescue audit row on stall.
     let mut last_delivered_chunk_id: i64 = -1;
-    // Last full FLV chunk pushed — replayed as a freeze during keepalive.
-    // Only populated for fast endpoints (avoids a per-chunk clone on the
-    // high-bitrate normal endpoints).
+    // Last full FLV chunk pushed — replayed as a codec-homogeneous freeze
+    // during a keepalive bridge. #124: populated for ALL rust-pusher endpoints
+    // (fast AND non-fast); moved (not cloned) into the Arc at the push site.
     let mut last_chunk_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
@@ -296,13 +292,16 @@ async fn consumer_task<P: OutputProcessFactory>(
 
         // Pull next chunk from channel (rescue-mode-aware).
         //
-        // FAST + rust pusher only: a short producer gap triggers the
-        // never-crash keepalive (freeze last chunk → default rescue) on the
-        // SAME rtmp session, so starvation never tears the connection down.
-        // EVERY other path (normal YT/FB, any ffmpeg endpoint) keeps the
-        // existing select! verbatim — the 8s `run_outage_rescue` behaviour is
-        // unchanged byte-for-byte.
-        let chunk = if ep_cfg.is_fast && use_rust_pusher {
+        // ALL rust-pusher endpoints (fast AND non-fast — #124): a producer gap
+        // triggers the codec-homogeneous keepalive bridge (freeze the last real
+        // chunk) on the SAME rtmp session, so starvation never tears the
+        // connection down and short gaps/trickle resolve with zero outage. Only
+        // the ffmpeg path (no RtmpPusher handle) keeps the old select! verbatim,
+        // dropping+reconnecting via `run_outage_rescue`. The escalation to the
+        // fresh-reconnect rescue clip stays anchored to the last real chunk
+        // (`keepalive_escalate_after`), so rescue never engages slower than
+        // before #124.
+        let chunk = if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
             tokio::select! {
                 maybe_chunk = rx.recv() => {
                     match maybe_chunk {
@@ -321,14 +320,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 alias = %alias,
                                 "Consumer: producer gone, entering defensive rescue before teardown"
                             );
-                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                                .service_type
-                                .parse()
-                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                             crate::rescue::run_defensive_rescue(
                                 &alias,
                                 rescue_video_url.as_deref(),
-                                svc_type,
+                                service_type,
                                 &ep_cfg.stream_key,
                                 &buffer_state,
                                 &stats,
@@ -360,6 +355,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &mut stop_rx,
                             &stats,
                             &buffer_state,
+                            crate::fast_keepalive::keepalive_escalate_after(
+                                ep_cfg.is_fast,
+                                crate::rescue::RESCUE_STALL_THRESHOLD_SECS,
+                            ),
                         )
                         .await
                     } else {
@@ -376,23 +375,19 @@ async fn consumer_task<P: OutputProcessFactory>(
                         }
                         KeepaliveOutcome::Stop => break,
                         KeepaliveOutcome::EscalateToRescue => {
-                            // C1 (#251): sustained outage on a fast endpoint.
-                            // Keepalive could not hold the live session (frozen
-                            // or dark) — switch to the SAME fresh-session
-                            // rescue the non-fast 8s arm uses. NEVER spliced
+                            // C1 (#251) / #124: sustained outage on a rust
+                            // endpoint (fast OR non-fast). Keepalive could not
+                            // hold the live session (frozen or dark) — switch to
+                            // the fresh-session rescue clip. NEVER spliced
                             // into the live session (that is the #249 green-
                             // video corruption); run_outage_rescue drops the
                             // existing rust_pusher and reconnects FRESH for the
                             // rescue clip, then reconstructs the pusher on
                             // recovery so the fast low-latency path resumes.
-                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                                .service_type
-                                .parse()
-                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                             let outcome = crate::rescue::run_outage_rescue(
                                 &alias,
                                 rescue_video_url.as_deref(),
-                                svc_type,
+                                service_type,
                                 &ep_cfg.stream_key,
                                 &buffer_state,
                                 &stats,
@@ -428,7 +423,8 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
         } else {
-            // EXISTING chunk-pull select! — non-fast and ffmpeg paths, UNCHANGED.
+            // EXISTING chunk-pull select! — ffmpeg path only now (#124 routed
+            // non-fast rust endpoints through the keepalive bridge arm above).
             tokio::select! {
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
@@ -459,14 +455,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             alias = %alias,
                             "Consumer: producer gone, entering defensive rescue before teardown"
                         );
-                        let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                            .service_type
-                            .parse()
-                            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                         crate::rescue::run_defensive_rescue(
                             &alias,
                             rescue_video_url.as_deref(),
-                            svc_type,
+                            service_type,
                             &ep_cfg.stream_key,
                             &buffer_state,
                             &stats,
@@ -494,8 +486,6 @@ async fn consumer_task<P: OutputProcessFactory>(
                 // and consumers fell silent.
                 if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                     tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
-                    let svc_type: rs_ffmpeg::ServiceType =
-                        ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
                     // Extracted to `rescue::run_outage_rescue` so this fn
                     // stays under the 1000-line CI cap and so the
                     // review-finding #1 fix (drop+reconstruct rust_pusher
@@ -504,7 +494,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     let outcome = crate::rescue::run_outage_rescue(
                         &alias,
                         rescue_video_url.as_deref(),
-                        svc_type,
+                        service_type,
                         &ep_cfg.stream_key,
                         &buffer_state,
                         &stats,
@@ -580,11 +570,17 @@ async fn consumer_task<P: OutputProcessFactory>(
                         chunk_duration_ms,
                         cumulative_pushed_secs,
                     );
-                    // Fast endpoints only: remember the chunk so keepalive can
-                    // replay it as a freeze during a producer gap. Skipped on
-                    // normal endpoints to avoid the per-chunk clone.
-                    if ep_cfg.is_fast {
-                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data.clone()));
+                    // Remember the last real chunk so the keepalive bridge can
+                    // replay it as a codec-homogeneous freeze during a producer
+                    // gap. #124: populated for ALL bridging (rust) endpoints,
+                    // fast AND non-fast, so the non-fast production stream gets
+                    // the same zero-outage bridge. `chunk` is dead after this
+                    // point (its id/duration are already copied out and the
+                    // ffmpeg branch is the disjoint `else`), so MOVE the bytes
+                    // into the Arc instead of cloning — no per-chunk memcpy on
+                    // the high-bitrate production endpoints.
+                    if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
+                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data));
                     }
                 }
             }
@@ -726,6 +722,15 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 ) {
     let alias = ep_cfg.alias.clone();
 
+    // #192: parse the service type ONCE, before anything is fetched or pushed.
+    // An unknown type never falls back to TEST_FILE (a real discard sink since
+    // #192): the endpoint refuses to start, loudly (log, status, audit).
+    let Some(svc_type) =
+        crate::endpoint_start::service_type_or_refuse(&ep_cfg, &stats, &audit_ring).await
+    else {
+        return;
+    };
+
     // Wait for enough duration to buffer before starting (duration-based approach).
     // When rescue_video_url is configured and the endpoint is not fast, the
     // helper also spawns a rescue ffmpeg in parallel so viewers see the
@@ -736,6 +741,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
             &fetcher,
             &alias,
             &ep_cfg,
+            svc_type,
             start_chunk_id,
             delivery_delay_ms,
             rescue_video_url.as_deref(),
@@ -804,6 +810,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         rx,
         factory,
         ep_cfg,
+        svc_type,
         delivery_delay_ms,
         consumer_stop,
         consumer_stats,

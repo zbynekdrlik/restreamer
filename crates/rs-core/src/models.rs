@@ -35,6 +35,33 @@ pub struct StreamingEvent {
     pub rescue_video_url: Option<String>,
 }
 
+impl StreamingEvent {
+    /// True when this event has no usable custom rescue video configured —
+    /// `rescue_video_url` is absent, empty, or whitespace-only.
+    ///
+    /// In that case a delivery outage falls back to the embedded generic
+    /// default clip (`rs_delivery::rescue::resolve_rescue_source` → `Countdown`)
+    /// with no branded content, and — until #260 — with no operator-facing
+    /// signal at all. That is exactly the silent misconfiguration event 9316
+    /// hit on 2026-06-19. The predicate is deliberately the single source of
+    /// truth shared by the go-live audit warning (`rs-api` `delivery_start`)
+    /// and mirrored by the dashboard banner (`leptos-ui`, which targets wasm32
+    /// and cannot depend on this crate).
+    ///
+    /// Note: the VPS-side resolver
+    /// (`rs_delivery::rescue::resolve_rescue_source`) treats only `None`/empty
+    /// (no `trim`) as missing, so a whitespace-only URL is "configured" there
+    /// but then rejected as non-FLV and still falls back to the generic clip.
+    /// The outcome is identical (generic clip on outage), so this stricter
+    /// (trimming) host-side warning stays truthful.
+    pub fn rescue_video_missing(&self) -> bool {
+        match self.rescue_video_url.as_deref() {
+            Some(url) => url.trim().is_empty(),
+            None => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRecord {
     pub id: i64,
@@ -233,6 +260,15 @@ pub enum WsEvent {
         service: String,
         message: String,
     },
+    /// RTMP listener failed to bind its port (#106). Emitted by the runtime
+    /// inpoint loop's pre-bind probe so any connected dashboard updates its
+    /// red bind-failure banner immediately instead of waiting for the 2s
+    /// `/status` poll. `error` names the port and, if detected, the holding
+    /// process.
+    RtmpBindFailed {
+        port: u16,
+        error: String,
+    },
     ActivityFeed {
         timestamp: String,
         severity: String,
@@ -305,6 +341,38 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+/// Snapshot of Facebook Graph API `live_videos` ingest health for a single FB
+/// endpoint (#166). Parity with [`YoutubeHealth`] — the dashboard renders an
+/// identical badge. FB silently discards bytes pushed to an unbound persistent
+/// key, so this asks FB whether it is actually decoding what we push.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FacebookHealth {
+    /// FB `live_video.status` or a synthetic marker: `LIVE` | `UNPUBLISHED` |
+    /// `PROCESSING` | `LIVE_STOPPED` | `NO_LIVE_VIDEO` | `unconfigured` |
+    /// `unknown`.
+    pub status: String,
+    /// Mapped health, parity with YT's badge: `good` | `bad` | `noData` |
+    /// `unknown`. `bad` (red) is the operator-critical case: we are pushing but
+    /// FB reports no receiving live_video (silent discard).
+    pub health: String,
+    /// FB-measured ingest video bitrate in kbps, when a receiving stream exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_bitrate_kbps: Option<i64>,
+    /// `"<width>x<height>"` from FB's `stream_health` when receiving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// FB-measured ingest framerate (formatted) when receiving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    /// Seconds since the data was probed.
+    #[serde(default)]
+    pub age_secs: i64,
+    /// Set when the probe could not run (fb_not_configured / oauth_invalid /
+    /// permission / probe_error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // `EndpointLifecycle` + `LifecycleInput` + `compute` live in
 // `crate::endpoint_lifecycle` (extracted to keep this file under the
 // 1000-line CI cap). Re-exported here so `rs_core::models::EndpointLifecycle`
@@ -351,6 +419,10 @@ pub struct DeliveryEndpointMetrics {
     pub rescue_eta_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_health: Option<YoutubeHealth>,
+    /// Facebook ingestion health (#166). `None` for non-FB endpoints or when FB
+    /// monitoring is not configured. Mirrors `youtube_health`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facebook_health: Option<FacebookHealth>,
     /// Operator-facing lifecycle (host-computed). Older payloads default to
     /// Live so the dashboard degrades gracefully.
     #[serde(default = "crate::endpoint_lifecycle::default_lifecycle")]
@@ -381,6 +453,13 @@ pub struct ServiceStatus {
     /// Defaults to 0 (assume none) so an absent/older field never false-alarms.
     #[serde(default)]
     pub vps_orphan_count: u8,
+    /// #84: whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h). Drives the dashboard
+    /// LongStreamBanner. Computed live on every poll, so it clears the moment
+    /// delivery stops. Defaults false so an absent/older field never
+    /// false-alarms.
+    #[serde(default)]
+    pub long_stream_warning: bool,
 }
 
 fn default_true() -> bool {
@@ -438,6 +517,14 @@ pub struct InpointState {
     /// dashboard banner and gates `Start Delivering`. Shared by `Arc` across
     /// clones like `ingest_skew_ms` (#354).
     ingest_skew_active: Arc<AtomicBool>,
+    /// Human-readable RTMP listener bind error (#106). `Some(msg)` while the
+    /// RTMP listener cannot bind its port (e.g. another process holds 1234);
+    /// `None` when the port is free / bound. Written by the runtime inpoint
+    /// loop's pre-bind probe, read by the API `/status` handler to drive the
+    /// dashboard's red bind-failure banner. Shared by `Arc` across clones like
+    /// `ingest_skew_active`, so the copy wired into the inpoint loop and the
+    /// copy held by `AppState.inpoint_state` see the same value.
+    rtmp_bind_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl InpointState {
@@ -449,6 +536,7 @@ impl InpointState {
             connect_started_at: Arc::new(std::sync::Mutex::new(None)),
             ingest_skew_ms: Arc::new(AtomicI64::new(0)),
             ingest_skew_active: Arc::new(AtomicBool::new(false)),
+            rtmp_bind_error: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -537,6 +625,40 @@ impl InpointState {
     /// desynced). `Acquire` — see [`Self::set_ingest_skew_ms`] doc.
     pub fn ingest_skew_active(&self) -> bool {
         self.ingest_skew_active.load(Ordering::Acquire)
+    }
+
+    /// Record the RTMP listener bind error (#106). Called by the runtime
+    /// inpoint loop when the pre-bind probe fails. `msg` is a human-readable,
+    /// operator-facing string (names the port and, if detected, the holding
+    /// process). A poisoned lock is tolerated (best-effort diagnostic surface).
+    pub fn set_bind_error(&self, msg: String) {
+        // Recover a poisoned lock (into_inner) rather than no-op'ing: a stuck
+        // banner (or a hidden real conflict) is worse than a torn write on a
+        // plain Option<String> cell (#106 review).
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = Some(msg);
+    }
+
+    /// Clear the RTMP listener bind error (#106). Called when the pre-bind
+    /// probe succeeds so the dashboard banner clears automatically.
+    pub fn clear_bind_error(&self) {
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = None;
+    }
+
+    /// Current RTMP listener bind error, if any (#106). Read by the API
+    /// `/status` handler. `None` = the listener is bound / the port is free.
+    pub fn bind_error(&self) -> Option<String> {
+        self.rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

@@ -2367,7 +2367,11 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
               stream_status: "active",
               health_status: "bad",
               configuration_issues: [
-                "videoIngestionFasterThanRealtime: Check video settings (error)",
+                {
+                  type: "videoIngestionFasterThanRealtime",
+                  severity: "error",
+                  reason: "Check video settings",
+                },
               ],
               cdn_resolution: "2160p",
               cdn_frame_rate: "30fps",

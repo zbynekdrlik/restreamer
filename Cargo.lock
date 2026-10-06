@@ -118,13 +118,13 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -183,9 +183,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.2"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -193,14 +193,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.39.1"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83a25cf98105baa966497416dbd42565ce3a8cf8dbfd59803ec9ad46f3126399"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -2563,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2579,6 +2580,7 @@ dependencies = [
  "rs-cloud",
  "rs-core",
  "rs-endpoint",
+ "rs-facebook",
  "rs-youtube",
  "rsa",
  "rustls",
@@ -2599,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2607,11 +2609,12 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
 name = "rs-core"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2630,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "async-trait",
  "axum",
@@ -2641,11 +2644,13 @@ dependencies = [
  "rs-core",
  "rs-ffmpeg",
  "rs-rtmp-push",
+ "rtmp",
  "rust-s3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "streamhub",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2656,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "anyhow",
  "axum",
@@ -2680,8 +2685,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-facebook"
+version = "0.29.28"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rs-ffmpeg"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "serde",
  "serde_json",
@@ -2693,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "bytes",
  "env_logger 0.11.10",
@@ -2713,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "rs-rtmp-push"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2737,11 +2754,12 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "log",
  "reqwest 0.12.28",
  "rs-api",
  "rs-core",
@@ -2749,15 +2767,17 @@ dependencies = [
  "rs-inpoint",
  "serde_json",
  "sqlx",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "rs-service"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2776,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.29.26"
+version = "0.29.28"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
@@ -2909,9 +2929,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.37"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -2953,9 +2973,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -3511,6 +3531,17 @@ name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -208,6 +208,7 @@ async fn warmup_exits_as_soon_as_buffer_fills() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         target_ms,
         Some("file:///tmp/nonexistent-rescue.mp4"),
@@ -242,6 +243,7 @@ async fn warmup_without_rescue_url_skips_ffmpeg_but_waits_for_fill() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         2000, // target 2000ms
         None,
@@ -295,6 +297,7 @@ async fn warmup_with_rescue_url_updates_mode_to_warmup() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         10_000, // unreachable target — warmup stays active until stop signal
         Some("file:///tmp/nonexistent-rescue.mp4"),
@@ -331,6 +334,7 @@ async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         500,
         Some("file:///tmp/nonexistent.mp4"),
@@ -346,6 +350,57 @@ async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
     assert_ne!(
         s.delivery_mode, "warmup",
         "fast endpoint should not enter warmup rescue"
+    );
+}
+
+/// The fast-endpoint skip must hold WHILE warmup is still filling, not only
+/// after it ends: `warmup_fast_endpoint_skips_rescue_ffmpeg` reads the stats
+/// after the loop returned, when the end of warmup has already reset the
+/// mode to "normal", so it cannot see a fast endpoint that wrongly entered
+/// warmup rescue (mutation survivor `delete !` in `run_warmup_loop`, found
+/// on the #192 diff). Here the target is unreachable and the stats are
+/// probed mid-warmup.
+#[tokio::test]
+async fn warmup_fast_endpoint_never_shows_warmup_while_filling() {
+    let alias = unique_alias("fast-filling");
+    let fetcher = WarmupMockFetcher::new(0, 50); // only chunk 0: fill never completes
+    let ep_cfg = test_endpoint_config(&alias, true); // is_fast = true
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+
+    let stats_probe = stats.clone();
+    let probe = tokio::spawn(async move {
+        let mut saw_rescue_state = false;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let s = stats_probe.lock().await;
+            if s.delivery_mode == "warmup" || s.rescue_eta_secs.is_some() {
+                saw_rescue_state = true;
+                break;
+            }
+        }
+        let _ = stop_tx.send(true);
+        saw_rescue_state
+    });
+
+    let stopped = run_warmup_loop(
+        &fetcher,
+        &alias,
+        &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
+        0,
+        10_000, // unreachable target: warmup stays active until the stop
+        Some("file:///tmp/nonexistent.mp4"),
+        &stats,
+        &mut stop_rx,
+        None,
+    )
+    .await;
+
+    assert!(stopped, "the probe's stop signal ends the warmup");
+    assert!(
+        !probe.await.unwrap(),
+        "a fast endpoint must never show warmup rescue state while filling"
     );
 }
 
@@ -368,6 +423,7 @@ async fn warmup_stop_signal_cleans_up_and_returns_true() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         0,
         10_000, // large target, will not fill
         Some("file:///tmp/nonexistent.mp4"),
@@ -402,6 +458,7 @@ async fn warmup_skips_forward_when_chunk_missing_for_n_seconds() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         1,
         1000,
         None, // no rescue video — keeps test simple
@@ -440,6 +497,7 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
         &fetcher,
         &alias,
         &ep_cfg,
+        rs_ffmpeg::ServiceType::TestFile,
         1,
         1000,
         None,

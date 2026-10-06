@@ -191,6 +191,49 @@ async fn ignores_non_keyframe_before_first_chunk() {
     assert!(inner.chunk_start.is_none());
 }
 
+/// A one-byte tag body cannot be a codec sequence header (that needs the
+/// AVC/AAC packet-type byte): it is media, and reading it must not panic.
+#[tokio::test]
+async fn one_byte_tags_are_media_not_sequence_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+    sink.write_video(0, &BytesMut::from(&[0x17][..])).await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF][..])).await;
+
+    let inner = sink.inner.lock().await;
+    assert!(inner.video_sequence_header.is_none());
+    assert!(inner.audio_sequence_header.is_none());
+    assert!(
+        inner.chunk_start.is_some(),
+        "the one-byte keyframe starts a chunk like any keyframe"
+    );
+}
+
+/// A tag that fills the buffer past MAX_BUFFER_SIZE force-flushes the chunk
+/// at once, without waiting for the chunk duration or a keyframe boundary.
+#[tokio::test]
+async fn an_oversized_buffer_is_force_flushed() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+    let mut big = vec![0u8; MAX_BUFFER_SIZE];
+    big[0] = 0x17;
+    big[1] = 0x01;
+    sink.write_video(0, &BytesMut::from(&big[..])).await;
+
+    assert_eq!(
+        sink.chunk_count().await,
+        1,
+        "the oversized chunk is flushed"
+    );
+    let inner = sink.inner.lock().await;
+    assert!(inner.buffer.is_empty());
+    assert!(
+        inner.chunk_start.is_none(),
+        "the next chunk waits for a keyframe"
+    );
+}
+
 #[tokio::test]
 async fn flv_tag_structure_is_correct() {
     let dir = tempfile::tempdir().unwrap();
@@ -206,7 +249,10 @@ async fn flv_tag_structure_is_correct() {
 
     sink.flush().await;
 
-    let chunk = rx.recv().await.unwrap();
+    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("chunk should flush")
+        .unwrap();
     let file_data = std::fs::read(&chunk.path).unwrap();
 
     // FLV header (9) + prev tag size 0 (4) = 13 bytes
@@ -237,13 +283,13 @@ async fn write_video_first_frame_stamps_ts_zero() {
     let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
     sink.write_video(999_999, &video_seq).await;
 
-    // First keyframe — xiu timestamp ignored, wall-clock anchor is set.
+    // First keyframe of the session: its source ts becomes the shared session
+    // origin, so it stamps 0 whatever the absolute source ts is (#367).
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
     sink.write_video(999_999, &keyframe).await;
 
     let inner = sink.inner.lock().await;
-    // chunk_first_ts is set by write_chunk_header from current_session_ts.
-    // The very first call sets anchor and returns 0.
+    // chunk_first_ts is the first keyframe's output ts = src - session origin.
     assert_eq!(
         inner.chunk_first_ts, 0,
         "first frame must anchor session and produce ts=0"
@@ -260,26 +306,19 @@ async fn session_start_resets_on_reset() {
     let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
     sink.write_video(0, &video_seq).await;
 
-    // Write first frame to establish session anchor.
+    // Write first frame to establish the session origin (source ts 0).
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]);
     sink.write_video(0, &keyframe).await;
 
-    // Small delay so next frame would have a non-zero wall-clock ts.
+    // Small delay so a wall-clock stamp would be non-zero.
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Reset session — anchor must be cleared.
+    // Reset session — the session origin must be cleared.
     sink.reset().await;
 
-    {
-        let inner = sink.inner.lock().await;
-        assert_eq!(
-            inner.session_start_wall_clock_ms, 0,
-            "reset() must clear session_start_wall_clock_ms"
-        );
-    }
-
-    // Write the next keyframe — its ts should be 0 again.
-    sink.write_video(0, &keyframe).await;
+    // The next keyframe arrives at a LATER source ts (5 s into the publisher's
+    // timeline); after reset() it must re-anchor and stamp 0 again.
+    sink.write_video(5_000, &keyframe).await;
     let inner = sink.inner.lock().await;
     assert_eq!(
         inner.chunk_first_ts, 0,
@@ -289,7 +328,7 @@ async fn session_start_resets_on_reset() {
 
 /// Timestamps must be strictly non-decreasing across successive frames.
 #[tokio::test]
-async fn wall_clock_ts_monotonic_across_frames() {
+async fn video_ts_monotonic_across_frames() {
     let dir = tempfile::tempdir().unwrap();
     let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
 
@@ -306,12 +345,12 @@ async fn wall_clock_ts_monotonic_across_frames() {
     tokio::time::sleep(Duration::from_millis(5)).await;
 
     // Inter-frame — same chunk.
-    sink.write_video(0, &interframe).await;
+    sink.write_video(5, &interframe).await;
     let ts1 = sink.inner.lock().await.chunk_last_ts;
 
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    sink.write_video(0, &interframe).await;
+    sink.write_video(10, &interframe).await;
     let ts2 = sink.inner.lock().await.chunk_last_ts;
 
     assert!(ts1 >= ts0, "ts1={ts1} should be >= ts0={ts0}");
@@ -326,9 +365,12 @@ async fn wall_clock_ts_monotonic_across_frames() {
 /// wait, start_chunk_id=1 in the VPS init, and silent VPS warmup spin.
 ///
 /// This test runs a realistic frame sequence and asserts the resulting
-/// chunk's duration_ms reflects video wall-clock span, not audio xiu_ts.
+/// chunk's duration_ms reflects the VIDEO span, not the audio timestamps.
+/// #367: video is stamped in the source-ts domain now, so the video frames
+/// carry source ts that match the elapsed time; duration_ms still derives
+/// from VIDEO tags only (the #146 lesson).
 #[tokio::test]
-async fn chunk_duration_tracks_video_wall_span_not_audio_xiu_ts() {
+async fn chunk_duration_tracks_video_span_not_audio_ts() {
     let dir = tempfile::tempdir().unwrap();
     let sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -356,47 +398,44 @@ async fn chunk_duration_tracks_video_wall_span_not_audio_xiu_ts() {
     let interframe = BytesMut::from(&[0x27, 0x01, 0x00, 0x00, 0x00, 0xBB][..]);
 
     sink.write_audio(20, &aac).await;
-    sink.write_video(0, &interframe).await; // advances chunk_last_ts
+    sink.write_video(33, &interframe).await; // advances chunk_last_ts
     sink.write_audio(43, &aac).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    sink.write_video(0, &interframe).await; // advances chunk_last_ts to ~100ms
+    sink.write_video(100, &interframe).await; // advances chunk_last_ts to 100ms
     sink.write_audio(66, &aac).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    sink.write_video(0, &interframe).await; // advances chunk_last_ts to ~200ms
+    sink.write_video(200, &interframe).await; // advances chunk_last_ts to 200ms
 
     // Second keyframe flushes the chunk (50ms min duration was hit).
     let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
-    sink.write_video(0, &keyframe2).await;
+    sink.write_video(233, &keyframe2).await;
 
     let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
         .await
         .expect("chunk should be emitted within timeout")
         .expect("recv should succeed");
 
-    // ~200 ms of wall-clock between first and second keyframes; allow
-    // generous slop for CI scheduling jitter. Pre-fix this is 0.
+    // The video span of the chunk is 200 ms (keyframe at 0, last frame at
+    // 200). The #146 regression made this 0.
     assert!(
         chunk.duration_ms >= 150 && chunk.duration_ms <= 350,
-        "duration_ms must reflect video wall-clock span (~200ms), got {}",
+        "duration_ms must reflect the video span (~200ms), got {}",
         chunk.duration_ms
     );
 }
 
 /// Audio FLV tags carry the xiu RTMP timestamp DELTAS (chipmunk fix #142
-/// preserved) re-based onto the 0-based per-session epoch (#255). The
-/// user-facing guarantee is that audio PTS keeps the drift-free AAC cadence
-/// (inter-tag deltas), aligned with the also-0-based video epoch — NOT that
-/// the absolute xiu offset survives.
+/// preserved), re-based onto the SHARED per-session origin: the source ts of
+/// the session's first video keyframe (#367). Audio and video go through ONE
+/// common transform (`out = src - session_origin`), so the publisher's own
+/// A/V relationship survives into the chunk bytes.
 ///
-/// BEHAVIOUR CHANGE (#255): pre-fix audio carried the RAW xiu ts (first tag at
-/// xiu 42 -> tag ts 42); now audio is session-relative (first tag captures the
-/// session origin -> tag ts 0, the next tag carries its delta). This is the
-/// deliberate fix: after an OBS republish the new session's audio xiu restarts
-/// near 0 while video also restarts at 0, so audio MUST be offset-removed to
-/// stay aligned. The chipmunk fix is fully preserved because only the constant
-/// per-session offset is removed — the inter-tag deltas are byte-identical.
+/// BEHAVIOUR CHANGE (#367): before, audio had its OWN origin (its first tag
+/// stamped 0 whatever its distance to the keyframe), which is exactly the
+/// split time domain that baked the 2026-10-01 offset in. Now an audio tag
+/// 42 ms after the keyframe stamps 42.
 #[tokio::test]
 async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
     let dir = tempfile::tempdir().unwrap();
@@ -411,15 +450,16 @@ async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
     let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
     sink.write_audio(0, &audio_seq).await;
 
+    // The session's first keyframe at source 1_000 is the shared origin.
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
-    sink.write_video(0, &keyframe).await;
+    sink.write_video(1_000, &keyframe).await;
 
-    // Two AAC payload tags at xiu 42 and 63 (delta 21ms = one 48kHz AAC frame).
-    // Distinct body markers so each can be located independently.
+    // Two AAC payload tags at xiu 1_042 and 1_063 (delta 21ms = one 48kHz AAC
+    // frame). Distinct body markers so each can be located independently.
     let aac_first = BytesMut::from(&[0xAF, 0x01, 0xDE, 0xAD][..]);
     let aac_second = BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]);
-    sink.write_audio(42, &aac_first).await;
-    sink.write_audio(63, &aac_second).await;
+    sink.write_audio(1_042, &aac_first).await;
+    sink.write_audio(1_063, &aac_second).await;
 
     sink.flush().await;
 
@@ -430,19 +470,19 @@ async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
 
     let bytes = std::fs::read(&chunk.path).unwrap();
 
-    // First real audio tag (xiu 42) captures the session origin -> ts 0.
+    // First real audio tag (xiu 1_042) is 42 ms after the keyframe origin.
     let ts_first = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01, 0xDE, 0xAD]);
     assert_eq!(
         ts_first,
-        Some(0),
-        "first audio tag of the session must re-zero to the session epoch"
+        Some(42),
+        "audio must be stamped relative to the SHARED session origin (the keyframe)"
     );
 
-    // Second tag (xiu 63) keeps the xiu delta (63 - 42 = 21) -> chipmunk fix.
+    // Second tag (xiu 1_063) keeps the xiu delta (21 ms) -> chipmunk fix.
     let ts_second = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01, 0xBE, 0xEF]);
     assert_eq!(
         ts_second,
-        Some(21),
+        Some(63),
         "audio FLV tag must preserve the xiu inter-tag delta (chipmunk fix #142)"
     );
 }
@@ -455,7 +495,8 @@ async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
 /// baked into the session-2 chunk bytes.
 ///
 /// Session 1: write seq headers + keyframe, then interleave audio while
-/// ~600ms of wall-clock elapses (video `current_session_ts` advances). flush.
+/// ~600ms of wall-clock elapses (the #255-era video stamping advanced with
+/// the wall clock; since #367 video is source-ts stamped). flush.
 /// `start_new_session()` (the republish boundary).
 /// Session 2: keyframe + audio at xiu ts 0/21/43. Read the session-2 chunk
 /// and assert the first real video tag and first real audio tag are within
@@ -581,12 +622,16 @@ async fn start_new_session_preserves_chunk_index_and_sequence_headers() {
             inner.audio_sequence_header.is_some(),
             "start_new_session() must keep the saved audio sequence header"
         );
-        // But the per-session epoch IS re-zeroed.
-        assert_eq!(
-            inner.session_start_wall_clock_ms, 0,
-            "start_new_session() must re-zero the wall-clock anchor"
-        );
     }
+
+    // But the per-session epoch IS re-anchored: the next keyframe, far into
+    // the publisher's timeline, stamps 0.
+    sink.write_video(90_000, &keyframe).await;
+    assert_eq!(
+        sink.inner.lock().await.chunk_first_ts,
+        0,
+        "start_new_session() must re-anchor the session origin"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -632,8 +677,8 @@ async fn with_ingest_state_reports_active_ingest_skew_and_audit_row() {
     sink.write_video(0, &keyframe).await;
 
     // ONE real audio tag at xiu_ts=0, then audio is never written again --
-    // its `audio_max_abs` stays frozen while video's wall-clock ts keeps
-    // growing on every subsequent keyframe, producing a growing skew.
+    // its `audio_max_abs` stays frozen while video's ts keeps growing on
+    // every subsequent keyframe, producing a growing skew.
     let audio_data = BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]);
     sink.write_audio(0, &audio_data).await;
 
@@ -646,12 +691,12 @@ async fn with_ingest_state_reports_active_ingest_skew_and_audit_row() {
     for i in 1..=5u8 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
-        sink.write_video(0, &kf).await;
+        sink.write_video(u32::from(i) * 20, &kf).await;
     }
 
     assert!(
         ingest_state.ingest_skew_active(),
-        "a sustained wall-clock-vs-frozen-audio gap must latch the ingest skew flag \
+        "a sustained video-vs-frozen-audio gap must latch the ingest skew flag \
          (got skew_ms={})",
         ingest_state.ingest_skew_ms()
     );
@@ -667,6 +712,129 @@ async fn with_ingest_state_reports_active_ingest_skew_and_audit_row() {
     assert_eq!(row.source, rs_core::audit::Source::Inpoint);
     assert_eq!(row.detail["threshold_ms"], THRESHOLD_MS);
     assert_eq!(row.detail["state"], "detected");
+}
+
+/// Drive a sink wired to `ingest_state` until the ingest skew monitor latches
+/// Detected (same video-vs-frozen-audio recipe as the test above), and
+/// return the Detected audit row.
+async fn latch_ingest_skew(
+    sink: &FlvChunkSink,
+    audit_rx: &mut tokio::sync::mpsc::Receiver<rs_core::audit::AuditRow>,
+) -> rs_core::audit::AuditRow {
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]),
+    )
+    .await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]))
+        .await;
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]),
+    )
+    .await;
+    sink.write_audio(0, &BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]))
+        .await;
+    for i in 1..=5u8 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
+        sink.write_video(u32::from(i) * 20, &kf).await;
+    }
+    audit_rx
+        .try_recv()
+        .expect("the skew monitor must latch Detected first")
+}
+
+/// #367 review B1: a session reset (OBS republish -> `start_new_session`, RTMP
+/// disconnect -> `reset`) clears a latched ingest skew and the banner. It must
+/// say so with an `IngestSkewRecovered` row, or the outage notifier's
+/// IngestSkew episode never closes and the NEXT desync is never alerted.
+#[tokio::test]
+async fn a_session_reset_that_clears_a_latched_skew_records_its_recovery() {
+    use rs_core::audit::Action;
+    use rs_core::models::InpointState;
+    use tokio::sync::mpsc;
+
+    const THRESHOLD_MS: i64 = 10;
+    for via_disconnect in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (audit_tx, mut audit_rx) = mpsc::channel(16);
+        let ingest_state = InpointState::new().with_audit_tx(audit_tx);
+        let sink = Arc::new(
+            FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+                .with_ingest_state(ingest_state.clone(), THRESHOLD_MS),
+        );
+
+        let detected = latch_ingest_skew(&sink, &mut audit_rx).await;
+        assert_eq!(detected.action, Action::IngestSkewDetected);
+        assert!(ingest_state.ingest_skew_active());
+
+        if via_disconnect {
+            sink.reset().await;
+        } else {
+            sink.start_new_session().await;
+        }
+
+        assert!(
+            !ingest_state.ingest_skew_active(),
+            "the reset clears the banner latch"
+        );
+        let mut rows = Vec::new();
+        while let Ok(r) = audit_rx.try_recv() {
+            rows.push(r);
+        }
+        let recovered: Vec<_> = rows
+            .iter()
+            .filter(|r| r.action == Action::IngestSkewRecovered)
+            .collect();
+        assert_eq!(
+            recovered.len(),
+            1,
+            "via_disconnect={via_disconnect}: exactly one IngestSkewRecovered for the reset, \
+             got {rows:?}"
+        );
+        let row = recovered[0];
+        assert_eq!(row.source, rs_core::audit::Source::Inpoint);
+        assert_eq!(row.detail["state"], "reset");
+        assert_eq!(row.detail["threshold_ms"], THRESHOLD_MS);
+        let skew_ms = row.detail["skew_ms"].as_i64().expect("skew_ms is a number");
+        assert!(
+            skew_ms.abs() > THRESHOLD_MS,
+            "the row records the over-threshold skew the latch was holding, got {skew_ms}"
+        );
+    }
+}
+
+/// A session reset with NO latched skew writes no skew row.
+#[tokio::test]
+async fn a_session_reset_without_a_latched_skew_writes_no_skew_row() {
+    use rs_core::audit::Action;
+    use rs_core::models::InpointState;
+    use tokio::sync::mpsc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (audit_tx, mut audit_rx) = mpsc::channel(16);
+    let ingest_state = InpointState::new().with_audit_tx(audit_tx);
+    let sink = Arc::new(
+        FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+            .with_ingest_state(ingest_state.clone(), 2_000),
+    );
+    sink.write_video(
+        0,
+        &BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]),
+    )
+    .await;
+    sink.start_new_session().await;
+    sink.reset().await;
+    while let Ok(r) = audit_rx.try_recv() {
+        assert!(
+            !matches!(
+                r.action,
+                Action::IngestSkewRecovered | Action::IngestSkewDetected
+            ),
+            "no skew edge without a latched skew, got {r:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -695,7 +863,7 @@ async fn with_ingest_state_stays_clear_on_a_healthy_source() {
         let audio_data = BytesMut::from(&[0xAF, 0x01, 0xBE, i][..]);
         sink.write_audio((i as u32) * 20, &audio_data).await;
         let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
-        sink.write_video(0, &kf).await;
+        sink.write_video((i as u32) * 20, &kf).await;
     }
 
     assert!(
@@ -704,3 +872,8 @@ async fn with_ingest_state_stays_clear_on_a_healthy_source() {
         ingest_state.ingest_skew_ms()
     );
 }
+
+// #367 time-model regression tests (source-ts domain, GOP-cache burst,
+// backward source jump) live in their own child file for the 1000-line cap.
+#[path = "flv_chunker_time_tests.rs"]
+mod time_domain;

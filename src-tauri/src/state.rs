@@ -129,6 +129,29 @@ impl AppState {
         self.inpoint_state.ingest_skew_active()
     }
 
+    /// Whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (#84). Mirrors
+    /// `/api/v1/status.long_stream_warning` through the SAME shared rs-core
+    /// helper the HTTP handler uses, so the tray webview renders the same
+    /// long-stream banner as the LAN dashboard. Reads the startup config
+    /// snapshot (like every other config read here); the threshold is an
+    /// operator duration that does not change mid-stream.
+    pub async fn long_stream_warning(&self, event: Option<&StreamingEvent>) -> bool {
+        rs_core::long_stream::is_long_running_now(
+            &self.pool,
+            event,
+            self.config.delivery.long_stream_warn_secs,
+        )
+        .await
+    }
+
+    /// RTMP listener bind error (#106) from the SAME shared `InpointState` the
+    /// runtime inpoint loop writes, so the tray webview shows the same red
+    /// bind-failure banner as the LAN dashboard.
+    pub fn rtmp_bind_error(&self) -> Option<String> {
+        self.inpoint_state.bind_error()
+    }
+
     /// Get chunk statistics directly from the database.
     pub async fn get_chunk_stats(&self) -> Result<ChunkStats, String> {
         let chunk_duration_ms = self.config.inpoint.chunk_duration_ms;

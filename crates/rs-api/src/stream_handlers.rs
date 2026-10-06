@@ -225,6 +225,7 @@ pub async fn start_stream(
                         delivery_mode: None,
                         rescue_eta_secs: None,
                         youtube_health: None,
+                        facebook_health: None,
                         // Configured but not yet live => Pending (gray).
                         lifecycle: rs_core::models::EndpointLifecycle::Pending,
                     })

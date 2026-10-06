@@ -11,16 +11,31 @@ Load the relevant skill BEFORE working on these areas. `.claude/rules/*.md` file
 auto-load on their `paths:` — you do not invoke those.
 
 - stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
+- A/V time model: one source-ts transform per stage (chunker / receiver / pusher), absolute A/V invariant guard (#367) → `.claude/rules/av-time-model.md` (auto)
+- Discord outage notifier: episodes keyed (family, stage, endpoint), lifecycle scopes, every onset must end (#367) → `.claude/rules/outage-notifier.md` (auto)
+- cargo-mutants survivors / TIMEOUTs (log-only branches, cross-crate tests, paused-clock watchdog) → `.claude/rules/mutation-killable-code.md` (auto)
 - authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
+- process-stall detector (`logs/stall.log`, ProcessStall, Windows-cfg verify on dev2) → `.claude/rules/process-stall-detector.md` (auto)
+- CI Mutation Testing job is fake-green; local diff-scoped mutation recipe on dev2 → `.claude/rules/ci-mutation-gate.md` (auto)
 - DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
+- installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
+- rs-rtmp-push in-process RTMP test servers / rejection-path harness → `.claude/rules/rtmp-test-harness.md` (auto)
+- Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
+- Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
+- leptos-ui timers / detached async / reactive-disposal panics on SPA nav → `.claude/rules/leptos-ownership.md` (auto-loads on `leptos-ui/src/**`)
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
+- A/V-skew guard (ingest diag #354 vs push actuator #257/#359, STEP-vs-DRIFT, DriftHold) → `.claude/rules/av-skew-guard.md` (auto)
+- adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
+- E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
+- YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
+- per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure
 
@@ -28,13 +43,13 @@ Pure Rust monorepo with Cargo workspace at the root.
 
 | Directory    | Purpose                                      |
 | ------------ | -------------------------------------------- |
-| `crates/`    | 11 workspace crates                          |
+| `crates/`    | 12 workspace crates                          |
 | `src-tauri/` | Tauri desktop app (Windows tray + WebView2)  |
 | `leptos-ui/` | Leptos CSR frontend (WASM, all-Rust)         |
 | `e2e/`       | Playwright E2E tests (frontend + YouTube)    |
 | `scripts/`   | Windows install/deploy PowerShell scripts    |
 
-**Architecture**: 11 workspace crates (`rs-core`, `rs-inpoint`, `rs-rtmp-push`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-ffmpeg`, `rs-cloud`, `rs-delivery`, `rs-youtube`). `src-tauri` and `leptos-ui` excluded from workspace. Single unified binary `Restreamer.exe` (Tauri + embedded service + Leptos/WASM UI). SQLite via sqlx, Axum on `:8910`, RTMP in pure Rust. Rust edition 2024 (requires `unsafe` for `set_var`/`remove_var`), min Rust 1.85. Use `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests.
+**Architecture**: 12 workspace crates (`rs-core`, `rs-inpoint`, `rs-rtmp-push`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-ffmpeg`, `rs-cloud`, `rs-delivery`, `rs-youtube`, `rs-facebook`). `src-tauri` and `leptos-ui` excluded from workspace. Single unified binary `Restreamer.exe` (Tauri + embedded service + Leptos/WASM UI). SQLite via sqlx, Axum on `:8910`, RTMP in pure Rust. Rust edition 2024 (requires `unsafe` for `set_var`/`remove_var`), min Rust 1.85. Use `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests.
 
 ## Strict Rules
 
@@ -114,7 +129,7 @@ The `stream-lan-box` concurrency group (`queue: max`, `cancel-in-progress: false
 gh api repos/zbynekdrlik/restreamer/actions/runs/<id>/force-cancel -X POST
 ```
 
-It reaches terminal `cancelled` within seconds and lets the successor start. **Then, before the successor's E2E begins, verify shared box state is clean**: no active event, no lingering delivery instance, no orphan Hetzner VPS (the force-killed run may have left an event activated or a VPS running). Observed twice (runs 29807113362, 29864817389) where a normal cancel had no effect and force-cancel was the only thing that worked.
+It reaches terminal `cancelled` within seconds and lets the successor start. **Then, before the successor's E2E begins, verify shared box state is clean**: no active event, no lingering delivery instance, no orphan Hetzner VPS (the force-killed run may have left an event activated or a VPS running). A force-cancel during the #367 late-join gate's 35 s freeze leaves Restreamer suspended for up to ~75 s, until the gate's dead-man resumes it: wait that out before you judge the box. Observed twice (runs 29807113362, 29864817389) where a normal cancel had no effect and force-cancel was the only thing that worked.
 
 ## CI/CD Pipelines
 

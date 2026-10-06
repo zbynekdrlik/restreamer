@@ -145,3 +145,142 @@ fail with an ownership error ("owned by itself") — the fallback pacer is
 `timeout N tail -f /dev/null` (blocks reading `/dev/null` for exactly N
 seconds, no `sleep` in the command text) repeated until the dispatch's
 completion notification arrives naturally.
+
+## Asserting a feature DEEP in a job — `sed` job-range, not `grep -A<N>` (#363/#361, 2026-09-02)
+
+The existing self-checks use `grep -A3/-A10 "^  <job>:"` because they check the
+`if:`/`needs:` near the job header. To assert something FAR from the header (a
+firewall rule ~200 lines into `deploy-stream-lan`, a teardown step at the end of
+a job), extract the whole job block by its bracketing headers instead:
+
+```bash
+DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
+echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-LocalPort 1234.*-Action Allow' || exit 1
+```
+
+- Pick the CLOSING anchor = the very next `^  <job>:` header (verify it occurs
+  exactly once). This scoping is what makes the #325 self-match impossible: the
+  self-check lives in `test-integrity` (early in the file), so it is OUTSIDE the
+  sed range and its own grep-pattern line can never match — even when the pattern
+  literally contains the searched string.
+- **Assert per-job, not per-range, when N jobs must each carry the feature.** A
+  single `e2e-obs-youtube-test → e2e-gate` range spans BOTH OBS-streaming jobs, so
+  `grep -q StopRecord` on it passes if only ONE has the teardown. Split into
+  `obs-youtube→fb-push` and `fb-push→e2e-gate` and assert each (real #361 review
+  finding — the one-range guard did not encode "both jobs").
+- Pin the discriminating flags in a firewall/rule assertion (`-Direction Inbound`
+  … `-Action Allow`), or the grep also passes an Outbound/Block rule.
+- A negative directive ("we must NEVER do X") is a whole-file `grep -q` that EXITs
+  on a match — but write the pattern so it can't match its own line (e.g.
+  `requestType = "(StartRecord|ToggleRecord)"` does not match the literal
+  `requestType = "(StartRecord|ToggleRecord)"` because the ERE group needs
+  `StartRecord`/`ToggleRecord` right after the quote, not a literal `(`).
+
+### `echo "$BLOCK" | grep -q` lies under pipefail — use a here-string (#192)
+
+A `run:` with no `shell:` runs `bash -e {0}`; an explicit `shell: bash` runs
+`bash --noprofile --norc -eo pipefail {0}`. Under pipefail, `grep -q` exits at
+the first match, `echo` dies of SIGPIPE (141), and the pipeline FAILS — so
+`if echo "$YT_BLOCK" | grep -qF 'x'` reads a real match as "no match". Write
+`grep -qF 'x' <<<"$YT_BLOCK"` (correct under both shells). End extraction
+pipelines (`grep -oE ... | sed`) with `|| true` so a no-match cannot abort the
+step before your own error message. Test a new self-check locally by
+extracting its `run:` with `yaml.safe_load` and running it with
+`bash --noprofile --norc -eo pipefail` (the stricter shell) against the real
+file AND hand-made regressed copies (it must go red).
+
+### Structural invariants: parse the YAML in the step (#367)
+
+Some invariants are about structure, not text: a job's `timeout-minutes`, a
+matrix's source, `needs`, a pinned tool spec in `with:`, `continue-on-error`.
+Check those with `yaml.safe_load` inside the step. Use `tomllib` for Cargo.toml
+and `.cargo/*.toml`. Fall back to `pip install pyyaml` if the import fails.
+
+"Verify the mutation gate" is the example. It finds the jobs whose run lines
+start with `cargo mutants` and checks:
+- each such job's `timeout-minutes` is at most 20;
+- each job pins its tools, with no `continue-on-error`;
+- `EXIT=$?` comes right after the command, with no pipe, `;` or `&` around it;
+- the step's only `exit` is its last line;
+- the gate's not-success branch sets `FAILED=1`.
+
+A guard that greps one form misses the next one. The first version of this
+guard passed `|| true`, `continue-on-error` and `2) exit 0`; a review caught
+it. So write the regressed copies as a table of (old, new) replacements and
+run the guard against each copy; every copy must go red, for the right
+reason. The #367 table has 30 rows.
+
+### Endpoint aliases in the OBS-to-YouTube job must be CI-seeded (#192)
+
+`Verify every strict-gate endpoint alias is seeded by CI` extracts every
+`.alias -eq '<x>'` / `.endpoint -eq '<x>'` literal in `e2e-obs-youtube-test`
+and requires it to be in `$needAttach` AND created by an `alias = '<x>'`
+find-or-create body in the job (`e2e rtmp` is accepted because its key is
+synced from `YOUTUBE_STREAM_KEY`). Adding a gate on a new alias = seed it in
+the pin step first.
+
+## Syntax-check inline PowerShell before pushing (dev1 is Tier-0, no local pwsh)
+
+A PowerShell PARSE error in a `shell: powershell` step is NOT caught by an inner
+`try/catch` and fails the step (and, for an `if: always()` teardown, the job).
+dev1 can't run PowerShell, so verify a ci.yml PowerShell block against the REAL
+parser on the stream box via MCP before you rely on it: extract the `run:` body,
+strip the YAML indent, base64 it (avoids all quoting), then on stream.lan
+`[System.Management.Automation.Language.Parser]::ParseInput($code,[ref]$t,[ref]$e)`
+and print `$e.Count`. 0 errors = safe. (Also: `shell: powershell` on GitHub
+prepends `$ErrorActionPreference='stop'`, so a bare cmdlet error IS terminating
+and lands in your `catch`; no native exe means `$LASTEXITCODE` stays unset.)
+
+**Hand-copying a long base64 blob into the MCP command corrupts it.** On #367
+a 10 KB gzip+base64 paste failed its CRC. Let the box FETCH the script
+instead: `python3 ~/devel/airuleset/airuleset.py share --private <file>`, then
+on stream.lan run `Invoke-WebRequest -UseBasicParsing http://dev1:8788/<token>/<file>`
+and compare its sha256 with the local file before parsing.
+- Address dev1 by its hostname `dev1`.
+- The public `share` URL returns 302 to Cloudflare Access, so a machine can't
+  fetch it.
+- A script embedded as a single-quoted here-string (e.g. one passed to
+  `-EncodedCommand`) is NOT parsed with its host, so parse it as a separate
+  part.
+
+**GitHub also APPENDS `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) {
+exit $LASTEXITCODE }` to every `powershell` step.** So the last native exe's
+non-zero exit (e.g. a tolerated ffprobe failure) turns a step that printed
+PASSED into a failure. Reset it on the success path with
+`$global:LASTEXITCODE = 0`.
+
+**A force-cancel (`/force-cancel`) skips `if: always()` steps and `finally`
+blocks.** Any step that leaves the box in a bad state (a suspended process, a
+frozen publisher) needs a recovery that lives outside the runner's process
+tree. The #367 late-join gate creates a dead-man through WMI
+(`Invoke-CimMethod Win32_Process -MethodName Create`, parented to WmiPrvSE).
+It runs without `RUNNER_TRACKING_ID`, so the runner's orphan cleanup leaves
+it alone.
+
+## Cross-repo rig lease (#349/#830): the two runners are DIFFERENT machines
+
+camera-box's `full-path-e2e` gate runs on `[self-hosted, linux, camera-lan]` =
+**dev1 Linux**; restreamer's OBS-driving E2E jobs run on
+`[self-hosted, windows, stream-lan]` = **the Windows stream box (10.77.9.204)**.
+There is NO shared local filesystem between them, so the camera-box #830 lockdir
+design (`/var/tmp/rig-lease/` acquired by atomic `mkdir`, "both runners are the
+same machine") CANNOT coordinate the restreamer side — a lockdir restreamer
+writes locally is invisible to camera-box's dev1 gate (a false guard; never ship
+a stream-box-local lockdir).
+
+**Solution shipped (#349):** camera-box exposes its lockdir READ-ONLY over HTTP
+(`GET http://dev1:8890/rig-lease.json`, their #1277 — address dev1 by its LAN hostname `dev1`: the IP drifts on DHCP (.103 -> .109 by 2026-10-05, and the stale default silently never waited because the script is fail-open), tailscale 100.104.8.125 times out from stream.lan, and `dev1.lan` does not resolve); restreamer POLLS it
+in `scripts/ci/rig-lease-wait.ps1` before starting OBS streaming and WRITES
+NOTHING (our OBS streaming IS the lease in their direction). Semantics: held &&
+!stale → wait bounded `min(ttl_s+grace, 60min)`; stale → proceed (reclaimable);
+free → proceed; unreachable/non-200/unparseable → proceed + `::warning::`
+(FAIL-OPEN — endpoint down ≠ rig busy); budget exhausted → proceed. The script
+ALWAYS exits 0 (courtesy wait, never a hard gate). Gotchas learned: (1) a wait
+budget MUST fit inside the job's `timeout-minutes` or a genuine hold becomes a
+job-timeout FAILURE — size `job timeout ≥ work + budget + margin` (YT 145, FB
+120 for a 60-min budget). (2) TOCTOU: camera-box can acquire in the
+minutes-long gap between a post-checkout check and StartStream, so ALSO re-check
+(short budget) right before StartStream. (3) Fail-open messages use `::warning::`
+so a bypassed guard is visible in the Actions summary. (4) Sanitize every numeric
+env knob with `-as [int]` + fallback — a `$null` `-TimeoutSec` is INDEFINITE in
+PS 5.1, and a `$null` budget collapses the wait.

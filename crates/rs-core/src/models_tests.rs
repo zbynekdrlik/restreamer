@@ -59,6 +59,7 @@ fn ws_event_serde_roundtrip() {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                facebook_health: None,
                 lifecycle: EndpointLifecycle::Live,
             }],
         },
@@ -168,6 +169,26 @@ fn inpoint_state_clone_shares_state() {
     assert!(clone.is_connected());
 }
 
+/// #106: the RTMP bind-error cell round-trips through set / read / clear,
+/// and a clone (the API's copy) sees the runtime's write.
+#[test]
+fn inpoint_state_bind_error_set_read_clear() {
+    let state = InpointState::new();
+    let api_view = state.clone();
+    assert_eq!(state.bind_error(), None, "no bind error by default");
+
+    state.set_bind_error(
+        "Port 1234 is already in use by another process (PID 7: obs64.exe).".into(),
+    );
+    assert_eq!(
+        api_view.bind_error().as_deref(),
+        Some("Port 1234 is already in use by another process (PID 7: obs64.exe).")
+    );
+
+    state.clear_bind_error();
+    assert_eq!(api_view.bind_error(), None, "clear removes the banner text");
+}
+
 #[test]
 fn delivery_metrics_diagnostics_roundtrip() {
     let metrics = DeliveryEndpointMetrics {
@@ -188,6 +209,7 @@ fn delivery_metrics_diagnostics_roundtrip() {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     };
     let json = serde_json::to_string(&metrics).unwrap();
@@ -239,6 +261,7 @@ fn ws_event_delivery_with_diagnostics_roundtrip() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         }],
     };
@@ -269,6 +292,7 @@ fn delay_excludes_fast_endpoints() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         },
         DeliveryEndpointMetrics {
@@ -289,6 +313,7 @@ fn delay_excludes_fast_endpoints() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         },
     ];
@@ -321,6 +346,7 @@ fn delay_all_fast_falls_back_to_zero() {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     }];
     let delay = endpoints
@@ -476,4 +502,48 @@ fn inpoint_state_clone_shares_ingest_skew_cells() {
     clone.set_ingest_skew_active(false);
     assert_eq!(state.ingest_skew_ms(), 0);
     assert!(!state.ingest_skew_active());
+}
+
+// #260: `StreamingEvent::rescue_video_missing()` — the single predicate shared
+// by the go-live audit warning and (mirrored) the dashboard banner.
+fn event_with_rescue(url: Option<&str>) -> StreamingEvent {
+    StreamingEvent {
+        id: 1,
+        name: "9316".to_string(),
+        received_bytes: 0,
+        receiving_activated: true,
+        delivering_activated: false,
+        cache_delay_secs: None,
+        created_from: None,
+        rescue_video_url: url.map(str::to_string),
+    }
+}
+
+#[test]
+fn rescue_video_missing_true_when_none() {
+    assert!(
+        event_with_rescue(None).rescue_video_missing(),
+        "a NULL rescue_video_url is the 9316 case — must warn"
+    );
+}
+
+#[test]
+fn rescue_video_missing_true_when_empty_or_whitespace() {
+    assert!(event_with_rescue(Some("")).rescue_video_missing());
+    assert!(
+        event_with_rescue(Some("   \t ")).rescue_video_missing(),
+        "whitespace-only is not a usable URL"
+    );
+}
+
+#[test]
+fn rescue_video_missing_false_when_url_set() {
+    assert!(
+        !event_with_rescue(Some("https://s3.example/rescue.flv")).rescue_video_missing(),
+        "a real URL means a custom rescue clip is configured — no warning"
+    );
+    assert!(
+        !event_with_rescue(Some("  https://s3.example/rescue.flv  ")).rescue_video_missing(),
+        "surrounding whitespace must not falsely flag a configured URL as missing"
+    );
 }

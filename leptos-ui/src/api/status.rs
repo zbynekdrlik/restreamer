@@ -41,6 +41,17 @@ pub struct StatusResponse {
     /// false-alarms.
     #[serde(default)]
     pub vps_orphan_count: u8,
+    /// Whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h). Drives the
+    /// LongStreamBanner (#84). Defaults false so a missing field never
+    /// false-alarms.
+    #[serde(default)]
+    pub long_stream_warning: bool,
+    /// Human-readable RTMP listener bind error (#106). `Some(msg)` while the
+    /// RTMP port is held by another process; drives the RtmpBindErrorBanner.
+    /// `None` when the listener is healthy.
+    #[serde(default)]
+    pub rtmp_bind_error: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -81,6 +92,11 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         .as_bool()
         .unwrap_or(false);
     let vps_orphan_count = status["vps_orphan_count"].as_u64().unwrap_or(0) as u8;
+    // #84: top-level flag on /status (sibling of s3_region_standard).
+    let long_stream_warning = status["long_stream_warning"].as_bool().unwrap_or(false);
+    let rtmp_bind_error = status["inpoint"]["details"]["rtmp_bind_error"]
+        .as_str()
+        .map(|s| s.to_string());
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
@@ -91,5 +107,7 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         ingest_skew_ms,
         ingest_skew_active,
         vps_orphan_count,
+        long_stream_warning,
+        rtmp_bind_error,
     })
 }

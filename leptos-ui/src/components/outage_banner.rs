@@ -21,13 +21,9 @@ pub fn OutageBanner() -> impl IntoView {
         })
     });
     // Only show when NO endpoint needs attention (attention has its own red).
-    let any_attention = Memo::new(move |_| {
-        delivery
-            .get()
-            .endpoints
-            .iter()
-            .any(|e| e.lifecycle == EndpointLifecycle::Attention)
-    });
+    // Uses the shared predicate so the calm banner's suppression and the
+    // app-level glow (#73) can never disagree about "what is red".
+    let any_attention = Memo::new(move |_| crate::store::any_attention(&delivery.get()));
 
     view! {
         <Show when=move || recovering.get() && !any_attention.get()>

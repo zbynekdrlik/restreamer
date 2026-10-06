@@ -31,14 +31,17 @@ pub fn PacingPanel() -> impl IntoView {
             return;
         }
         leptos::task::spawn_local(async move {
+            // #343: PacingPanel lives in the dashboard sidebar and is disposed
+            // on a route change; this fetch may resolve afterwards, so write
+            // via the fallible API (no-op on a disposed signal).
             match api::fetch_pacing(id, Some(0), None).await {
                 Ok(resp) => {
-                    data.set(Some(resp));
-                    error.set(None);
+                    data.try_set(Some(resp));
+                    error.try_set(None);
                 }
                 Err(e) => {
                     leptos::logging::warn!("pacing_panel fetch failed: {e}");
-                    error.set(Some(e));
+                    error.try_set(Some(e));
                 }
             }
         });

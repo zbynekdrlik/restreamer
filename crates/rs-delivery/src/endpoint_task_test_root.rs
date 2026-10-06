@@ -18,5 +18,7 @@ mod rescue_endpoint_loop_tests;
 mod rescue_tests;
 #[path = "endpoint_task_rust_push_tests.rs"]
 mod rust_push_tests;
+#[path = "endpoint_task_service_type_tests.rs"]
+mod service_type_tests;
 #[path = "endpoint_task_tests.rs"]
 mod tests;

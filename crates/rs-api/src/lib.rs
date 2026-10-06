@@ -2,6 +2,7 @@ pub mod access;
 #[cfg(test)]
 mod access_tests;
 pub mod audit_handlers;
+pub(crate) mod cache_ttl;
 pub mod clock_skew_probe;
 #[cfg(test)]
 mod config_redaction_tests;
@@ -11,6 +12,7 @@ pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
 pub mod delivery_binary;
 pub mod delivery_endpoints;
+pub mod delivery_fb_health;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
 pub mod delivery_live_edge;
@@ -38,9 +40,14 @@ pub mod facebook;
 #[cfg(test)]
 mod facebook_tests;
 pub mod handlers;
+#[cfg(test)]
+mod handlers_crud_tests;
 pub mod internet_probe;
 pub mod metrics_handlers;
 pub mod oauth_device;
+pub mod oauth_stream_keys;
+#[cfg(test)]
+mod oauth_stream_keys_tests;
 pub mod obs;
 #[cfg(test)]
 mod on_vps_ready_tests;
@@ -58,9 +65,12 @@ pub mod state;
 pub mod status_summary;
 pub mod stream_handlers;
 pub mod template_handlers;
+pub mod throughput_endpoints;
 pub mod uploads_endpoints;
 pub mod websocket;
 pub mod youtube;
+#[cfg(test)]
+mod youtube_shape_tests;
 
 #[cfg(test)]
 mod yt_health_extract_tests;
@@ -360,6 +370,7 @@ async fn delivery_broadcast_loop(
                             delivery_mode: None,
                             rescue_eta_secs: None,
                             youtube_health: None,
+                            facebook_health: None,
                             // Configured but not yet live => Pending (gray).
                             lifecycle: rs_core::models::EndpointLifecycle::Pending,
                         })
@@ -563,6 +574,7 @@ mod max_non_fast_tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: rs_core::models::EndpointLifecycle::Live,
         }
     }

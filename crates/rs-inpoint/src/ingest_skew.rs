@@ -71,10 +71,11 @@ pub struct SkewTransition {
 /// (`observe_video`/`observe_audio`), advances the tracker at each chunk
 /// boundary, reads its baseline-relative `last_skew_ms()`, and applies an
 /// operator threshold with a `SKEW_DEBOUNCE_CHUNKS` sustain-latch. Because it
-/// uses the tracker's baseline-relative deviation, a benign CONSTANT startup
-/// domain gap (audio xiu-ts vs video wall-clock have different absolute zero
-/// points) folds into the baseline and never trips — only a desync that
-/// APPEARS/GROWS mid-stream does (the incident signature; #257 guard reused).
+/// uses the tracker's baseline-relative deviation, a CONSTANT offset present
+/// from the first chunk folds into the baseline and never trips — only a
+/// desync that APPEARS/GROWS mid-stream does (the incident signature; #257
+/// guard reused). Since #367 both tracks share one source-ts transform, and
+/// the absolute (no-baseline) check is the chunker's A/V invariant guard.
 pub struct IngestSkewMonitor {
     tracker: SkewTracker,
     /// Operator alert threshold (ms). Deliberately BELOW the pusher's
@@ -136,11 +137,19 @@ impl IngestSkewMonitor {
     /// chunker's `start_new_session`): both tracks, the debounce, the baseline
     /// AND the operator latch are cleared, so skew re-measures from the new
     /// common origin and the banner clears.
-    pub fn reset(&mut self) {
+    ///
+    /// Returns the skew the latch was holding when this reset CLEARED an
+    /// active latch, so the caller records the recovery (#367 review B1:
+    /// a latch cleared without an `IngestSkewRecovered` row left the outage
+    /// notifier's episode open, and the next desync was never alerted).
+    /// `None` when no latch was set.
+    pub fn reset(&mut self) -> Option<i64> {
+        let cleared = self.active.then_some(self.last_skew_ms);
         self.tracker.reset_tracks();
         self.consecutive_over = 0;
         self.active = false;
         self.last_skew_ms = 0;
+        cleared
     }
 
     /// Evaluate at the END of one chunk. Advances the tracker, reads the

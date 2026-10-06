@@ -6,5 +6,6 @@ pub mod endpoint_lifecycle;
 pub mod error;
 pub mod log_buffer;
 pub mod log_capture;
+pub mod long_stream;
 pub mod models;
 pub mod notify;

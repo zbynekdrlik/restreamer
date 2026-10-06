@@ -12,6 +12,7 @@ rs-core.workspace = true
 rs-cloud.workspace = true
 rs-endpoint = { path = "../rs-endpoint" }
 rs-youtube.workspace = true
+rs-facebook.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true

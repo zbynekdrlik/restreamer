@@ -164,9 +164,12 @@ dashboard banner keys off the same audit rows).
 
 - **Edge-triggered / deduped:** `observe()` is a pure, HTTP-free state machine —
   one alert per distinct transition per outage episode (NOT per retry; the audit
-  `RateLimiter` already throttles the storm actions to 1/min). A recovery signal
-  ends the episode and re-arms the onset alerts. Unit-test the logic directly;
-  no live webhook needed.
+  `RateLimiter` already throttles the storm actions to 1/min). Since #367 an
+  episode is keyed by (family, stage, endpoint): a recovery ends only its own
+  family's episode, and a lifecycle row (delivery / endpoint / rescue entry /
+  event) silently closes the episodes of the subject it ended. The model and
+  its invariant live in `.claude/rules/outage-notifier.md`. Unit-test the
+  logic directly; no live webhook needed.
 - **Config:** `notifications.discord_webhook_url` (empty = disabled → feature
   ships dark). The webhook URL is a RUNTIME secret the operator sets in
   `config.json` — NEVER commit a real webhook URL anywhere (placeholder only).

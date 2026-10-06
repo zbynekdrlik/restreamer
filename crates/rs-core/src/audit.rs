@@ -48,6 +48,18 @@ pub enum Action {
     RtmpConnected,
     RtmpDisconnected,
     RtmpHandshakeFailed,
+    /// The RTMP listener could not BIND its port (e.g. another process holds
+    /// 1234). Warn severity, `Source::Inpoint`. Detail carries
+    /// `{port, holder, error}`. Durable post-mortem for a silent-ingest window;
+    /// pairs with `RtmpBindRecovered`. Surfaced on the dashboard via a red
+    /// banner + `WsEvent::RtmpBindFailed` (#106). Edge-triggered (first failure
+    /// of a streak only), so it never floods the audit log on the retry loop.
+    RtmpBindFailed,
+    /// The RTMP listener port became bindable again after an `RtmpBindFailed`
+    /// — the conflicting process released the port. Info severity,
+    /// `Source::Inpoint`. Detail carries `{port}`. Pairs with `RtmpBindFailed`
+    /// (#106).
+    RtmpBindRecovered,
     /// Ingest A/V skew crossed the operator threshold — the SOURCE (OBS) is
     /// desynced. Warn severity, `Source::Inpoint` (or `Source::Operator` for
     /// the `Start Delivering` `force:true` override, which re-fires this same
@@ -61,10 +73,31 @@ pub enum Action {
     /// Outage-alert recovery, pairs with `IngestSkewDetected` — see
     /// `notify::classify` (#354).
     IngestSkewRecovered,
+    /// #367: a pipeline stage broke the ABSOLUTE A/V invariant. The stage's
+    /// output A/V relation differs from its input relation by more than
+    /// `tolerance_ms` (every stage must apply ONE common transform to both
+    /// tracks). Unlike the baseline-relative skew guards (#257/#354/#359)
+    /// there is no baseline, so an offset present from the first chunk is
+    /// caught. Warn severity. `detail.stage` is `"ingest"` (the chunker,
+    /// `Source::Inpoint`) or `"push"` (a VPS pusher, `Source::Vps` + the
+    /// endpoint alias). Detail carries `{stage, a_rel_ms, v_rel_ms, delta_ms,
+    /// tolerance_ms}`. Outage-alert onset — see `notify::classify`.
+    AvInvariantViolated,
+    /// #367: a latched `AvInvariantViolated` cleared: the relation is back
+    /// within tolerance, or a session re-anchor started a new transform.
+    /// Info severity. Detail carries `{stage, delta_ms}`. Outage-alert
+    /// recovery, pairs with `AvInvariantViolated`.
+    AvInvariantRestored,
     VpsCreating,
     VpsReady,
     VpsDeleted,
     VpsUnreachable,
+    /// Host-side (#367 review): the delivery health monitor reached the VPS
+    /// again after `VpsUnreachable` failures. Info severity. Detail carries
+    /// `{recovered_after_failures}`. Outage-alert recovery, pairs with
+    /// `VpsUnreachable` (before it the VPS-reachability episode only ended on
+    /// a host internet recovery or a delivery boundary).
+    VpsReachable,
     /// Host-side (#352): the runtime orphan reaper found a Hetzner VPS labelled
     /// for THIS install (`app=restreamer,client_uuid=<this>`) with no live
     /// `delivery_instances` row — a server that is billing but invisible to the
@@ -168,6 +201,19 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Host-side (#367): the process stopped responding for at least the stall
+    /// threshold (5 s) and has now RECOVERED. Emitted by the OS-thread stall
+    /// detector (`rs_runtime::stall_detector`) only after the tokio runtime
+    /// answers a probe again. `class` tells `runtime_starved` (the runtime
+    /// stopped polling while the OS kept running the process) from
+    /// `whole_process` (the OS did not run the process at all). Severity::Warn,
+    /// Source::System. Detail JSON: {class, trigger, started_at, ended_at,
+    /// duration_ms, detector_max_late_ms, detector_total_late_ms,
+    /// probe_age_at_detect_ms, baseline {age_ms, resources} (the last healthy,
+    /// PRE-stall reading), resources_at_detect (mid-stall for runtime_starved,
+    /// right after the freeze for whole_process), resources_at_end, stall_log,
+    /// stall_log_error}. The same evidence is in `logs/stall.log`.
+    ProcessStall,
     /// Local chunk-store volume crossed a disk-pressure threshold on the
     /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
     /// chunks are never dropped (continuity guarantee). Detail JSON:
@@ -220,6 +266,11 @@ pub enum Action {
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
     /// per 30 s per endpoint by the surrounding caller.
     YoutubeIssueChanged,
+    /// Host-side (#166): FB Graph ingest-health probe observed the mapped
+    /// `health` value change for an FB endpoint. Detail JSON:
+    /// `{from: Option<String>, to: Option<String>}`. Emitted only on transition
+    /// (parity with `YoutubeIssueChanged`), bounded by the surrounding TTL cache.
+    FacebookStatusChanged,
     /// Operator successfully completed an OAuth 2.0 Device Code Flow grant
     /// for a YouTube channel. Detail JSON: `{label, channel_id, scopes}`.
     OAuthGranted,
@@ -261,6 +312,23 @@ pub enum Action {
     /// data-driven server-type (tier) choice for the next event. Severity::Info.
     /// Detail JSON is `resource_sample::ResourceSample`.
     VpsResourceSample,
+    /// #84: a single delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h) — a heads-up that the
+    /// stream may have been left on after the event finished. Emitted ONCE per
+    /// delivery by the delivery health monitor (`LongStreamWarner` re-arms when
+    /// a new delivery starts). Severity::Warn, Source::Delivery. Detail JSON:
+    /// {elapsed_secs, threshold_secs}. Routed to the operator's Discord as a
+    /// standalone heads-up (NOT an outage episode) — see `notify::classify`.
+    LongStreamWarning,
+    /// Host-side (#260): delivery was started for an event whose
+    /// `rescue_video_url` is NULL/empty, so a delivery outage would fall back
+    /// to the embedded generic default rescue clip
+    /// (`resolve_rescue_source` → `Countdown`) instead of a branded Slovak
+    /// clip. Warn severity, `Source::Operator`, emitted once at go-live so a
+    /// post-mortem shows the event went live on the generic default (the
+    /// silent 2026-06-19 event 9316 case). Detail JSON: {event_id, event_name}.
+    /// Pairs with the dashboard `NoRescueVideoBanner`.
+    NoRescueVideoConfigured,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +403,47 @@ pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
         }
         Err(_) => { /* drop Info under pressure */ }
     }
+}
+
+/// #367: `detail.stage` of an A/V invariant row written by the ingest chunker.
+pub const AV_STAGE_INGEST: &str = "ingest";
+/// #367: `detail.stage` of an A/V invariant row written by a VPS pusher. The
+/// outage notifier scopes push-stage episodes to the live pusher, the
+/// endpoint and the delivery (`notify::Scope`), so both sides must use this.
+pub const AV_STAGE_PUSH: &str = "push";
+
+/// #367: the ONE audit-row shape of an absolute A/V invariant VIOLATION
+/// edge, shared by the ingest chunker (`stage: "ingest"`) and every VPS
+/// pusher (`stage: "push"`). Primitives only, so rs-core needs no
+/// rs-rtmp-push dependency.
+pub fn av_invariant_violated_row(
+    stage: &str,
+    a_rel_ms: i64,
+    v_rel_ms: i64,
+    delta_ms: i64,
+    tolerance_ms: i64,
+) -> (Severity, Action, Value) {
+    (
+        Severity::Warn,
+        Action::AvInvariantViolated,
+        serde_json::json!({
+            "stage": stage,
+            "a_rel_ms": a_rel_ms,
+            "v_rel_ms": v_rel_ms,
+            "delta_ms": delta_ms,
+            "tolerance_ms": tolerance_ms,
+        }),
+    )
+}
+
+/// #367: the audit-row shape of an A/V invariant RESTORED edge (see
+/// [`av_invariant_violated_row`]).
+pub fn av_invariant_restored_row(stage: &str, delta_ms: i64) -> (Severity, Action, Value) {
+    (
+        Severity::Info,
+        Action::AvInvariantRestored,
+        serde_json::json!({ "stage": stage, "delta_ms": delta_ms }),
+    )
 }
 
 /// Drains the audit channel, INSERTs rows (batched), broadcasts WS events, and
@@ -448,6 +557,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Action::RescueActivated).unwrap(),
             r#""rescue_activated""#
+        );
+        // #260: the audit panel renders the raw action string (audit_panel.rs),
+        // so lock the serialization for the no-rescue-video warning too.
+        assert_eq!(
+            serde_json::to_string(&Action::NoRescueVideoConfigured).unwrap(),
+            r#""no_rescue_video_configured""#
         );
     }
 
@@ -603,5 +718,60 @@ mod tests {
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"delivery_log_lost\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_vps_reachable_serdes() {
+        let a = Action::VpsReachable;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"vps_reachable\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_process_stall_serdes() {
+        let a = Action::ProcessStall;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"process_stall\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_av_invariant_serdes() {
+        // #367: the VPS emits these into its audit ring and the host mirror
+        // (`delivery_audit_mirror`) STRICT-parses the action string, so both
+        // must round-trip exactly or a push-side violation never lands in
+        // `audit_log` (and never reaches Discord).
+        for (a, s) in [
+            (Action::AvInvariantViolated, "\"av_invariant_violated\""),
+            (Action::AvInvariantRestored, "\"av_invariant_restored\""),
+        ] {
+            assert_eq!(serde_json::to_string(&a).unwrap(), s);
+            assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);
+        }
+    }
+
+    #[test]
+    fn av_invariant_rows_have_one_shape_for_both_stages() {
+        let (severity, action, detail) = av_invariant_violated_row("push", 3_300, 4_000, -700, 50);
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(action, Action::AvInvariantViolated);
+        assert_eq!(
+            detail,
+            serde_json::json!({
+                "stage": "push",
+                "a_rel_ms": 3_300,
+                "v_rel_ms": 4_000,
+                "delta_ms": -700,
+                "tolerance_ms": 50,
+            })
+        );
+        let (severity, action, detail) = av_invariant_restored_row("ingest", 3);
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(action, Action::AvInvariantRestored);
+        assert_eq!(
+            detail,
+            serde_json::json!({ "stage": "ingest", "delta_ms": 3 })
+        );
     }
 }

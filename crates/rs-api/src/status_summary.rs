@@ -90,6 +90,7 @@ mod tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle,
         }
     }

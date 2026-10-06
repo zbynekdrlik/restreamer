@@ -80,22 +80,25 @@ fn ObsSettingsSection() -> impl IntoView {
         if !loaded.get() {
             spawn_local(async move {
                 if let Ok(config) = api::get_config().await {
+                    // #343: this on-mount fetch can resolve after the Settings
+                    // tab/route switched away and disposed ObsSettingsSection —
+                    // write via the fallible API so a disposed signal no-ops.
                     if let Some(obs) = config.get("obs") {
-                        enabled.set(obs.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true));
-                        ws_url.set(
+                        enabled.try_set(obs.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true));
+                        ws_url.try_set(
                             obs.get("ws_url")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("ws://127.0.0.1:4455")
                                 .to_string(),
                         );
-                        ws_password.set(
+                        ws_password.try_set(
                             obs.get("ws_password")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
                         );
                     }
-                    loaded.set(true);
+                    loaded.try_set(true);
                 }
             });
         }
@@ -365,11 +368,13 @@ fn EventEndpoints(event_id: i64) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let assigned = RwSignal::new(Vec::<api::EndpointConfig>::new());
 
-    // Load assigned endpoints on mount
+    // Load assigned endpoints on mount. #343: this on-mount fetch can resolve
+    // after the Events tab / event card was disposed on a tab or route switch
+    // — `try_set` no-ops then instead of panicking on the disposed signal.
     let eid = event_id;
     spawn_local(async move {
         if let Ok(eps) = api::get_event_endpoints(eid).await {
-            assigned.set(eps);
+            assigned.try_set(eps);
         }
     });
 
@@ -465,12 +470,16 @@ fn EventsManagement() -> impl IntoView {
             if let Ok(templates) = api::list_templates().await {
                 store.templates_list.set(templates);
             }
+            // #343: on-mount fetch may resolve after EventsManagement is
+            // disposed on a tab/route switch — fallible writes no-op then.
             match api::get_s3_usage().await {
                 Ok(u) => {
-                    s3_usage.set(Some(u));
-                    s3_usage_error.set(None);
+                    s3_usage.try_set(Some(u));
+                    s3_usage_error.try_set(None);
                 }
-                Err(e) => s3_usage_error.set(Some(e)),
+                Err(e) => {
+                    s3_usage_error.try_set(Some(e));
+                }
             }
         });
     });

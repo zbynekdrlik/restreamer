@@ -98,6 +98,11 @@ impl Pushable for SequencedPusher {
     fn av_skew_ms(&self) -> i64 {
         0
     }
+
+    fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+        // This mock does not model the #367 invariant guard.
+        Vec::new()
+    }
 }
 
 /// Fixture bundle mirroring `close_on_error::fresh_state` but scoped to

@@ -24,6 +24,9 @@ pub(crate) mod endpoint_producer;
 // `endpoint_loop` so that file stays under the 1000-line CI cap.
 pub(crate) mod endpoint_respawn;
 pub(crate) mod endpoint_rtmp_url;
+// Start-up checks before the first fetch/push: parse the service type once,
+// refuse an unknown one loudly (#192).
+pub(crate) mod endpoint_start;
 pub mod endpoint_stats;
 pub mod endpoint_task;
 mod fast_delay;
@@ -43,9 +46,12 @@ pub mod rtmp_push_telemetry;
 pub mod rust_rescue_push;
 mod s3_fetch;
 pub mod s3_fetch_profile;
+mod test_file_sink;
 
 #[cfg(test)]
 mod api_update_start_tests;
+#[cfg(test)]
+mod test_file_sink_lifecycle_tests;
 
 pub use audit_ring::AuditRing;
 pub use disk_cache::DiskCache;
@@ -85,6 +91,13 @@ pub struct AppState {
     /// `resource_sample::run_sampler`. Exposed on `/api/status` so the host
     /// reads current usage live; `None` until the first sample lands. #353.
     pub latest_resource_sample: RwLock<Option<resource_sample::ResourceSample>>,
+    /// #192: the TEST_FILE loopback RTMP sink. Runs exactly while the
+    /// endpoint set holds a TEST_FILE endpoint (`api::reconcile_test_file_sink`
+    /// after every endpoint-set change). Production binds `127.0.0.1:1935`
+    /// (the address `build_rtmp_url(TestFile, ..)` dials); `new_for_test`
+    /// binds an ephemeral port, because other unit tests in this binary
+    /// assume 1935 is REFUSED.
+    pub test_file_sink: test_file_sink::TestFileSinkSlot,
 }
 
 impl AppState {
@@ -112,6 +125,7 @@ impl AppState {
             audit_ring,
             disk_cache: RwLock::new(None),
             latest_resource_sample: RwLock::new(None),
+            test_file_sink: test_file_sink::TestFileSinkSlot::new("127.0.0.1:0"),
         }
     }
 
@@ -137,6 +151,7 @@ impl AppState {
             audit_ring,
             disk_cache: RwLock::new(None),
             latest_resource_sample: RwLock::new(None),
+            test_file_sink: test_file_sink::TestFileSinkSlot::production(),
         }
     }
 }

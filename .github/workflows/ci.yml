@@ -209,34 +209,128 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # PINNED to 1.98.0, unlike every other job (#367, 2026-10-05). tarpaulin's
+      # default ptrace engine crashes on code built by rustc 1.99.0: test
+      # `uploader_integration::two_clients_same_event_name_produce_disjoint_keys`
+      # aborts with "memory allocation of 140737152832096 bytes failed" (a
+      # pointer read as a String length inside S3Client::new) and tarpaulin
+      # dies with ESRCH. The SAME instrumented binary passes 20/20 run natively,
+      # so this is ptrace x rustc-1.99 codegen, not our code. dev2 matrix,
+      # full coverage command: rustc 1.99.0 + tarpaulin 0.37.5 CRASH, 1.99.0 +
+      # 0.37.2 CRASH, 1.99.0 on origin/main d7596be4 CRASH, 1.98.0 + 0.37.5
+      # PASS (EXIT 0, 71.13%). Un-pin once a newer stable passes this job.
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      # Pinned too: an unpinned `cargo install` floats to whatever was published
+      # that morning (0.37.2 on the last green run, 0.37.5 now).
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --version 0.37.5 --locked
       - name: Run coverage
         run: cargo tarpaulin --workspace --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300
 
-  mutation-testing:
-    name: Mutation Testing
+  # Mutation testing: do the tests VERIFY the code this PR changes?
+  # (.claude/rules/ci-mutation-gate.md, .cargo/mutants.toml). Two jobs, #367:
+  # `mutation-plan` counts the diff's mutants and sizes the shard matrix;
+  # `mutation-testing` runs one consecutive slice of them per github-hosted
+  # runner. Before #367 this was ONE job with no timeout: PR #365's first real
+  # run (37371702109) tested 898 mutants serially in 2 h 27 min, retried, and
+  # was cancelled after 3 h. A shard that cannot finish inside its
+  # timeout-minutes is a SETUP bug: lower MUTANTS_PER_SHARD or add a speed
+  # lever. Never raise a timeout, never wait it out.
+  mutation-plan:
+    name: Mutation plan
     if: github.event_name == 'pull_request'
     needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total: ${{ steps.plan.outputs.total }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      # Prebuilt and pinned (same version as the shards). `cargo install
+      # cargo-mutants` floated to a release that rejected the step's flags,
+      # which made the old gate fake-green (#367).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Count the diff's mutants and size the shard matrix
+        id: plan
+        run: |
+          git diff origin/main...HEAD > pr.diff
+          cargo mutants --list --in-diff pr.diff > mutants.list
+          COUNT=$(wc -l < mutants.list)
+          echo "Mutants in this PR's diff: $COUNT"
+          cut -d: -f1 mutants.list | cut -d/ -f1-2 | sort | uniq -c
+          # MUTANTS_PER_SHARD bounds each shard's runtime: a shard costs its
+          # own cold build (~2.5 min for rs-api or rs-delivery) plus this many
+          # mutants, and must stay under ~15 min. Measured on dev2 at runner
+          # size (4 CPUs, #367): a MISSED mutant costs a rebuild (~8 s) plus
+          # its package's whole suite (rs-delivery ~28 s, rs-api ~20 s); a
+          # caught one stops at its first failing test. 20 all-MISSED
+          # rs-delivery mutants then still fit the cap.
+          MUTANTS_PER_SHARD=20
+          # 64 shards x MUTANTS_PER_SHARD mutants is the most one PR may carry.
+          # A bigger diff is a dev branch that was not released for weeks:
+          # release dev -> main more often; never widen the shards. If a
+          # release genuinely needs more, MAX_SHARDS may rise to 256 (the
+          # GitHub matrix limit) -- the guard allows it.
+          MAX_SHARDS=64
+          TOTAL=$(( (COUNT + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
+          if [ "$TOTAL" -lt 1 ]; then
+            TOTAL=1
+          fi
+          if [ "$TOTAL" -gt "$MAX_SHARDS" ]; then
+            echo "::error::$COUNT mutants need $TOTAL shards; the cap is $MAX_SHARDS. Release dev to main in smaller steps (or raise MAX_SHARDS, at most 256)."
+            exit 1
+          fi
+          SHARDS=$(python3 -c 'import json, sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$TOTAL")
+          echo "Shards: $TOTAL (at most $MUTANTS_PER_SHARD mutants each): $SHARDS"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+
+  mutation-testing:
+    name: Mutation Testing (shard ${{ matrix.shard }})
+    if: github.event_name == 'pull_request'
+    needs: [mutation-plan]
+    runs-on: ubuntu-latest
+    # HARD CAP per shard (mutation-testing policy, #367). See the header above.
+    timeout-minutes: 20
+    strategy:
+      # Every shard finishes and reports its own MISSED list, so one CI cycle
+      # shows all of them. The Rust CI Gate still requires every shard.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mutation-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      # Registry and git deps only. Each shard builds its own one or two
+      # packages from scratch (about 2.5 min for rs-api), which keeps a shard's
+      # runtime predictable; a shared target cache would come from whichever
+      # shard saved it first and would not match the others' packages.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants
+          # openssl-sys needs libssl-dev; the rs-inpoint, rs-delivery and
+          # rs-api tests spawn ffmpeg. No GTK/webkit: src-tauri is not a
+          # workspace member.
+          sudo apt-get install -y libssl-dev ffmpeg
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: "Mutation testing: zero survivors in changed code"
         run: |
           echo "=== Resources before mutation ==="
@@ -244,107 +338,65 @@ jobs:
           free -h
           echo "================================="
           git diff origin/main...HEAD > pr.diff
-          if [ ! -s pr.diff ]; then
-            echo "No Rust source changes in diff -- skipping"
-            exit 0
-          fi
-          # GH ubuntu-latest runners have intermittently lost communication
-          # at ~11 min into mutation runs. Investigation: the first mutant's
-          # build was taking ~8-10 min from scratch because cargo-mutants
-          # by default creates a separate copy of the source tree per mutant
-          # and cargo's incremental cache doesn't survive a directory move
-          # (paths are baked into rmeta files), so even --copy-target=true
-          # didn't help.
-          #
-          # Fix: --in-place mutates the workspace directly, so individual
-          # mutant builds reuse the Swatinem/rust-cache incrementally
-          # (seconds, not minutes). --in-place forces --jobs=1 (it has to
-          # serialize mutations of the same source tree). Combined with
-          # --baseline=skip we fit comfortably under the runner window.
-          # Retry up to 3 times for residual transient failures.
-          ATTEMPT=0
-          MAX_ATTEMPTS=3
-          while true; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "=== Mutation attempt $ATTEMPT/$MAX_ATTEMPTS ==="
-            # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
-            # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
-            # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
-            if cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600 --jobs 1 --baseline=skip --output mutants-out \
-            --exclude-re 'impl ChunkFetcher for S3Fetcher' \
-            --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
-            --exclude-re 'S3Fetcher::head_chunk_duration' \
-            --exclude-re 'producer_task' \
-            --exclude-re 'consumer_task' \
-            --exclude-re 'endpoint_loop' \
-            --exclude-re 'S3Client::upload_chunk' \
-            --exclude-re 'S3Client::delete_event_chunks' \
-            --exclude-re 'S3Client::measure_prefix' \
-            --exclude-re 'S3Client::list_event_prefixes' \
-            --exclude-re 'delete_event_by_id' \
-            --exclude-re 'clear_event_s3_chunks' \
-            --exclude-re 'get_s3_usage' \
-            --exclude-re 'get_template_endpoints' \
-            --exclude-re 'ServiceCore::run_with_signal' \
-            --exclude-re 'DeliveryOrchestrator::stop_delivery' \
-            --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
-            --exclude-re 'delivery_logs' \
-            --exclude-re 'upload_rescue_video' \
-            --exclude-re 'tail_lines' \
-            --exclude-re 'S3Client::upload_public_object' \
-            --exclude-re 'FfmpegProcess::stderr_tail' \
-            --exclude-re 'last_stderr_line' \
-            --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
-            --exclude-re 'MAX_INPUT_BYTES' \
-            --exclude-re 'MAX_FLV_BYTES' \
-            --exclude-re 'write_countdown_file' \
-            --exclude-re 'cleanup_countdown_file' \
-            --exclude-re 'format_countdown_text' \
-            --exclude-re 'countdown_file_path' \
-            --exclude-re 'FlvStreamNormalizer::normalize' \
-            --exclude-re 'DeliveryOrchestrator::poll_and_init' \
-            --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
-            --exclude-re 'delivery_broadcast_loop' \
-            --exclude-re 'run_worker' \
-            --exclude-re 'ChunkUploader::run' \
-            --exclude-re 'handle_rust_push' \
-            --exclude-re 'handle_ffmpeg_death' \
-            --exclude-re 'Session::connect' \
-            --exclude-re 'Session::send_audio_tag' \
-            --exclude-re 'Session::send_video_tag' \
-            --exclude-re 'Session::send_tag' \
-            --exclude-re 'Session::close' \
-            --exclude-re 'wait_for_publish_start' \
-            --exclude-re 'wait_for_create_stream_result' \
-            --exclude-re 'wait_for_result' \
-            --exclude-re 'negotiate' \
-            --exclude-re 'read_loop' \
-            --exclude-re 'RtmpPusher::push_flv_bytes' \
-            --exclude-re 'RtmpPusher::close' \
-            -e 'crates/rs-api/src/template_handlers.rs' \
-            -e 'crates/rs-api/src/s3_handlers.rs' \
-            -e 'crates/rs-delivery/src/flv_normalizer.rs' \
-            -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
-            -e 'crates/rs-endpoint/src/metrics.rs'; then
-              echo "Mutation attempt $ATTEMPT succeeded"
-              break
+          # .cargo/mutants.toml holds the profile, nextest, per-package tests
+          # and every exclude (rs-rtmp-push must stay mutated, see that file).
+          # This step adds only how the shard runs:
+          # --in-place: the runner's checkout belongs to this shard alone, so
+          #   mutating it is safe, and target/ plus cargo's fingerprints stay
+          #   valid between mutants (a copied tree would rebuild cold). It
+          #   implies serial mutants; cargo-mutants 27 rejects --jobs with it.
+          # --shard k/N: the default "slice" sharding gives consecutive
+          #   mutants, so a shard compiles one or two packages, not all.
+          # --baseline=run: first run the shard's packages UNMUTATED, with this
+          #   runner, nextest and the mutants profile. If they fail (a test
+          #   that only passes under `cargo test`, like the 1935 e2e before
+          #   .config/nextest.toml), cargo-mutants exits 4 instead of
+          #   reading every mutant as caught. Free in practice: the baseline
+          #   build is the shard's cold build anyway (shard 19/45: 553 s run
+          #   vs 574 s skip).
+          # --timeout: a hanging mutant is a TIMEOUT failure after this many
+          #   seconds of tests, ~4x the slowest package suite (rs-delivery).
+          # CARGO_INCREMENTAL=1: rust-toolchain and rust-cache export 0 for
+          #   CI, but each mutant rebuilds one edited crate, and incremental
+          #   compilation made that ~2.5x faster (rs-api 23 s -> 8 s, #367).
+          export CARGO_INCREMENTAL=1
+          # Exit codes: 0 every mutant caught or unviable; 2 MISSED; 3 TIMEOUT;
+          # 4 the tests fail with no mutation; others are tool errors. EVERY
+          # non-zero exit fails the shard at once. There is no retry: these
+          # outcomes are deterministic, and run 37371702109 spent 2.5 h
+          # retrying an exit 3.
+          # EXIT is read right after cargo mutants under set +e, never after an
+          # if/fi block, where $? is always 0 (the old fake-green gate,
+          # .claude/rules/ci-mutation-gate.md).
+          set +e
+          cargo mutants --in-diff pr.diff --in-place --baseline=run \
+            --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }} \
+            --timeout 120 --build-timeout 600 --output mutants-out
+          EXIT=$?
+          set -e
+          for f in missed timeout; do
+            if [ -s "mutants-out/mutants.out/$f.txt" ]; then
+              echo "=== $f mutants ==="
+              cat "mutants-out/mutants.out/$f.txt"
             fi
-            EXIT=$?
-            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
-              echo "Mutation testing failed after $MAX_ATTEMPTS attempts (last exit: $EXIT)"
-              exit $EXIT
-            fi
-            echo "Attempt $ATTEMPT failed (exit $EXIT) — likely runner hiccup, retrying after 30s"
-            sleep 30
-            rm -rf mutants-out
           done
+          case "$EXIT" in
+            0) echo "Shard ${{ matrix.shard }}: every mutant was caught or unviable." ;;
+            2) echo "::error::MISSED mutants: no test fails when this code changes. Kill them with assertions (.claude/rules/mutation-killable-code.md)." ;;
+            3) echo "::error::TIMEOUT mutants: a mutation made the tests hang." ;;
+            4) echo "::error::The tests fail with no mutation applied." ;;
+            *) echo "::error::cargo-mutants failed (exit $EXIT)." ;;
+          esac
+          exit "$EXIT"
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
-        if: failure()
+        # cancelled() too: a shard killed by timeout-minutes is cancelled,
+        # and its partial report is what shows which mutants were slow.
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: mutants-report
+          name: mutants-report-shard-${{ matrix.shard }}
           path: mutants-out/
 
   security:
@@ -421,7 +473,10 @@ jobs:
 
   build-tauri:
     name: Build Tauri app
-    needs: [lint, test]
+    # build-delivery added (#246): its Linux binary is bundled into the
+    # installer via tauri.conf.json's bundle.resources, so build-tauri must
+    # consume that artifact before `cargo tauri build`.
+    needs: [lint, test, build-delivery]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -429,6 +484,31 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Download delivery binary (for bundling, #246)
+        uses: actions/download-artifact@v4
+        with:
+          name: rs-delivery-binary
+          path: delivery-artifact
+      - name: Bundle delivery binary into Tauri resources (#246)
+        shell: pwsh
+        run: |
+          # #246: ship the Linux rs-delivery binary inside the installer so the
+          # client's first post-upgrade event never needs github.com. Copy the
+          # build-delivery artifact to the resource path declared in
+          # tauri.conf.json (bundle.resources), then fail LOUD if it is missing
+          # — a broken wiring must never silently ship an installer without it.
+          $src = Get-ChildItem -Path "delivery-artifact" -Recurse -Filter "rs-delivery" | Select-Object -First 1
+          if (-not $src) { throw "delivery binary artifact not found -- cannot bundle (#246)" }
+          Copy-Item $src.FullName "src-tauri/rs-delivery-linux" -Force
+          if (-not (Test-Path "src-tauri/rs-delivery-linux")) { throw "src-tauri/rs-delivery-linux missing after copy" }
+          $size = (Get-Item "src-tauri/rs-delivery-linux").Length
+          Write-Host "Bundled rs-delivery-linux: $size bytes"
+          if ($size -lt 1000000) { throw "bundled binary suspiciously small ($size bytes)" }
+          # Sidecar sha256 (sha256sum format) — rs-api verifies the bundled
+          # binary against this before uploading it to the immutable S3 key.
+          $hash = (Get-FileHash "src-tauri/rs-delivery-linux" -Algorithm SHA256).Hash.ToLower()
+          "$hash  rs-delivery-linux" | Out-File -FilePath "src-tauri/rs-delivery-linux.sha256" -Encoding ascii -NoNewline
+          Write-Host "Bundled sha256: $hash"
       - name: Install trunk and wasm-bindgen-cli
         run: |
           # --locked: build each tool with ITS committed Cargo.lock. Without it,
@@ -731,12 +811,21 @@ jobs:
           echo "OK: No SQLite WAL/SHM file deletion patterns found."
       - name: Verify zero ignored tests in cargo test output
         run: |
-          # Run tests and capture output
-          OUTPUT=$(cargo test --workspace --locked 2>&1)
+          # Run tests and capture output. The `|| { ... }` is load-bearing: this
+          # step runs under `bash -e`, so a bare `OUTPUT=$(cargo test ...)`
+          # aborts the script on a test failure BEFORE `echo "$OUTPUT"`, and
+          # the job fails with exit 101 and NO test output at all (push run
+          # 37347095610 lost the name of its failing test this way).
+          OUTPUT=$(cargo test --workspace --locked 2>&1) || {
+            echo "$OUTPUT"
+            echo "ERROR: cargo test --workspace --locked failed -- see the failing test(s) above."
+            exit 1
+          }
           echo "$OUTPUT"
 
-          # Check for any ignored tests
-          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -v '0 ignored' || true)
+          # Check for any ignored tests. `grep -vx` (whole line): a plain
+          # `grep -v '0 ignored'` also dropped "10 ignored", "20 ignored", ...
+          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -vx '0 ignored' || true)
           if [ -n "$IGNORED_COUNT" ]; then
             echo "ERROR: Some tests were ignored:"
             echo "$IGNORED_COUNT"
@@ -744,7 +833,7 @@ jobs:
           fi
 
           # Check for any filtered tests
-          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -v '0 filtered out' || true)
+          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -vx '0 filtered out' || true)
           if [ -n "$FILTERED_COUNT" ]; then
             echo "ERROR: Some tests were filtered out:"
             echo "$FILTERED_COUNT"
@@ -908,6 +997,474 @@ jobs:
           fi
 
           echo "OK: auto-release depends on e2e-gate."
+      - name: Verify delivery binary is bundled into the installer (#246)
+        run: |
+          # #246: the Linux rs-delivery binary must ship inside the Windows
+          # installer so the client's first post-upgrade event never needs
+          # github.com. If the bundle.resources declaration is dropped, Tauri
+          # silently ships an installer WITHOUT the binary (no build error) and
+          # the client silently falls back to the GitHub download — the exact
+          # regression this guards. (The staging steps in both build-tauri jobs
+          # are additionally protected at build time: a declared-but-missing
+          # resource fails `cargo tauri build`, and each stage step throws on a
+          # missing copy.)
+          # Structural check (jq, present on ubuntu-latest) — not a substring
+          # grep, so it cannot be fooled by the name appearing under some other
+          # key. Both the binary and its sha256 sidecar must be declared.
+          TAURI_CONF="src-tauri/tauri.conf.json"
+          for RES in rs-delivery-linux rs-delivery-linux.sha256; do
+            if ! jq -e --arg r "$RES" '.bundle.resources | index($r) != null' "$TAURI_CONF" >/dev/null; then
+              echo "ERROR: $TAURI_CONF must declare $RES in bundle.resources (#246)"
+              exit 1
+            fi
+          done
+          echo "OK: tauri.conf.json declares the bundled delivery binary + sha256 sidecar."
+
+      - name: "Verify deploy-stream-lan firewall opens RTMP 1234 (#363)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Scope to the deploy-stream-lan job block only. This self-check lives
+          # in test-integrity (earlier in the file), so it is OUTSIDE the sed
+          # range and can never self-match its own grep pattern (#325).
+          DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
+          if ! echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-Protocol TCP.*-LocalPort 1234.*-Action Allow'; then
+            echo "ERROR: deploy-stream-lan firewall block has no inbound ALLOW rule for RTMP TCP 1234 (#363)."
+            echo "Remote OBS cannot push RTMP to the CI-deployed stream box without it."
+            exit 1
+          fi
+          echo "OK: deploy-stream-lan opens RTMP TCP 1234."
+
+      - name: "Verify OBS-streaming E2E jobs defensively StopRecord on teardown (#361)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Assert EACH OBS-streaming job (the two that START OBS streaming) has
+          # a StopRecord teardown -- separately, so deleting it from either job
+          # fails this guard (a single obs-youtube..e2e-gate range would stay
+          # GREEN with only one job covered). Both ranges are scoped to job
+          # blocks AFTER test-integrity, so this self-check (earlier in the file)
+          # can never self-match its own grep pattern (#325).
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
+          if ! echo "$YT_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
+            echo "ERROR: e2e-obs-youtube-test has no StopRecord teardown (#361) -- a stray OBS"
+            echo "recording (RecordWhenStreaming on the camera-box-owned profile) can outlive"
+            echo "the job and block camera-box's rig-busy-gate."
+            exit 1
+          fi
+          if ! echo "$FB_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
+            echo "ERROR: e2e-fb-push-stream-lan has no StopRecord teardown (#361)."
+            exit 1
+          fi
+          # Owner directive (2026-08-30): restreamer NEVER records -- StopRecord
+          # is the single sanctioned OBS-recording touch. Any StartRecord/
+          # ToggleRecord in the workflow is a violation.
+          if grep -qE 'requestType = "(StartRecord|ToggleRecord)"' "$WORKFLOW_FILE"; then
+            echo "ERROR: workflow issues StartRecord/ToggleRecord -- restreamer must never record (#361)."
+            exit 1
+          fi
+          echo "OK: both OBS-streaming E2E jobs StopRecord on teardown; no StartRecord/ToggleRecord."
+
+      - name: "Verify OBS-streaming E2E jobs wait on the rig lease before StartStream (#349)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Each job that STARTS OBS streaming must run scripts/ci/rig-lease-wait.ps1
+          # BEFORE its first StartStream (OBS-WS) / obs/start-stream (API), so we
+          # never drive the shared rig while camera-box holds it (#349/#830). The
+          # greps run on sed-extracted JOB blocks (after test-integrity), so this
+          # self-check can never match its own pattern lines (#325).
+          check_job() {
+            block="$2"
+            lease_ln=$(echo "$block" | grep -nE -- '-File scripts/ci/rig-lease-wait\.ps1' | head -1 | cut -d: -f1)
+            start_ln=$(echo "$block" | grep -nE 'requestType = "StartStream"|/api/v1/obs/start-stream' | head -1 | cut -d: -f1)
+            if [ -z "$lease_ln" ]; then
+              echo "ERROR: $1 has no rig-lease-wait.ps1 step (#349)."
+              exit 1
+            fi
+            if [ -z "$start_ln" ]; then
+              echo "ERROR: $1 has no StartStream/obs-start-stream to gate (#349 anchor missing)."
+              exit 1
+            fi
+            if [ "$lease_ln" -ge "$start_ln" ]; then
+              echo "ERROR: $1 runs rig-lease-wait AFTER StartStream (#349) -- it must be BEFORE."
+              exit 1
+            fi
+          }
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
+          check_job "e2e-obs-youtube-test" "$YT_BLOCK"
+          check_job "e2e-fb-push-stream-lan" "$FB_BLOCK"
+          if [ ! -f scripts/ci/rig-lease-wait.ps1 ]; then
+            echo "ERROR: scripts/ci/rig-lease-wait.ps1 is missing (#349)."
+            exit 1
+          fi
+          echo "OK: both OBS-streaming E2E jobs wait on the rig lease before StartStream."
+
+      - name: "Verify the mutation gate: real exit, bounded shards, required by the gate (#367)"
+        run: |
+          # The PR mutation gate failed open three ways before #367: EXIT=$?
+          # read after an if/fi block (always 0), an unpinned cargo-mutants that
+          # rejected --jobs with --in-place, and a Rust CI Gate that passed a
+          # failed mutation job with a WARN. Then, once real, it ran > 3 h on
+          # one runner (.claude/rules/ci-mutation-gate.md). This step parses
+          # the workflow and the two configs and fails on every known way back
+          # to an unbounded or fake-green gate.
+          # It only reads jobs that RUN cargo-mutants (no line of this step
+          # starts with that command), so it never matches itself (#325).
+          python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
+          python3 - <<'PY'
+          import re
+          import sys
+          import tomllib
+
+          import yaml
+
+          errors = []
+          wf = yaml.safe_load(open(".github/workflows/ci.yml", encoding="utf-8"))
+          jobs = wf["jobs"]
+          CMD = re.compile(r"^\s*cargo\s+mutants\b")
+
+          def commands(job):
+              """Each cargo-mutants command line (continuations joined) + the line after it."""
+              out = []
+              for step in job.get("steps", []):
+                  lines = (step.get("run") or "").splitlines()
+                  i = 0
+                  while i < len(lines):
+                      if CMD.match(lines[i]):
+                          j = i
+                          while lines[j].rstrip().endswith("\\") and j + 1 < len(lines):
+                              j += 1
+                          cmd = " ".join(l.strip().rstrip("\\") for l in lines[i : j + 1])
+                          nxt = lines[j + 1] if j + 1 < len(lines) else ""
+                          out.append((step, cmd, nxt, "\n".join(lines[:i])))
+                          i = j + 1
+                      else:
+                          i += 1
+              return out
+
+          mut_jobs = {n: j for n, j in jobs.items() if commands(j)}
+          for name in ("mutation-plan", "mutation-testing"):
+              if name not in mut_jobs:
+                  errors.append(f"job {name} must exist and run cargo-mutants")
+
+          # 1. Every job that runs cargo-mutants is hard-capped at 20 minutes.
+          for name, job in mut_jobs.items():
+              tm = job.get("timeout-minutes")
+              if not isinstance(tm, int) or not 1 <= tm <= 20:
+                  errors.append(f"{name}: timeout-minutes must be an integer <= 20, got {tm!r}")
+
+          # 2. EACH job installs a pinned cargo-mutants (the shards also a pinned
+          #    nextest), the same version in both, so they list the same mutants.
+          #    Nothing may be allowed to fail open.
+          def installed(job, prefix):
+              """The taiki-e/install-action tool specs of `job` starting with `prefix`."""
+              specs = []
+              for st in job.get("steps", []):
+                  tool = str((st.get("with") or {}).get("tool", ""))
+                  specs += [t for t in tool.replace(",", " ").split() if t.startswith(prefix)]
+              return specs
+
+          pins = set()
+          for name, job in mut_jobs.items():
+              if job.get("continue-on-error"):
+                  errors.append(f"{name}: continue-on-error is forbidden on a mutation job")
+              mut = installed(job, "cargo-mutants")
+              if not mut or not all(re.fullmatch(r"cargo-mutants@[0-9]+\.[0-9]+\.[0-9]+", t) for t in mut):
+                  errors.append(f"{name}: install cargo-mutants pinned (cargo-mutants@X.Y.Z), found {mut}")
+              pins.update(mut)
+              for st in job.get("steps", []):
+                  if st.get("continue-on-error"):
+                      errors.append(f"{name}: continue-on-error is forbidden on a mutation step")
+                  if "cargo install cargo-mutants" in (st.get("run") or ""):
+                      errors.append(f"{name}: install cargo-mutants pinned via taiki-e/install-action, not cargo install")
+          if len(pins) != 1:
+              errors.append(f"plan and shards must pin ONE cargo-mutants version, found {sorted(pins)}")
+          nextest = installed(mut_jobs.get("mutation-testing") or {}, "cargo-nextest")
+          if len(nextest) != 1 or not re.fullmatch(r"cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+", nextest[0]):
+              errors.append(f"mutation-testing must install ONE pinned cargo-nextest, found {nextest}")
+          for name, job in mut_jobs.items():
+              for _, cmd, _, _ in commands(job):
+                  # A pipe, a list or a background job would hide cargo-mutants'
+                  # exit status (the plan's `> mutants.list` redirect is fine).
+                  if re.search(r"\||;|&", cmd):
+                      errors.append(f"{name}: the cargo-mutants command must stand alone, found {cmd!r}")
+
+          # 3. The plan sizes the matrix from the diff and caps it.
+          plan = mut_jobs.get("mutation-plan", {})
+          outs = plan.get("outputs") or {}
+          if outs.get("shards") != "$" "{{ steps.plan.outputs.shards }}" or outs.get("total") != "$" "{{ steps.plan.outputs.total }}":
+              errors.append("mutation-plan must export shards/total from its `plan` step")
+          plan_run = "\n".join(s.get("run") or "" for s in plan.get("steps", []))
+          per = re.search(r"^\s*MUTANTS_PER_SHARD=([0-9]+)\s*$", plan_run, re.M)
+          cap = re.search(r"^\s*MAX_SHARDS=([0-9]+)\s*$", plan_run, re.M)
+          if not per or not 1 <= int(per.group(1)) <= 100:
+              errors.append("mutation-plan must set MUTANTS_PER_SHARD to an integer in 1..100")
+          if not cap or not 1 <= int(cap.group(1)) <= 256:
+              errors.append("mutation-plan must set MAX_SHARDS <= 256 (the GitHub matrix limit)")
+          if not any("--list" in c and "--in-diff pr.diff" in c for _, c, _, _ in commands(plan)):
+              errors.append("mutation-plan must count the mutants with --list --in-diff pr.diff")
+
+          # 4. The shards: matrix from the plan, every shard reported, real exit.
+          mt = mut_jobs.get("mutation-testing", {})
+          needs = mt.get("needs") or []
+          if "mutation-plan" not in (needs if isinstance(needs, list) else [needs]):
+              errors.append("mutation-testing must need mutation-plan")
+          strat = mt.get("strategy") or {}
+          if strat.get("fail-fast") is not False:
+              errors.append("mutation-testing must set strategy.fail-fast: false")
+          if (strat.get("matrix") or {}).get("shard") != "$" "{{ fromJSON(needs.mutation-plan.outputs.shards) }}":
+              errors.append("mutation-testing matrix.shard must come from mutation-plan's shards output")
+          runs = [c for c in commands(mt) if "--list" not in c[1]]
+          if len(runs) != 1:
+              errors.append(f"mutation-testing must run cargo-mutants exactly once, found {len(runs)}")
+          for step, cmd, nxt, before in runs:
+              if "--shard $" "{{ matrix.shard }}/$" "{{ needs.mutation-plan.outputs.total }}" not in cmd:
+                  errors.append("the shard must run --shard $" "{{ matrix.shard }}/$" "{{ needs.mutation-plan.outputs.total }}")
+              for flag in ("--in-diff pr.diff", "--baseline=run", "--in-place"):
+                  if flag not in cmd:
+                      errors.append(f"the shard's cargo-mutants command must pass {flag}")
+              for bad in ("--jobs", " -j", "--no-config", "--config", "--exclude", " -e ", "--file", " -f ", "--examine"):
+                  if bad in cmd:
+                      errors.append(f"the shard must not pass {bad.strip()}: scope and levers live in .cargo/mutants.toml")
+              t = re.search(r"--timeout ([0-9]+)", cmd)
+              if not t or int(t.group(1)) > 300:
+                  errors.append("the shard must pass --timeout <= 300")
+              if not re.fullmatch(r"\s*EXIT=\$\?\s*", nxt):
+                  errors.append(f"EXIT=$? must be the line right after cargo mutants, found {nxt!r}")
+              if not re.search(r"^\s*set \+e\s*$", before, re.M):
+                  errors.append("cargo mutants must run under set +e so EXIT=$? sees its status")
+              body = [l for l in (step.get("run") or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+              exits = [l.strip() for l in body if re.search(r"(?:^|[;)&|]\s*)exit\b", l.strip())]
+              if exits != ['exit "$EXIT"'] or body[-1].strip() != 'exit "$EXIT"':
+                  errors.append(f'the step\'s only exit must be its last line, exit "$EXIT"; found {exits}')
+
+          # 5. The Rust CI Gate requires the mutation result on PRs, with no WARN pass.
+          gate_run = "\n".join(s.get("run") or "" for s in jobs["rust-ci-gate"].get("steps", []))
+          if "mutation-testing" not in jobs["rust-ci-gate"].get("needs", []):
+              errors.append("rust-ci-gate must need mutation-testing")
+          for var, job in (("PLAN_RESULT", "mutation-plan"), ("MUTATION_RESULT", "mutation-testing")):
+              if job not in jobs["rust-ci-gate"].get("needs", []):
+                  errors.append(f"rust-ci-gate must need {job}")
+              if not re.search(rf'{var}="\$\{{\{{ needs\.{job}\.result \}}\}}"', gate_run):
+                  errors.append(f"rust-ci-gate must read {var} from needs.{job}.result")
+              # The not-success branch must set FAILED=1 before its fi.
+              branch = re.search(rf'if \[\[ "\${var}" != "success" \]\]; then\n(.*?)\n\s*fi\n', gate_run, re.S)
+              if not branch or not re.search(r"^\s*FAILED=1\s*$", branch.group(1), re.M):
+                  errors.append(f"rust-ci-gate must set FAILED=1 when {var} is not success")
+          if re.search(r"Allowing PR to proceed|WARN: mutation", gate_run):
+              errors.append("rust-ci-gate must not pass a failed or cancelled mutation run with a WARN")
+
+          # 6. The speed levers and the exclude list (.cargo/mutants.toml, Cargo.toml).
+          cargo = tomllib.load(open("Cargo.toml", "rb"))
+          prof = cargo.get("profile", {}).get("mutants", {})
+          if prof.get("inherits") != "test" or prof.get("debug") not in ("none", False, 0):
+              errors.append('Cargo.toml needs [profile.mutants] inherits = "test", debug = "none"')
+          mcfg = tomllib.load(open(".cargo/mutants.toml", "rb"))
+          if mcfg.get("profile") != "mutants":
+              errors.append('.cargo/mutants.toml must set profile = "mutants"')
+          if mcfg.get("test_tool") != "nextest":
+              errors.append('.cargo/mutants.toml must set test_tool = "nextest"')
+          if mcfg.get("test_workspace") is not False:
+              errors.append(".cargo/mutants.toml must set test_workspace = false (per-package tests)")
+          if mcfg.get("examine_globs") or mcfg.get("examine_re"):
+              errors.append(".cargo/mutants.toml must not narrow the scope with examine_globs/examine_re")
+          for pat in mcfg.get("exclude_re", []) + mcfg.get("exclude_globs", []):
+              if re.search(r"rs[_-]rtmp[_-]push", pat, re.I):
+                  errors.append(f"rs-rtmp-push must stay mutated (spec 7.6), found exclude {pat!r}")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}")
+              sys.exit(1)
+          print(f"OK: mutation gate is real, sharded ({sorted(mut_jobs)}), capped at 20 min, and required.")
+          PY
+
+      - name: "Verify every strict-gate endpoint alias is seeded by CI (#192)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # #192: the OBS-to-YouTube job's strict fast-endpoint gate looked up
+          # a YT_HLS fixture that migration v21 had deleted in April, so the
+          # gate could never run and blocked the release train. Two rules, so
+          # a strict gate never again depends on an alias the box may lack:
+          # (1) the deleted fixture alias never comes back in this file;
+          # (2) every endpoint alias e2e-obs-youtube-test looks up by literal
+          #     is ATTACHED by that job ($needAttach) AND SEEDED by it: created
+          #     by a find-or-create (an `alias = '<x>'` create body), or, for
+          #     the OAuth-linked 'e2e rtmp' YouTube endpoint, key-synced from
+          #     the YOUTUBE_STREAM_KEY secret. $ciOwnedAliases must be attached.
+          # The job block is sed-extracted (it lies after test-integrity), so
+          # this step can never match its own lines (#325); the rule-(1)
+          # pattern uses a [ ] class, so it cannot match its own source line.
+          if grep -nE "e2e[ ]hls" "$WORKFLOW_FILE"; then
+            echo "ERROR: the deleted YT_HLS fixture alias is referenced again (#192)."
+            exit 1
+          fi
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          looked_up=$( { echo "$YT_BLOCK" | grep -oE "\.(alias|endpoint) -eq '[^']+'" | sed -E "s/.*-eq '([^']+)'/\1/" || true; echo "$YT_BLOCK" | grep -oE '\.(alias|endpoint) -eq "[^"]+"' | sed -E 's/.*-eq "([^"]+)"/\1/' || true; } | sort -u)
+          attached=$(echo "$YT_BLOCK" | grep -E '^\s*\$needAttach = @\(' | grep -oE '"[^"]+"' | tr -d '"' || true)
+          owned=$(echo "$YT_BLOCK" | grep -E '^\s*\$ciOwnedAliases = @\(' | grep -oE '"[^"]+"' | tr -d '"' || true)
+          created=$(echo "$YT_BLOCK" | grep -oE "^\s*alias = '[^']+'" | sed -E "s/.*alias = '([^']+)'/\1/" || true)
+          if [ -z "$looked_up" ] || [ -z "$attached" ] || [ -z "$owned" ]; then
+            echo "ERROR: could not extract the job's alias lookups / \$needAttach / \$ciOwnedAliases (#192 self-check anchors moved)."
+            exit 1
+          fi
+          fail=0
+          while IFS= read -r a; do
+            [ -z "$a" ] && continue
+            if ! grep -qxF "$a" <<<"$attached"; then
+              echo "ERROR: e2e-obs-youtube-test looks up endpoint '$a' but never attaches it (\$needAttach)."
+              fail=1
+            fi
+            if grep -qxF "$a" <<<"$created"; then
+              continue
+            fi
+            # (here-string, not `echo | grep -q`: if this step ever runs with
+            # pipefail -- e.g. an explicit `shell: bash` -- an early grep -q exit
+            # SIGPIPEs echo and reads as "no match")
+            if [ "$a" = "e2e rtmp" ] && grep -qF 'stream_key = $env:YOUTUBE_STREAM_KEY' <<<"$YT_BLOCK"; then
+              continue
+            fi
+            echo "ERROR: e2e-obs-youtube-test looks up endpoint '$a' but never seeds it (no find-or-create with alias = '$a')."
+            fail=1
+          done <<<"$looked_up"
+          while IFS= read -r a; do
+            [ -z "$a" ] && continue
+            if ! grep -qxF "$a" <<<"$attached"; then
+              echo "ERROR: \$ciOwnedAliases lists '$a' but \$needAttach never attaches it."
+              fail=1
+            fi
+          done <<<"$owned"
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK: every endpoint alias e2e-obs-youtube-test looks up is attached and seeded by CI:"
+          echo "$looked_up"
+
+      - name: "Verify the zero-ignored step prints cargo test output on failure (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Under `bash -e` a bare `OUTPUT=$(cargo test ...)` exits on a test
+          # failure before `echo "$OUTPUT"`, so the job fails with NO test output
+          # (push run 37347095610). Both sed addresses are anchored to a whole
+          # 6-space-indented step-name line, so the range is that one step and
+          # can never open on this guard's own line (#325).
+          STEP=$(sed -n '/^      - name: Verify zero ignored tests in cargo test output$/,/^      - name: Verify deploy-stream-lan has always() condition$/p' "$WORKFLOW_FILE")
+          if [ -z "$STEP" ]; then
+            echo "ERROR: could not find the 'Verify zero ignored tests in cargo test output' step."
+            exit 1
+          fi
+          if ! grep -qE '^\s*OUTPUT=\$\(cargo test --workspace --locked 2>&1\) \|\| \{\s*$' <<<"$STEP"; then
+            echo "ERROR: the cargo test capture must be 'OUTPUT=\$(cargo test --workspace --locked 2>&1) || {' so a failure still prints its output."
+            exit 1
+          fi
+          if ! awk '/^[ \t]*OUTPUT=\$\(cargo test/{c=1; next} c {print; exit}' <<<"$STEP" | grep -qE '^\s*echo "\$OUTPUT"\s*$'; then
+            echo "ERROR: the failure branch must echo \$OUTPUT first."
+            exit 1
+          fi
+          echo "OK: a failing cargo test still prints its output."
+
+      - name: "Verify Coverage keeps its toolchain + tarpaulin pins (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # rustc 1.99.0 + tarpaulin's ptrace engine crashes uploader_integration
+          # (see the comment in the coverage job). Un-pinning is allowed only
+          # together with this guard, after the new toolchain passes the job.
+          # The coverage job precedes test-integrity, so no self-match (#325).
+          COV=$(sed -n '/^  coverage:/,/^  mutation-plan:/p' "$WORKFLOW_FILE")
+          if ! grep -qE '^\s*- uses: dtolnay/rust-toolchain@1\.98\.0\s*$' <<<"$COV"; then
+            echo "ERROR: the coverage job must pin dtolnay/rust-toolchain@1.98.0 (#367)."
+            exit 1
+          fi
+          if ! grep -qE '^\s*run: cargo install cargo-tarpaulin --version [0-9]+\.[0-9]+\.[0-9]+ --locked\s*$' <<<"$COV"; then
+            echo "ERROR: the coverage job must install a pinned cargo-tarpaulin version with --locked (#367)."
+            exit 1
+          fi
+          echo "OK: coverage pins rustc 1.98.0 and an exact cargo-tarpaulin version."
+
+      - name: "Verify the late-join gate's log markers and resume safety (#367)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          RX="crates/rs-inpoint/src/media_receiver.rs"
+          # The late-join gate in e2e-streaming-test finds the inpoint stall,
+          # the publish and the subscribe in restreamer.log by literal text, and
+          # it suspends Restreamer.exe for 35 s. Guard both halves here, a
+          # minute into CI instead of a "no stall line" failure after a deploy:
+          # (1) the gate's $stallMarker equals STALL_LOG_MARKER, the stall log
+          #     call uses that const, and the other two markers still exist in
+          #     the receiver and in the gate;
+          # (2) Restreamer is resumed on every exit path: in the gate's finally
+          #     block, by the if: always() step DIRECTLY after the gate (same
+          #     $env:TEMP PID markers), and by a dead-man process armed before
+          #     the suspend (a force-cancel skips finally AND always() steps);
+          # (3) the gate never touches OBS (ffmpeg publisher only).
+          # Both sed ranges are anchored on whole 6-space step-name lines of a
+          # job that lies after test-integrity, so they never open on this
+          # guard's own lines (#325).
+          GATE=$(sed -n '/^      - name: GATE late-join republish keeps chunk A\/V aligned (#367)$/,/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/p' "$WORKFLOW_FILE")
+          SAFETY=$(sed -n '/^      - name: Resume Restreamer if the late-join gate left it suspended (#367)$/,/^      - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget$/p' "$WORKFLOW_FILE")
+          if [ -z "$GATE" ] || [ -z "$SAFETY" ] || [ "$(grep -c '^      - name: ' <<<"$GATE")" -ne 2 ] || [ "$(grep -c '^      - name: ' <<<"$SAFETY")" -ne 2 ]; then
+            echo "ERROR: the late-join gate must be followed directly by the step 'Resume Restreamer if the late-join gate left it suspended (#367)', and that by 'GATE clear-s3 endpoint ...' (#367)."
+            exit 1
+          fi
+          MARKER=$(sed -nE 's/^const STALL_LOG_MARKER: &str = "([^"]+)";$/\1/p' "$RX")
+          if [ -z "$MARKER" ] || [ "$(grep -c '^const STALL_LOG_MARKER: ' "$RX")" -ne 1 ]; then
+            echo "ERROR: $RX must define exactly one 'const STALL_LOG_MARKER: &str = \"...\";' (#367)."
+            exit 1
+          fi
+          if ! grep -qF '"{STALL_LOG_MARKER}, will re-subscribe"' "$RX"; then
+            echo "ERROR: the stall log call in $RX must log \"{STALL_LOG_MARKER}, will re-subscribe\" (#367)."
+            exit 1
+          fi
+          if ! grep -qF "\$stallMarker = '$MARKER'" <<<"$GATE"; then
+            echo "ERROR: the late-join gate's \$stallMarker must be '$MARKER', STALL_LOG_MARKER in $RX (#367)."
+            exit 1
+          fi
+          for m in 'Stream published: ' 'Subscribed to stream, processing frames' 'NetStream\.Publish\.Start'; do
+            if ! grep -qF "$m" <<<"$GATE"; then
+              echo "ERROR: the late-join gate no longer matches '$m' (#367 self-check anchors moved)."
+              exit 1
+            fi
+          done
+          for m in 'Stream published: ' 'Subscribed to stream, processing frames'; do
+            if ! grep -qF "$m" "$RX"; then
+              echo "ERROR: the late-join gate matches '$m', but $RX no longer logs it (#367)."
+              exit 1
+            fi
+          done
+          FINALLY=$(awk '/^          \} finally \{ *$/{f=1; next} f && /^          \}$/{exit} f' <<<"$GATE")
+          if ! grep -qF 'NtResumeProcess($rsHandle)' <<<"$FINALLY"; then
+            echo "ERROR: the late-join gate must resume Restreamer (NtResumeProcess) in its finally block (#367)."
+            exit 1
+          fi
+          if ! grep -qE '^        if: always\(\)$' <<<"$SAFETY" || ! grep -qF 'NtResumeProcess' <<<"$SAFETY"; then
+            echo "ERROR: the step after the late-join gate must be 'if: always()' and resume Restreamer with NtResumeProcess (#367)."
+            exit 1
+          fi
+          for s in "$GATE" "$SAFETY"; do
+            for f in latejoin-367-restreamer-suspended.txt latejoin-367-publisher1.txt; do
+              if ! grep -qF "Join-Path \$env:TEMP \"$f\"" <<<"$s"; then
+                echo "ERROR: the late-join gate and the resume step must share the PID marker Join-Path \$env:TEMP \"$f\" (#367)."
+                exit 1
+              fi
+            done
+          done
+          if ! grep -qF 'Stop-Process' <<<"$SAFETY"; then
+            echo "ERROR: the resume step must also kill a frozen publisher 1 left behind (#367)."
+            exit 1
+          fi
+          # The dead-man must be created through WMI (outside the runner's
+          # process tree) and armed BEFORE Restreamer is suspended.
+          ARM=$(grep -nE '^\s*\$deadManPid = Start-DeadMan\s*$' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          SUSPEND=$(grep -nF 'NtSuspendProcess($rsHandle)' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          if ! grep -qF 'Invoke-CimMethod -ClassName Win32_Process -MethodName Create' <<<"$GATE" || [ -z "$ARM" ] || [ -z "$SUSPEND" ] || [ "$ARM" -ge "$SUSPEND" ]; then
+            echo "ERROR: the late-join gate must arm its WMI-created dead-man (Start-DeadMan) before NtSuspendProcess(\$rsHandle) (#367)."
+            exit 1
+          fi
+          if grep -nE 'ws://|:4455|obs-e2e-test|/obs/' <<<"$GATE"; then
+            echo "ERROR: the late-join gate must never touch OBS; it uses the ffmpeg publisher only (#367)."
+            exit 1
+          fi
+          echo "OK: the late-join gate matches '$MARKER' from $RX and resumes Restreamer on every exit path (finally, always() step, dead-man)."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
@@ -992,6 +1549,7 @@ jobs:
         secret-scan,
         test-integrity,
         frontend-e2e,
+        mutation-plan,
         mutation-testing,
       ]
     runs-on: ubuntu-latest
@@ -1009,6 +1567,7 @@ jobs:
           echo "secret-scan:    ${{ needs.secret-scan.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
+          echo "mutation-plan:  ${{ needs.mutation-plan.result }}"
           echo "mutation-testing: ${{ needs.mutation-testing.result }}"
 
           FAILED=0
@@ -1024,22 +1583,26 @@ jobs:
             echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
           fi
 
-          # mutation-testing is required on pull_request, tolerate "cancelled"
-          # (GH runner crash/eviction — the test itself never ran, not a code failure).
+          # mutation-plan + mutation-testing run only on pull_request, where
+          # they are REQUIRED. mutation-testing is a matrix job: its result is
+          # "success" only when EVERY shard succeeded, and "skipped" when
+          # mutation-plan failed (named separately so the cause is visible),
+          # so anything but success fails the gate (#367). It used to pass the
+          # gate on "failure" and "cancelled" with a WARN, so even a real
+          # MISSED-mutant failure never blocked a merge.
+          PLAN_RESULT="${{ needs.mutation-plan.result }}"
           MUTATION_RESULT="${{ needs.mutation-testing.result }}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            if [[ "$MUTATION_RESULT" == "success" ]]; then
-              echo "mutation-testing: success"
-            elif [[ "$MUTATION_RESULT" == "cancelled" || "$MUTATION_RESULT" == "failure" ]]; then
-              echo "WARN: mutation-testing result=$MUTATION_RESULT (GH runner may have crashed)"
-              echo "  Push-event CI passed all tests including E2E. Allowing PR to proceed."
-              echo "  If this persists, investigate GH runner stability or move mutation to self-hosted."
-            else
-              echo "FAIL: mutation-testing unexpected result: $MUTATION_RESULT"
+            if [[ "$PLAN_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-plan did not succeed (result: $PLAN_RESULT) -- see its log (over the shard cap?)"
+              FAILED=1
+            fi
+            if [[ "$MUTATION_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-testing did not succeed on every shard (result: $MUTATION_RESULT)"
               FAILED=1
             fi
           else
-            echo "mutation-testing: $MUTATION_RESULT (OK - only required on PRs)"
+            echo "mutation-plan + mutation-testing: $PLAN_RESULT / $MUTATION_RESULT (OK - only required on PRs)"
           fi
 
           # All other jobs must succeed
@@ -1274,6 +1837,15 @@ jobs:
           Remove-NetFirewallRule -DisplayName "Restreamer HTTPS" -ErrorAction SilentlyContinue
           New-NetFirewallRule -DisplayName "Restreamer HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
           Write-Host "=== Firewall rule created for port 443 ==="
+
+          # #363: Allow RTMP ingest (remote OBS push) through Windows Firewall.
+          # This CI deploy block previously opened only 8910 + 443, so remote OBS
+          # pushing RTMP to :1234 was firewall-blocked even though ServiceCore
+          # listens on 1234 (CHECK 3b). Idempotent Remove-then-New, same pattern
+          # as the rules above.
+          Remove-NetFirewallRule -DisplayName "Restreamer RTMP" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer RTMP" -Direction Inbound -Protocol TCP -LocalPort 1234 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 1234 (RTMP) ==="
 
       - name: Deploy TLS certificates
         if: env.TLS_CERT_PEM != ''
@@ -1888,6 +2460,454 @@ jobs:
 
           Write-Host "=== Audio PTS cadence GATE PASSED ==="
 
+      - name: GATE late-join republish keeps chunk A/V aligned (#367)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # Regression for the 2026-10-01 live A/V desync (#367). Thursday's
+          # trigger was RESTREAMER freezing (~35 s): the inpoint receiver's
+          # 30 s FRAME_TIMEOUT stall path ran at resume, the publisher's
+          # reconnect Publish was queued behind the re-subscribe retry ladder,
+          # and the new publisher was joined late with xiu's GOP-cache replay
+          # as a burst (0.29.27 stamped video by arrival time, audio by source
+          # ts -> a constant A/V offset in every chunk).
+          #
+          # Repro (ROZHODNUTE issuecomment-6004626859): suspend Restreamer.exe
+          # itself for 35 s. Suspending only the PUBLISHER can never reach the
+          # stall path: xiu's session drops a publisher idle >= 2 s
+          # (read_timeout), so the receiver sees a closed channel instead.
+          # Publisher 1 is frozen 0.8 s BEFORE Restreamer (below xiu's 2 s
+          # cut, which cannot run while Restreamer is suspended): Restreamer
+          # drains the socket, so at resume nothing is deliverable. A publisher
+          # that keeps sending through the freeze leaves a backlog whose frames
+          # can win the receiver's biased select at resume (media_receiver.rs
+          # "a frame ready after a process freeze wins"), and the stall would
+          # be a race. Then publisher 1 is killed and publisher 2 publishes
+          # fresh within ~3 s. Asserts, from restreamer.log and the chunks:
+          #   stall  the receiver's stall line after the freeze (else FAIL: the
+          #          repro proved nothing);
+          #   a)     every "Stream published" answers its own xiu
+          #          NetStream.Publish.Start within 1 s (no stale hub event);
+          #   b)     "Subscribed" within 1 s of publisher 2's Publish.Start (no
+          #          GOP-cache late join);
+          #   c)     every analysable chunk of publisher 2 keeps the source A/V
+          #          relation within 100 ms (ffmpeg lavfi A+V start together);
+          #   d)     0 av_invariant_violated audit rows.
+          # No API call while Restreamer is suspended. Restreamer is resumed on
+          # every exit path: the finally block, the always() step after this
+          # one, and a dead-man process outside the runner's process tree for a
+          # force-cancel (which skips both). The YouTube VOD-measured gate stays
+          # camera-box #357. Never touches OBS.
+          $ErrorActionPreference = 'Stop'
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) { throw "FAILED: ffprobe not found at $ffprobe" }
+          $chunkDir = "C:\ProgramData\Restreamer\chunks"
+          $logPath = "C:\ProgramData\Restreamer\restreamer.log"
+          $snapDir = Join-Path $env:TEMP "latejoin-367"
+          # PID + start time (UTC ticks) of a Restreamer this step suspended and
+          # has not resumed yet, and of a publisher 1 not killed yet. The
+          # always() step after this one and the dead-man act on what is left.
+          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
+          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
+          $deadManLog = Join-Path $env:TEMP "latejoin-367-deadman.log"
+          if (Test-Path $deadManLog) {
+            Write-Host "::warning::The late-join gate's dead-man acted after an earlier run was killed mid-freeze:"
+            Get-Content $deadManLog | ForEach-Object { Write-Host "  $_" }
+            Remove-Item $deadManLog -Force
+          }
+          # MUST equal STALL_LOG_MARKER in crates/rs-inpoint/src/media_receiver.rs
+          # (checked by test-integrity "Verify the late-join gate's log markers
+          # and resume safety (#367)").
+          $stallMarker = 'No frames received -- stream stalled'
+          $streamName = 'ci-e2e-test'
+          Remove-Item $snapDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $snapDir | Out-Null
+          Remove-Item $suspendMarker, $p1Marker -Force -ErrorAction SilentlyContinue
+          $inv = [Globalization.CultureInfo]::InvariantCulture
+          $stepStart = [DateTimeOffset]::UtcNow
+          $stepStartMs = $stepStart.ToUnixTimeMilliseconds()
+          $stepStartIso = $stepStart.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LateJoin367 {
+            [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);
+            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
+          }
+          "@
+
+          function Start-Publisher([int]$seconds) {
+            Start-Process -FilePath $ffmpegPath -ArgumentList @(
+              "-hide_banner", "-loglevel", "error", "-y", "-re",
+              "-f", "lavfi", "-i", "testsrc=duration=${seconds}:size=320x240:rate=30",
+              "-f", "lavfi", "-i", "sine=frequency=1000:duration=${seconds}",
+              "-c:v", "libx264", "-preset", "ultrafast", "-g", "60", "-c:a", "aac",
+              "-f", "flv", "rtmp://127.0.0.1:1234/live/$streamName"
+            ) -NoNewWindow -PassThru
+          }
+
+          function Read-LogTail([string]$path) {
+            # Restreamer rotates the file by renaming it: retry a read that
+            # lands in that instant.
+            for ($i = 1; $i -le 3; $i++) {
+              try { return @(Get-Content $path -Tail 20000 -Encoding utf8 -ErrorAction Stop) }
+              catch { if ($i -eq 3) { throw } ; Start-Sleep -Milliseconds 200 }
+            }
+          }
+
+          # restreamer.log entries at or after $sinceMs as {Ms, Text}, oldest
+          # first. Lines start "2026-10-05T20:33:29.387602Z  INFO ...". The
+          # rotated file is read too when it changed since then, so a rotation
+          # in the middle of the step loses nothing.
+          function Get-RestreamerLog([int64]$sinceMs) {
+            $since = [DateTimeOffset]::FromUnixTimeMilliseconds($sinceMs).UtcDateTime
+            $sinceIso = $since.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
+            $lines = @()
+            $old = "$logPath.old"
+            if ((Test-Path $old) -and (Get-Item $old).LastWriteTimeUtc -ge $since) { $lines += Read-LogTail $old }
+            $lines += Read-LogTail $logPath
+            foreach ($line in $lines) {
+              if ($line.Length -lt 28 -or [string]::CompareOrdinal($line, 0, $sinceIso, 0, 23) -lt 0) { continue }
+              if ($line -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z) ') {
+                $ms = [DateTimeOffset]::Parse($Matches[1], $inv).ToUnixTimeMilliseconds()
+                if ($ms -ge $sinceMs) { [pscustomobject]@{ Ms = $ms; Text = $line } }
+              }
+            }
+          }
+
+          function Show-Timeline($entries) {
+            $entries | Where-Object {
+              $_.Text -match 'NetStream\.Publish\.Start|Stream published|Stream ended|stream stalled|Subscribed to stream|Re-subscrib|superseding|Frame channel closed|start_new_session|RTMP session ended'
+            } | ForEach-Object { Write-Host "  $($_.Text.Substring(0, [Math]::Min(240, $_.Text.Length)))" }
+          }
+
+          function Write-ProcMarker([string]$path, $proc) {
+            Set-Content -Path $path -Value @($proc.Id, $proc.StartTime.ToUniversalTime().Ticks) -Encoding ascii
+          }
+
+          # Dead-man switch. A force-cancel (or a runner death) kills this step
+          # without running its finally AND skips if: always() steps, which
+          # would leave Restreamer frozen until the next deploy. A process
+          # created through WMI is parented to WmiPrvSE, outside the runner's
+          # process tree, so it survives that kill. 75 s from now (the freeze
+          # is over after ~36 s) it resumes Restreamer if the suspend marker is
+          # still there, and kills a publisher 1 whose marker is still there.
+          # The gate deletes each marker once it resumed / killed the process
+          # itself, so on a normal run it does nothing. A marker's PID only
+          # counts while the process name and start time still match.
+          # When it acts, it appends one line to $deadManLog, which the next
+          # run of this step prints. It removes the suspend marker only after
+          # a successful resume, so the always() step can still retry.
+          function Start-DeadMan {
+            $script = @'
+          $ErrorActionPreference = 'Continue'
+          Start-Sleep -Seconds 75
+          function Get-Marked([string]$path, [string]$name) {
+            $m = @(Get-Content $path -ErrorAction SilentlyContinue)
+            if ($m.Count -lt 2) { return }
+            $p = Get-Process -Id ([int]$m[0]) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -eq $name -and [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$m[1]) -lt 10000000) { $p }
+          }
+          $rs = Get-Marked '__RS_MARKER__' 'Restreamer'
+          if ($rs) {
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LateJoin367DeadMan { [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle); }'
+            $rc = [LateJoin367DeadMan]::NtResumeProcess($rs.Handle)
+            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: NtResumeProcess(Restreamer PID $($rs.Id)) returned $rc"
+            if ($rc -eq 0) { Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue }
+          } else {
+            Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue
+          }
+          $p1 = Get-Marked '__P1_MARKER__' 'ffmpeg'
+          if ($p1) {
+            Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue
+            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: killed frozen publisher 1 (PID $($p1.Id))"
+          }
+          Remove-Item '__P1_MARKER__' -Force -ErrorAction SilentlyContinue
+          '@
+            foreach ($kv in @(@('__RS_MARKER__', $suspendMarker), @('__P1_MARKER__', $p1Marker), @('__LOG__', $deadManLog))) {
+              $script = $script.Replace($kv[0], $kv[1].Replace("'", "''"))
+            }
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+            $cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+            $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
+            if ($r.ReturnValue -ne 0) { throw "FAILED: could not start the dead-man process (Win32_Process.Create returned $($r.ReturnValue))" }
+            Write-Host "Dead-man process PID $($r.ProcessId) armed (75 s)"
+            return [int]$r.ProcessId
+          }
+
+          $rs = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
+          if ($rs.Count -ne 1) { throw "FAILED: expected exactly one desktop-session Restreamer.exe, found $($rs.Count)" }
+          $rs = $rs[0]
+          $rsHandle = $rs.Handle
+          $rsSuspended = $false
+          $p1 = $null
+          $p2 = $null
+          $p2LaunchMs = $null
+          try {
+            $p1 = Start-Publisher 150
+            Write-ProcMarker $p1Marker $p1
+            Start-Sleep -Seconds 15
+            if ($p1.HasExited) { throw "FAILED: publisher 1 exited early (code $($p1.ExitCode))" }
+
+            # Arm the dead-man, freeze publisher 1, let Restreamer drain its
+            # socket for 0.8 s, then freeze Restreamer. Each marker is written
+            # BEFORE its suspend call, so no exit path leaves an unmarked
+            # suspended process.
+            $deadManPid = Start-DeadMan
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
+            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(publisher 1) returned $rc" }
+            Start-Sleep -Milliseconds 800
+            Write-ProcMarker $suspendMarker $rs
+            $rsSuspendMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $rsSuspended = $true
+            $rc = [LateJoin367]::NtSuspendProcess($rsHandle)
+            $gapMs = $sw.ElapsedMilliseconds
+            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(Restreamer) returned $rc" }
+            Write-Host "Publisher 1 (PID $($p1.Id)) frozen, Restreamer (PID $($rs.Id)) suspended $gapMs ms later -- no API call until it is resumed"
+            Start-Sleep -Seconds 35
+
+            $rc = [LateJoin367]::NtResumeProcess($rsHandle)
+            if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer) returned $rc" }
+            $rsSuspended = $false
+            Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue
+            $resumeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            Write-Host "Restreamer resumed after $([math]::Round(($resumeMs - $rsSuspendMs) / 1000.0, 1)) s"
+            if ($gapMs -ge 1500) {
+              throw "FAILED: repro setup too slow: $gapMs ms between freezing publisher 1 and Restreamer (xiu drops a publisher idle >= 2 s, so the stall path is not guaranteed)"
+            }
+            # The dead-man must still be asleep (proves WMI really started it
+            # and its encoded script runs): a dead safety net fails the gate.
+            $dm = Get-Process -Id $deadManPid -ErrorAction SilentlyContinue
+            if (-not $dm -or $dm.ProcessName -ne 'powershell') {
+              throw "FAILED: the dead-man process (PID $deadManPid) is gone before its 75 s -- the force-cancel safety net is broken"
+            }
+
+            # The repro must really have stalled the inpoint, or the gate proves
+            # nothing (a receiver without the #367 fix passes a run without a
+            # stall too). The line is logged at resume; allow 15 s.
+            $stallLine = $null
+            $deadline = (Get-Date).AddSeconds(15)
+            while (-not $stallLine) {
+              $stallLine = @(Get-RestreamerLog $rsSuspendMs) | Where-Object { $_.Text.Contains($stallMarker) } | Select-Object -First 1
+              if ($stallLine -or (Get-Date) -gt $deadline) { break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $stallLine) {
+              Write-Host "=== restreamer.log timeline since the step start ==="
+              Show-Timeline @(Get-RestreamerLog $stepStartMs)
+              throw "FAILED: no '$stallMarker' log line after the Restreamer freeze -- the repro did not exercise the #367 stall path"
+            }
+            Write-Host "Inpoint stall observed: $($stallLine.Text)"
+
+            # Kill publisher 1 and publish fresh within ~3 s: the reconnect
+            # lands while the receiver is in its re-subscribe retry ladder.
+            if (-not $p1.HasExited) { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $p1.WaitForExit(5000)) { throw "FAILED: publisher 1 (PID $($p1.Id)) did not exit after Stop-Process" }
+            Remove-Item $p1Marker -Force -ErrorAction SilentlyContinue
+            $p2LaunchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $p2 = Start-Publisher 60
+            Write-Host "Publisher 1 killed; publisher 2 (PID $($p2.Id)) started at unix ms $p2LaunchMs"
+
+            # Snapshot the new session's chunks while they still exist on disk
+            # (the uploader deletes each one right after its S3 upload). The
+            # chunker writes a file in place (no rename), so copy a chunk only
+            # once it is non-empty and its size held across two polls.
+            $seen = @{}
+            $deadline = (Get-Date).AddSeconds(25)
+            while ((Get-Date) -lt $deadline) {
+              Get-ChildItem $chunkDir -File -Filter "chunk_*.bin" -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -match '^chunk_(\d+)_\d+\.bin$') {
+                  $writtenMs = [int64]$Matches[1]
+                  $dest = Join-Path $snapDir $_.Name
+                  if ($writtenMs -gt ($p2LaunchMs + 1500) -and -not (Test-Path $dest)) {
+                    $len = $_.Length
+                    if ($len -gt 0 -and $seen[$_.Name] -eq $len) {
+                      try {
+                        $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+                        [System.IO.File]::WriteAllBytes($dest, $bytes)
+                      } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                        # pruned, locked or still being written -- the next poll retries
+                      }
+                    } else {
+                      $seen[$_.Name] = $len
+                    }
+                  }
+                }
+              }
+              Start-Sleep -Milliseconds 30
+            }
+          } finally {
+            if ($rsSuspended) {
+              $rc = [LateJoin367]::NtResumeProcess($rsHandle)
+              Write-Host "finally: resumed Restreamer (NtResumeProcess returned $rc)"
+              if ($rc -eq 0) { Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($p in @($p1, $p2)) {
+              if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
+            if ($p1 -and $p1.WaitForExit(5000)) { Remove-Item $p1Marker -Force -ErrorAction SilentlyContinue }
+          }
+
+          # A receiver that kept a Publish queued consumes it only once the
+          # current stream ends: give such a stale event time to reach the log.
+          Start-Sleep -Seconds 3
+          $log = @(Get-RestreamerLog $stepStartMs)
+          Write-Host "=== restreamer.log timeline since the step start ==="
+          Show-Timeline $log
+          $problems = @()
+
+          # a) Every "Stream published" must answer its own xiu Publish.Start
+          # (logged just before the hub broadcasts the Publish) within 1 s. A
+          # leftover or late one is the stale-event signature of 2026-10-01.
+          $starts = @{}
+          foreach ($e in $log) {
+            if ($e.Text -match '\[NetStream\.Publish\.Start\]\s+app_name: [^,]*, stream_name: (\S+)') {
+              if (-not $starts.ContainsKey($Matches[1])) { $starts[$Matches[1]] = New-Object System.Collections.Generic.Queue[int64] }
+              $starts[$Matches[1]].Enqueue($e.Ms)
+            } elseif ($e.Text -match 'Stream published: ') {
+              $name = if ($e.Text -match 'stream_name: (\S+)') { $Matches[1] } else { '?' }
+              $q = $starts[$name]
+              if (-not $q -or $q.Count -eq 0) {
+                $problems += "a) stale hub event: '$($e.Text)' has no NetStream.Publish.Start of its own"
+              } else {
+                $lagMs = $e.Ms - $q.Dequeue()
+                if ($lagMs -gt 1000) { $problems += "a) stale hub event: 'Stream published' $lagMs ms after its NetStream.Publish.Start: $($e.Text)" }
+              }
+            }
+          }
+
+          # b) Publisher 2 must be subscribed at once, not joined late through
+          # the GOP cache.
+          $p2Start = $log | Where-Object { $_.Ms -ge $p2LaunchMs -and $_.Text -match ('\[NetStream\.Publish\.Start\].*stream_name: ' + [regex]::Escape($streamName) + '(\s|$)') } | Select-Object -First 1
+          if (-not $p2Start) {
+            $problems += "b) publisher 2's NetStream.Publish.Start is not in restreamer.log"
+          } else {
+            $sub = $log | Where-Object { $_.Ms -ge $p2Start.Ms -and $_.Text.Contains('Subscribed to stream, processing frames') } | Select-Object -First 1
+            if (-not $sub) {
+              $problems += "b) Restreamer never subscribed to publisher 2"
+            } else {
+              $subLagMs = $sub.Ms - $p2Start.Ms
+              Write-Host "Publisher 2 subscribed $subLagMs ms after its NetStream.Publish.Start"
+              if ($subLagMs -gt 1000) { $problems += "b) subscribed $subLagMs ms after publisher 2's NetStream.Publish.Start (> 1000 ms): a GOP-cache late join" }
+            }
+          }
+
+          # c) Chunk A/V relation of the republished session vs the source.
+          $snaps = @(Get-ChildItem $snapDir -File | Sort-Object Name)
+          Write-Host "Captured $($snaps.Count) chunk(s) of the republished session"
+          $analysed = 0
+          $skipped = 0
+          foreach ($snap in $snaps) {
+            # Native stderr under EAP=Stop is a terminating error in PS 5.1:
+            # probe with Continue and judge by the exit code.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $json = & $ffprobe -v error -show_entries packet=codec_type,pts_time -of json $snap.FullName 2>&1 | Out-String
+            $probeExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($probeExit -ne 0) {
+              Write-Host "WARNING: ffprobe exited $probeExit on $($snap.Name), skipping it: $json"
+              $skipped++
+              continue
+            }
+            $pk = ($json | ConvertFrom-Json).packets
+            $aMax = ($pk | Where-Object { $_.codec_type -eq 'audio' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
+            $vMax = ($pk | Where-Object { $_.codec_type -eq 'video' } | ForEach-Object { [double]$_.pts_time } | Measure-Object -Maximum).Maximum
+            if ($null -eq $aMax -or $null -eq $vMax) {
+              Write-Host "WARNING: $($snap.Name) lacks an audio or a video packet, skipping it"
+              $skipped++
+              continue
+            }
+            $analysed++
+            $deltaMs = [math]::Round(($aMax - $vMax) * 1000.0)
+            Write-Host "$($snap.Name): last audio pts $aMax s, last video pts $vMax s, audio-minus-video $deltaMs ms"
+            if ([math]::Abs($deltaMs) -gt 100) { $problems += "c) $($snap.Name): audio-minus-video $deltaMs ms (> 100 ms from the source relation)" }
+          }
+          if ($analysed -lt 3) { $problems += "c) only $analysed analysable post-republish chunks, need >= 3" }
+          # One unanalysable snapshot (a chunk caught at the end of the window)
+          # is tolerated; more means the chunks themselves are broken.
+          if ($skipped -gt 1) { $problems += "c) $skipped post-republish chunks could not be analysed (ffprobe error or a missing track), at most 1 is tolerated" }
+
+          # d) No invariant violation. Restreamer was frozen 35 s, so this
+          # first API call after the resume gets a generous timeout + retries.
+          $audit = $null
+          for ($i = 1; $i -le 3 -and $null -eq $audit; $i++) {
+            try {
+              $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=av_invariant_violated&since=$($stepStartIso)Z&limit=100" -TimeoutSec 30
+            } catch {
+              if ($i -eq 3) { throw "FAILED: the audit API did not answer after the Restreamer freeze: $_" }
+              Write-Host "Audit query attempt $i failed ($_), retrying in 5 s"
+              Start-Sleep -Seconds 5
+            }
+          }
+          # An empty answer or one without "rows" proves nothing: fail it.
+          if ($null -eq $audit -or $audit.PSObject.Properties.Name -notcontains 'rows') {
+            $problems += "d) the audit query returned no 'rows' field, so the invariant check proves nothing: $($audit | ConvertTo-Json -Compress -Depth 3)"
+          } else {
+            $rows = @($audit.rows | Where-Object { $null -ne $_ })
+            if ($rows.Count -gt 0) { $problems += "d) $($rows.Count) av_invariant_violated audit row(s): $($rows | ConvertTo-Json -Compress -Depth 4)" }
+          }
+
+          if ($problems.Count -gt 0) {
+            throw "FAILED: late-join republish after a Restreamer freeze (#367): $($problems -join ' | ')"
+          }
+          Write-Host "=== Late-join republish GATE PASSED: stall reproduced, subscribed $subLagMs ms after the republish, $analysed chunks within 100 ms, 0 invariant violations ==="
+          # GitHub appends "exit $LASTEXITCODE" to powershell steps: a tolerated
+          # ffprobe failure on the last snapshot must not turn a pass into a fail.
+          $global:LASTEXITCODE = 0
+
+      - name: Resume Restreamer if the late-join gate left it suspended (#367)
+        if: always()
+        shell: powershell
+        run: |
+          # The late-join gate suspends Restreamer.exe for 35 s (and freezes
+          # ffmpeg publisher 1) and undoes both in its own finally block. A step
+          # killed before that ran (a timeout, a cancel) leaves its PID markers
+          # behind: resume / kill those processes here, or the rest of the job
+          # and the box keep a frozen Restreamer. A marker holds PID + start
+          # time (UTC ticks); a PID only counts while both still match.
+          # (A force-cancel skips this step too: the gate's dead-man covers it.)
+          $ErrorActionPreference = 'Stop'
+          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
+          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
+          function Get-Marked([string]$path, [string]$name) {
+            $m = @(Get-Content $path)
+            if ($m.Count -lt 2) { return }
+            $p = Get-Process -Id ([int]$m[0]) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -eq $name -and [math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$m[1]) -lt 10000000) { $p }
+          }
+          if (Test-Path $suspendMarker) {
+            $proc = Get-Marked $suspendMarker 'Restreamer'
+            if ($proc) {
+              Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LateJoin367Resume {
+            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
+          }
+          "@
+              $rc = [LateJoin367Resume]::NtResumeProcess($proc.Handle)
+              if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer PID $($proc.Id)) returned $rc -- Restreamer may still be suspended" }
+              Write-Host "Resumed Restreamer PID $($proc.Id), left suspended by the late-join gate"
+            } else {
+              Write-Host "The suspend marker's PID is no longer that Restreamer; nothing to resume"
+            }
+            Remove-Item $suspendMarker -Force
+          } else {
+            Write-Host "The late-join gate left no suspended Restreamer"
+          }
+          if (Test-Path $p1Marker) {
+            $proc = Get-Marked $p1Marker 'ffmpeg'
+            if ($proc) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "Killed ffmpeg publisher 1 (PID $($proc.Id)), left behind by the late-join gate"
+            }
+            Remove-Item $p1Marker -Force
+          }
+
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell
         timeout-minutes: 4
@@ -2041,7 +3061,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 85 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min
+    timeout-minutes: 145 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -2054,6 +3074,14 @@ jobs:
       YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
     steps:
       - uses: actions/checkout@v4
+
+      # #349: before touching the shared rig's OBS, wait out any active
+      # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
+      # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
+      - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
+        shell: powershell
+        timeout-minutes: 65
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: Configure Hetzner API token
         shell: powershell
@@ -2510,6 +3538,19 @@ jobs:
             "ENCODER_FILE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
+      # #349: final short-budget rig-lease re-check RIGHT before the first
+      # StartStream, closing the TOCTOU gap between the post-checkout check and
+      # here (camera-box could have acquired the lease during our setup steps;
+      # its reverse-direction gate keys on OUR streaming state, which is still
+      # false until now). Short budget (10 min) since setup already fenced most
+      # of the wait; fail-open + always exit 0 as before.
+      - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
+        shell: powershell
+        timeout-minutes: 12
+        env:
+          RIG_LEASE_BUDGET_S: "600"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+
       - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
         shell: powershell
         timeout-minutes: 4
@@ -2620,7 +3661,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -2940,6 +3981,76 @@ jobs:
           }
           throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
+      - name: "Pin fast-endpoint classes (#192)"
+        shell: powershell
+        run: |
+          # #192: exercise the fast-endpoint audit path end-to-end on a CI-OWNED,
+          # self-seeded, credential-free fast endpoint 'e2e fast'
+          # (service_type TEST_FILE). A TEST_FILE endpoint pushes to the
+          # delivery VPS's own loopback RTMP accept-and-discard sink
+          # (rs-delivery test_file_sink, 127.0.0.1:1935), so it needs no
+          # operator setup and no secret. This step FINDS-OR-CREATES it
+          # (idempotent across runs) and pins 'e2e rtmp' explicitly to
+          # is_fast=false (deterministic even after a leaked prior cleanup),
+          # BEFORE start-stream -- the host-side FastEndpointJumpedToLiveEdge
+          # audit fires only ONCE, at the VPS delivering transition, for
+          # is_fast=true endpoints. Kept fast for the whole delivery (host + VPS
+          # must agree) and restored in the always() cleanup below. 'e2e rtmp'
+          # (the OAuth-linked YouTube path the job's primary assertions depend
+          # on) is deliberately left non-fast. The previous fixture ('e2e' +
+          # ' hls', a YT_HLS endpoint) was deleted by migration v21 and could
+          # never exist again: every alias a strict gate looks up must be
+          # SEEDED by CI itself (enforced in test-integrity).
+          $ErrorActionPreference = "Stop"
+          # Lower bound for THIS run's audit query. The E2E-Test event PERSISTS
+          # across CI runs, so its audit_log accumulates -- without a `since`
+          # bound the assert step would count a previous run's jump row too.
+          # -10s clock-skew margin; captured before start-stream.
+          $since = (Get-Date).ToUniversalTime().AddSeconds(-10).ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+          "FAST192_SINCE=$since" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "#192 audit-window since=$since"
+          $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+          $rtmp = $eps | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
+          if (-not $fast) {
+            $createBody = @{
+              alias = 'e2e fast'
+              service_type = 'TEST_FILE'
+              stream_key = 'ci-fast'
+              is_fast = $true
+            } | ConvertTo-Json
+            $created = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method POST `
+              -Body $createBody -ContentType "application/json" -TimeoutSec 10
+            Write-Host "#192: created CI-owned endpoint 'e2e fast' (id=$($created.id), TEST_FILE, is_fast=true)"
+          } else {
+            # Self-heal the canonical shape (a prior run's restore, or any edit).
+            $fastBody = @{ service_type = 'TEST_FILE'; stream_key = 'ci-fast'; enabled = $true; is_fast = $true } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($fast.id)" -Method PUT `
+              -Body $fastBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+            Write-Host "#192: re-pinned CI-owned endpoint 'e2e fast' (id=$($fast.id)): TEST_FILE, enabled, is_fast=true"
+          }
+          if ($rtmp) {
+            $rtmpBody = @{ is_fast = $false } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($rtmp.id)" -Method PUT `
+              -Body $rtmpBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+          }
+          # Read back and assert the shape -- a create/PUT regression fails
+          # HERE, clearly, not 40 minutes later in a confusing step.
+          $eps2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $fast2 = $eps2 | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+          $rtmp2 = $eps2 | Where-Object { $_.alias -eq 'e2e rtmp' } | Select-Object -First 1
+          if (-not $fast2) {
+            throw "FAILED (#192): CI-owned endpoint 'e2e fast' not present in /endpoints after find-or-create -- the fast-endpoint audit gate cannot run (strict gate, CLAUDE.md 'a CI test that can't run must FAIL')"
+          }
+          if ($fast2.service_type -ne 'TEST_FILE') { throw "FAILED (#192): 'e2e fast' must be service_type TEST_FILE (got '$($fast2.service_type)')" }
+          if (-not $fast2.enabled) { throw "FAILED (#192): 'e2e fast' must be enabled (got $($fast2.enabled))" }
+          if (-not $fast2.is_fast) { throw "FAILED (#192): 'e2e fast' is_fast did not stick (got $($fast2.is_fast))" }
+          # The API cannot set the pusher; only the Rust pusher dials the VPS
+          # loopback sink (the ffmpeg TEST_FILE path writes a file instead).
+          if ($fast2.pusher -ne 'rust') { throw "FAILED (#192): 'e2e fast' must use the Rust pusher (got '$($fast2.pusher)')" }
+          if ($rtmp2 -and $rtmp2.is_fast) { throw "FAILED (#192): 'e2e rtmp' should be is_fast=false (got $($rtmp2.is_fast))" }
+          Write-Host "OK (#192): 'e2e fast' (TEST_FILE, id=$($fast2.id)) is_fast=true, 'e2e rtmp' is_fast=false"
+
       - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
@@ -2968,13 +4079,14 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
-          # Ensure 'e2e rtmp' and 'e2e hls' endpoints are attached. The
+          # Ensure 'e2e rtmp' and 'e2e fast' endpoints are attached. The
           # event row may exist but have zero attachments if it was
           # recreated after the original was deleted (the OBS-to-YouTube
           # buffering test depends on these two endpoints showing up in
-          # the dashboard).
+          # the dashboard). 'e2e fast' is the CI-owned TEST_FILE fast
+          # endpoint the pin step find-or-creates (#192).
           $allEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
-          $needAttach = @("e2e rtmp", "e2e hls")
+          $needAttach = @("e2e rtmp", "e2e fast")
           $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10
           $attachedAliases = @($eventEndpoints | ForEach-Object { $_.alias })
           foreach ($alias in $needAttach) {
@@ -2992,6 +4104,13 @@ jobs:
                 Write-Host "WARNING: Endpoint config '$alias' not found in /endpoints list"
               }
             }
+          }
+          # #192: 'e2e fast' is created by CI itself (pin step), so a missing
+          # attachment is a real fault, not box drift -- the fast-endpoint
+          # audit gate would otherwise degrade into a silent zero-gap warning.
+          $attachedNow = @(Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10 | ForEach-Object { $_.alias })
+          if ($attachedNow -notcontains 'e2e fast') {
+            throw "FAILED (#192): CI-owned endpoint 'e2e fast' is not attached to event $($targetEvent.id) (attached: $($attachedNow -join ', '))"
           }
 
           # Use the event's REAL cache_delay_secs (120s from production config).
@@ -3268,12 +4387,22 @@ jobs:
               process.exit(1);
             }
 
-            // Parse the first cache label (e.g., "45s / 60s cache")
-            const match = cacheLabels[0].match(/(\d+)s\s*\/\s*(\d+)s/);
-            if (!match) {
-              console.error('FAILED: Could not parse cache label:', cacheLabels[0]);
+            // #192: parse a NON-FAST label (order-independent). A fast endpoint
+            // renders "Xs / live cache" or "Xs / Ns target cache" -- blindly
+            // parsing cacheLabels[0] would mis-read a fast label if it sorts
+            // first (e.g. a fast "0s / live cache" placeholder pre-VPS would
+            // fail the regex, or "0s / Ns target cache" would trip the
+            // 0s-during-buffering check). This assertion is about the non-fast
+            // S3 cushion.
+            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
+            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
+            const trimmedLabels = cacheLabels.map(l => l.trim());
+            const nfLabel = trimmedLabels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+            if (!nfLabel) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns cache) during buffering; labels:', JSON.stringify(trimmedLabels));
               process.exit(1);
             }
+            const match = nfLabel.match(NONFAST_RE);
 
             const cacheSecs = parseInt(match[1]);
             const targetSecs = parseInt(match[2]);
@@ -3584,6 +4713,108 @@ jobs:
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
 
+      - name: "Assert fast-endpoint audit (#192)"
+        shell: powershell
+        run: |
+          # #192: with the CI-owned 'e2e fast' (TEST_FILE) pinned is_fast=true
+          # before start-stream, the VPS delivering transition must have
+          # emitted the host-side fast_endpoint_jumped_to_live_edge audit
+          # (exactly once) and the VPS-side endpoint_start_chunk_updated
+          # (mirrored to the host audit_log with event_id backfilled). This
+          # step runs BEFORE any crash/republish test, so the jump has fired
+          # at most once. Bounded poll (the VPS->host mirror lags). The pin
+          # step seeds 'e2e fast' itself, so a missing/non-fast endpoint here
+          # is a hard failure, never a skip.
+          $ErrorActionPreference = "Stop"
+          $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+          $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+          if (-not $fast -or -not $fast.is_fast) {
+            throw "FAILED (#192): 'e2e fast' is not is_fast=true at assert time -- the pin step did not take effect"
+          }
+          $since = $env:FAST192_SINCE
+          if (-not $since) { throw "FAILED (#192): FAST192_SINCE was not set by the pin step" }
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
+          if (-not $e2eEvent) { throw "FAILED (#192): no event matching $($env:EVENT_NAME)" }
+          $eid = $e2eEvent.id
+          $deadline = (Get-Date).AddSeconds(90)
+          $jump = @(); $upd = @(); $rtmpJump = @(); $rtmpUpd = @()
+          while ((Get-Date) -lt $deadline) {
+            # since-scoped to THIS run only (the E2E-Test event persists across runs).
+            $a = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=1000" -TimeoutSec 10
+            $rows = $a.rows
+            $jump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e fast' })
+            $upd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e fast' })
+            $rtmpJump = @($rows | Where-Object { $_.action -eq 'fast_endpoint_jumped_to_live_edge' -and $_.endpoint -eq 'e2e rtmp' })
+            $rtmpUpd = @($rows | Where-Object { $_.action -eq 'endpoint_start_chunk_updated' -and $_.endpoint -eq 'e2e rtmp' })
+            if ($jump.Count -ge 1 -and $upd.Count -ge 1) { break }
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "#192 audit counts (since=$since): fast jump=$($jump.Count) upd=$($upd.Count) | rtmp jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)"
+          # ALWAYS enforced: the is_fast gating (non-fast 'e2e rtmp' emits neither
+          # fast action) and no spurious re-fire in this run's window.
+          if ($rtmpJump.Count -ne 0 -or $rtmpUpd.Count -ne 0) {
+            throw "FAILED (#192): non-fast 'e2e rtmp' must NOT emit fast-endpoint audits (jump=$($rtmpJump.Count) upd=$($rtmpUpd.Count)) -- the is_fast gating is broken"
+          }
+          if ($jump.Count -gt 1) {
+            throw "FAILED (#192): unexpected re-fire -- $($jump.Count) fast_endpoint_jumped_to_live_edge rows for 'e2e fast' in this run's window (expected <=1 before any crash/republish test)"
+          }
+          if ($jump.Count -eq 1) {
+            # Full fast path exercised: the host jumped, so the VPS-side mirror
+            # row MUST follow (both are gated on the same gap>0 condition).
+            if ($upd.Count -lt 1) {
+              $dump = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eid&since=$since&limit=50" -TimeoutSec 10
+              Write-Host "AUDIT DUMP (this run, event $eid):"
+              $dump.rows | ForEach-Object { Write-Host "  $($_.ts) src=$($_.source) $($_.action) ep=$($_.endpoint)" }
+              throw "FAILED (#192): host emitted fast_endpoint_jumped_to_live_edge but NO endpoint_start_chunk_updated (VPS-side, mirrored) followed for 'e2e fast' -- the VPS->host audit mirror or the VPS update_start handler is broken"
+            }
+            Write-Host "OK (#192): full fast-endpoint audit path verified -- jump=1, start_chunk_updated=$($upd.Count) for 'e2e fast', 0/0 for non-fast 'e2e rtmp'"
+          } else {
+            # jump.Count == 0: a legitimate ZERO-GAP this run -- no chunks were
+            # marked sent between the original-start computation and the
+            # delivering transition, so should_jump_to_live_edge(is_fast, gap=0)
+            # was false. Not a failure (nothing to jump); upd must then also be
+            # absent (both gated on gap>0). The is_fast gating is still verified
+            # above (rtmp emitted nothing).
+            if ($upd.Count -ne 0) {
+              throw "FAILED (#192): inconsistent -- 0 jump rows but $($upd.Count) endpoint_start_chunk_updated for 'e2e fast'"
+            }
+            Write-Host "::warning::#192: zero-gap this run -- fast_endpoint_jumped_to_live_edge did not fire (no chunks accrued in the pre-transition window). Fast-jump path not exercised this run; is_fast gating still verified."
+          }
+
+          # #192: POSITIVE proof that 'e2e fast' really DELIVERS. Host `alive`
+          # only means the endpoint task has not finished -- the blind spot
+          # that hid the dead 127.0.0.1:1935 socket for months. Read the VPS
+          # /api/status directly (bearer token from the host DB, like the
+          # crash-exhaustion gate): its TEST_FILE loopback sink must have
+          # accepted a publish and its byte counter must RISE (bounded: up to
+          # 6 samples 10 s apart, so one reconnect gap cannot red the step).
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+          if (-not $instances -or @($instances).Count -lt 1) { throw "FAILED (#192): no delivery instance for the TEST_FILE sink check" }
+          $vpsBase = "http://$($instances[0].ipv4):8000"
+          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
+          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $token) { throw "FAILED (#192): could not read the VPS auth_token from the host DB" }
+          $vpsHeaders = @{ Authorization = "Bearer $token" }
+          $sink0 = (Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10).test_file_sink
+          if (-not $sink0) {
+            throw "FAILED (#192): VPS /api/status has no test_file_sink -- the TEST_FILE loopback sink is not running although 'e2e fast' is attached"
+          }
+          Write-Host "#192 sink: $($sink0.local_addr) publishes=$($sink0.counters.publishes) active=$($sink0.counters.active_connections) bytes=$($sink0.counters.bytes_received)"
+          $rose = $false
+          for ($i = 1; $i -le 6 -and -not $rose; $i++) {
+            Start-Sleep -Seconds 10
+            $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            $sink = $st.test_file_sink
+            $fastEp = $st.endpoints | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+            Write-Host "#192 sink sample ${i}: publishes=$($sink.counters.publishes) active=$($sink.counters.active_connections) bytes=$($sink.counters.bytes_received) | e2e fast chunks=$($fastEp.chunks_processed) push_age_ms=$($fastEp.last_push_ok_age_ms) mode=$($fastEp.delivery_mode)"
+            if ($sink -and [int64]$sink.counters.publishes -ge 1 -and [int64]$sink.counters.bytes_received -gt [int64]$sink0.counters.bytes_received) { $rose = $true }
+          }
+          if (-not $rose) {
+            throw "FAILED (#192): the VPS TEST_FILE sink received no new bytes in 60 s -- 'e2e fast' is not delivering"
+          }
+          Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
+
       - name: Verify delivery progression
         shell: powershell
         timeout-minutes: 10
@@ -3639,8 +4870,8 @@ jobs:
           # whole run on state the CI does not own (2026-05-20: a leftover
           # 'e2e fb' soak endpoint at 157.4s > 156s init cap hard-failed YT
           # e2e even though the CI's own endpoints were fine). The CI attaches
-          # exactly 'e2e rtmp' + 'e2e hls' (see the seed step's $needAttach).
-          $ciOwnedAliases = @("e2e rtmp", "e2e hls")
+          # exactly 'e2e rtmp' + 'e2e fast' (see the seed step's $needAttach).
+          $ciOwnedAliases = @("e2e rtmp", "e2e fast")
 
           # Phase 2: Initialization-phase overshoot + jump detection.
           # The 172s->120s jump bug happens in the FIRST 60s after warmup ends.
@@ -3731,7 +4962,7 @@ jobs:
           }
 
           if ($epReadings.Count -eq 0) {
-            throw "FAILED: No CI-owned non-fast endpoints (e2e rtmp / e2e hls) found in delivery status"
+            throw "FAILED: No CI-owned non-fast endpoint (e2e rtmp) found in delivery status ('e2e fast' is fast and skipped here)"
           }
 
           # Assert EACH endpoint advanced >= 3 chunks over 45s
@@ -3787,25 +5018,56 @@ jobs:
             await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
             await page.waitForTimeout(5000); // Wait for WebSocket data
 
-            // Check per-endpoint cache bar is visible
-            const cacheLabel = await page.locator('.endpoint-cache-label').first().textContent().catch(() => null);
-            console.log('Endpoint cache label:', cacheLabel);
-
-            if (!cacheLabel) {
+            // #192: collect ALL endpoint cache labels (order-independent). A
+            // fast endpoint renders "Xs / live cache" (target None) OR
+            // "Xs / Ns target cache" (target set); a non-fast one
+            // "Xs / Ns cache". The old .first() parse threw whenever a fast
+            // label sorted first, and a "Ns target cache" fast label would
+            // even be mis-read as non-fast. Classify FAST first; the non-fast
+            // regex is anchored on "cache$" so "... target cache" is excluded.
+            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
+            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
+            const labels = (await page.locator('.endpoint-cache-label').allTextContents()).map(l => l.trim());
+            console.log('Endpoint cache labels:', JSON.stringify(labels));
+            if (labels.length === 0) {
               console.error('FAILED: Per-endpoint cache label not found on dashboard');
               process.exit(1);
             }
-
-            // Extract delay value from label (e.g., "90s / 120s cache")
-            const match = cacheLabel.match(/(\d+)s\s*\/\s*(\d+)s/);
-            if (!match) {
-              console.error('FAILED: Could not parse delay from cache label:', cacheLabel);
+            const fastLabels = labels.filter(l => FAST_RE.test(l));
+            const nonFastLabels = labels.filter(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+            const unparsed = labels.filter(l => !FAST_RE.test(l) && !NONFAST_RE.test(l));
+            if (unparsed.length > 0) {
+              console.error('FAILED: Unparseable cache label(s):', JSON.stringify(unparsed));
+              process.exit(1);
+            }
+            if (nonFastLabels.length === 0) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns) found; labels:', JSON.stringify(labels));
+              process.exit(1);
+            }
+            // #192: the dashboard's fast-label count must equal the host's
+            // is_fast endpoint count -- proves the fast class renders correctly.
+            try {
+              const st = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
+              const eid = st && st.streaming_event && st.streaming_event.id;
+              if (eid) {
+                const del = await fetch('http://127.0.0.1:8910/api/v1/delivery/status?event_id=' + eid).then(r => r.json());
+                const hostFast = (del.endpoint_details || []).filter(e => e.is_fast).length;
+                console.log('host is_fast endpoints:', hostFast, '| dashboard fast labels:', fastLabels.length);
+                if (fastLabels.length !== hostFast) {
+                  console.error('FAILED: fast label count ' + fastLabels.length + ' != host is_fast count ' + hostFast);
+                  process.exit(1);
+                }
+              }
+            } catch (e) {
+              console.error('FAILED: could not cross-check fast label count vs host:', e.message);
               process.exit(1);
             }
 
-            const delayValue = parseInt(match[1]);
-            const targetValue = parseInt(match[2]);
-            console.log('Endpoint cache:', delayValue, 's /', targetValue, 's');
+            // Numeric + stability check runs on a NON-FAST label.
+            const nfMatch = nonFastLabels[0].match(NONFAST_RE);
+            const delayValue = parseInt(nfMatch[1]);
+            const targetValue = parseInt(nfMatch[2]);
+            console.log('Non-fast endpoint cache:', delayValue, 's /', targetValue, 's');
 
             // Check cache bar fill element exists inside endpoint node
             const fillClass = await page.locator('.endpoint-node .buffer-bar-fill').first().getAttribute('class').catch(() => null);
@@ -3816,15 +5078,17 @@ jobs:
               process.exit(1);
             }
 
-            // Stability check: take 3 readings over 10s, cache must not jump backward > 20%
+            // Stability check: 3 readings over 10s, a NON-FAST cache must not
+            // jump backward > 20%.
             const readings = [delayValue];
             for (let i = 0; i < 2; i++) {
               await page.waitForTimeout(5000);
-              const label = await page.locator('.endpoint-cache-label').first().textContent().catch(() => '');
-              const m = label.match(/(\d+)s/);
+              const ls = (await page.locator('.endpoint-cache-label').allTextContents()).map(l => l.trim());
+              const nf = ls.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+              const m = nf ? nf.match(NONFAST_RE) : null;
               if (m) readings.push(parseInt(m[1]));
             }
-            console.log('Cache stability readings:', readings);
+            console.log('Cache stability readings (non-fast):', readings);
             for (let i = 1; i < readings.length; i++) {
               if (readings[i] < readings[i-1] * 0.8) {
                 console.error('FAILED: Cache jumped backward:', readings[i-1], '->', readings[i], '(> 20% drop). Transition jump bug.');
@@ -4132,7 +5396,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -4140,12 +5404,12 @@ jobs:
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
                 # Check for bitrateLow in configuration_issues even when health is "good".
-                # configuration_issues entries are "{type}: {reason} ({severity})"
-                # strings, so match "^bitrateLow:" not bare contains.
+                # configuration_issues are {type, severity, reason, description?}
+                # objects (#209), so compare .type by property, not regex.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_.type -eq 'bitrateLow' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)' despite 'good' health"
                     }
@@ -4172,7 +5436,7 @@ jobs:
                     if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                       Write-Host "  YouTube configurationIssues:"
                       foreach ($issue in $s.configuration_issues) {
-                        Write-Host "    - $issue"
+                        Write-Host "    - $($issue.type): $($issue.reason) ($($issue.severity))"
                       }
                     }
                   }
@@ -4310,29 +5574,27 @@ jobs:
             foreach ($s in $activeStreams) {
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                 # /api/v1/youtube/status returns configuration_issues as
-                # Vec<String> formatted "{type}: {reason} ({severity})" by
-                # crates/rs-api/src/youtube.rs:106. Filter by parsing the
-                # trailing (severity) and the leading {type}. Two policies:
+                # structured {type, severity, reason, description?} objects
+                # (#209 - crates/rs-api/src/youtube.rs ConfigurationIssueOut).
+                # Filter by property access, no regex. Two policies:
                 #   1. Drift-class type list ALWAYS blocks regardless of
                 #      severity (defends against YT silently downgrading).
                 #   2. Otherwise, info-level advisories (e.g. persistent
                 #      audioBitrateLow on the synthetic test feed) are
                 #      logged + ignored; warning/error throws.
-                # Follow-up #209 tracks moving issues to structured Rust
-                # types so this string parsing goes away.
                 $driftTypes = @('videoIngestionStarved', 'videoIngestionFasterThanRealtime', 'bitrateLow')
-                $driftPattern = '^(' + ($driftTypes -join '|') + '):'
                 $blocking = @($s.configuration_issues | Where-Object {
-                  $_ -match $driftPattern -or $_ -notmatch '\(info\)$'
+                  $driftTypes -contains $_.type -or $_.severity -ne 'info'
                 })
                 $advisory = @($s.configuration_issues | Where-Object {
-                  $_ -match '\(info\)$' -and $_ -notmatch $driftPattern
+                  $_.severity -eq 'info' -and $driftTypes -notcontains $_.type
                 })
+                $fmt = { param($x) "$($x.type): $($x.reason) ($($x.severity))" }
                 if ($advisory.Count -gt 0) {
-                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $($advisory -join ', ')"
+                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $(($advisory | ForEach-Object { & $fmt $_ }) -join ', ')"
                 }
                 if ($blocking.Count -gt 0) {
-                  $issueList = $blocking -join ', '
+                  $issueList = ($blocking | ForEach-Object { & $fmt $_ }) -join ', '
                   throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has blocking configuration_issues: $issueList. Drift-class types ($($driftTypes -join '/')) always block; other types block at warning/error severity per Phase 1 spec."
                 }
               }
@@ -4476,7 +5738,13 @@ jobs:
           # VPS reads from S3 (not OBS) -- OBS disconnect must not cause any
           # ffmpeg restarts on the VPS. Any restart indicates a bug.
           $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          # #192: a fast endpoint's small cushion legitimately drains into
+          # rescue under a source outage (and may restart its push ffmpeg);
+          # this OBS-disconnect gate asserts the non-fast VPS-from-S3 invariant.
+          # Skip fast by alias -- is_fast lives on the host endpoint_details view.
+          $fast192 = @($statusAfter.endpoint_details | Where-Object { $_.is_fast } | ForEach-Object { $_.alias })
           foreach ($ep in $statusAfter.endpoints) {
+            if ($fast192 -contains $ep.alias) { continue }
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
             if ($ep.ffmpeg_restart_count -gt 0) {
               $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
@@ -4629,6 +5897,10 @@ jobs:
             }
             $emptyStreak = 0
             foreach ($ep in $st.endpoint_details) {
+              # #192: skip fast endpoints -- this A/V-republish soak asserts
+              # non-fast restart/skew behaviour; a fast endpoint's small cushion
+              # gives it different rescue/refill dynamics under a source blip.
+              if ($ep.is_fast) { continue }
               $skew = [int]$ep.av_skew_ms
               $absSkew = [math]::Abs($skew)
               $restarts = [int]$ep.ffmpeg_restart_count
@@ -4740,6 +6012,12 @@ jobs:
           }
 
           foreach ($ep in $deliveryAfter.endpoint_details) {
+            # #192: skip fast endpoints -- a fast endpoint's ~5s cushion is
+            # smaller than the 15s S3 block, so it legitimately drains into
+            # rescue (RESCUE_STALL_THRESHOLD_SECS=8) and stops advancing S3
+            # chunks. This gate asserts the non-fast VPS-cache behaviour, exactly
+            # like the delay checks above (which already filter -not is_fast).
+            if ($ep.is_fast) { continue }
             $alias = $ep.alias
             $restartsAfter = $ep.ffmpeg_restart_count
             $restartsDelta = $restartsAfter - $restartsBefore[$alias]
@@ -5300,7 +6578,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -5308,12 +6586,12 @@ jobs:
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
                 # Check for bitrateLow even when health reports "good".
-                # configuration_issues entries are "{type}: {reason} ({severity})"
-                # strings, so match "^bitrateLow:" not bare contains.
+                # configuration_issues are {type, severity, reason, description?}
+                # objects (#209), so compare .type by property, not regex.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_.type -eq 'bitrateLow' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)'"
                     }
@@ -5440,6 +6718,38 @@ jobs:
             }
           }
           throw "FAILED: rtmp_connected is still true after OBS stream stopped ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
+
+      - name: "Restore fast-endpoint classes (#192)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #192: undo the pin so the persistent E2E-Test event does not carry
+          # a fast endpoint between runs. The pin step find-or-creates and
+          # re-pins 'e2e fast' deterministically at the START of the next run,
+          # so this is best-effort: on failure emit a VISIBLE ::warning:: (a
+          # leaked fast flag must never be silently tolerated) rather than red
+          # an otherwise green job on a transient app-down during teardown.
+          try {
+            $eps = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+            $fast = $eps | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+            if ($fast -and $fast.is_fast) {
+              $body = @{ is_fast = $false } | ConvertTo-Json
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($fast.id)" -Method PUT `
+                -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
+              $chk = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
+              $fast2 = $chk | Where-Object { $_.alias -eq 'e2e fast' } | Select-Object -First 1
+              if ($fast2.is_fast) {
+                Write-Host "::warning::#192: could not restore 'e2e fast' is_fast=false (still fast); next run's pin step will self-heal"
+              } else {
+                Write-Host "OK (#192): restored 'e2e fast' is_fast=false"
+              }
+            } else {
+              Write-Host "#192: 'e2e fast' already non-fast (nothing to restore)"
+            }
+          } catch {
+            Write-Host "::warning::#192: restore of 'e2e fast' is_fast=false failed ($_); next run's pin step will self-heal"
+          }
 
       - name: Deactivate streaming event
         if: always()
@@ -5845,6 +7155,101 @@ jobs:
           Write-Host "PRODUCTION CONFIG VERIFIED"
           Write-Host "=========================================="
 
+      - name: "Defensive StopRecord on stream OBS (#361)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #361: OBS on the stream box (camera-box-owned) has RecordWhenStreaming,
+          # so our StartStream implicitly starts a recording that StopStream does
+          # NOT stop. Defensively StopRecord on teardown so a stray recording never
+          # outlives this job (a leftover recording blocks camera-box's
+          # rig-busy-gate). Best-effort: never fail the job on an unreachable OBS.
+          # StopRecord ONLY -- never StartRecord, never program routing (owner
+          # directive 2026-08-30: restreamer touches nothing in OBS but streaming;
+          # this defensive StopRecord is the single sanctioned exception, #361).
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            # Read messages until the RequestResponse (op=7) with our requestId --
+            # OBS may interleave events (op=5), so a single blind read could miss
+            # the response and mis-report outputActive as absent (fail-safe-wrong).
+            function Receive-Response($ws, $reqId) {
+              for ($k = 0; $k -lt 8; $k++) {
+                $m = Receive-OBSMessage $ws
+                if ($m.op -eq 7 -and $m.d.requestId -eq $reqId) { return $m }
+              }
+              return $null
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            # eventSubscriptions = 0: subscribe to NO OBS events, so the only
+            # frames OBS sends us are the op=7 RequestResponses we ask for. This
+            # makes Receive-Response deterministic (the response is always the
+            # first frame) -- no event burst can starve the 8-frame loop and
+            # cause a StopRecord to be wrongly skipped, and worst-case wall time
+            # stays well under this step's timeout-minutes (#361 review 2026-09-02).
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $null = Receive-OBSMessage $ws
+
+            $getRec = @{ op = 6; d = @{ requestType = "GetRecordStatus"; requestId = "teardown-rec-status" } } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getRec
+            $recResp = Receive-Response $ws "teardown-rec-status"
+            if ($recResp -and $recResp.d.responseData.outputActive) {
+              Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
+              $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
+              Send-OBSMessage $ws $stopRec
+              Write-Host "StopRecord issued (#361 defensive teardown)"
+              # ACK read in its OWN try/catch: a receive timeout here must NOT
+              # jump to the outer catch and print "skipped" -- the StopRecord was
+              # already sent (and near-certainly executed); mislabeling it would
+              # misdirect a future stray-recording investigation.
+              try { $null = Receive-Response $ws "teardown-rec-stop"; Write-Host "StopRecord acknowledged" }
+              catch { Write-Host "StopRecord issued; ACK not received (non-fatal): $_" }
+            } else {
+              Write-Host "No OBS recording active -- nothing to stop (#361)"
+            }
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "Defensive StopRecord skipped (non-fatal on teardown): $_"
+          }
+
   e2e-fb-push-stream-lan:
     name: E2E FB Push (stream-lan, real FB)
     # Sequence AFTER both Streaming + OBS-YouTube tests on the same stream-lan
@@ -5864,7 +7269,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 60
+    timeout-minutes: 120 # ~32min real work + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -5884,6 +7289,14 @@ jobs:
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      # #349: before touching the shared rig's OBS, wait out any active
+      # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
+      # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
+      - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
+        shell: powershell
+        timeout-minutes: 65
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: Configure Hetzner API token
         shell: powershell
@@ -6224,6 +7637,16 @@ jobs:
           $null = Receive-OBSMessage $ws
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
           try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+      # #349: final short-budget rig-lease re-check RIGHT before OBS starts
+      # streaming (via the API below), closing the TOCTOU gap between the
+      # post-checkout check and here. Short budget (10 min); fail-open; exit 0.
+      - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
+        shell: powershell
+        timeout-minutes: 12
+        env:
+          RIG_LEASE_BUDGET_S: "600"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: Start OBS stream + delivery
         shell: powershell
@@ -6792,6 +8215,102 @@ jobs:
             try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "OBS stop/restore failed (non-fatal on teardown): $_"
+          }
+
+      - name: "Defensive StopRecord on stream OBS (#361)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #361: OBS on the stream box (camera-box-owned) has RecordWhenStreaming,
+          # so starting the OBS stream (this job does it via POST
+          # /api/v1/obs/start-stream) implicitly starts a recording that StopStream
+          # does NOT stop. Defensively StopRecord on teardown so a stray recording
+          # never outlives this job (a leftover recording blocks camera-box's
+          # rig-busy-gate). Best-effort: never fail the job on an unreachable OBS.
+          # StopRecord ONLY -- never StartRecord, never program routing (owner
+          # directive 2026-08-30; this defensive StopRecord is the sanctioned
+          # exception, #361).
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            # Read until the RequestResponse (op=7) with our requestId -- OBS may
+            # interleave events (op=5), so a single blind read could miss the
+            # response and mis-report outputActive as absent (fail-safe-wrong).
+            function Receive-Response($ws, $reqId) {
+              for ($k = 0; $k -lt 8; $k++) {
+                $m = Receive-OBSMessage $ws
+                if ($m.op -eq 7 -and $m.d.requestId -eq $reqId) { return $m }
+              }
+              return $null
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            # eventSubscriptions = 0: subscribe to NO OBS events, so the only
+            # frames OBS sends us are the op=7 RequestResponses we ask for. This
+            # makes Receive-Response deterministic (the response is always the
+            # first frame) -- no event burst can starve the 8-frame loop and
+            # cause a StopRecord to be wrongly skipped, and worst-case wall time
+            # stays well under this step's timeout-minutes (#361 review 2026-09-02).
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $null = Receive-OBSMessage $ws
+
+            $getRec = @{ op = 6; d = @{ requestType = "GetRecordStatus"; requestId = "teardown-rec-status" } } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getRec
+            $recResp = Receive-Response $ws "teardown-rec-status"
+            if ($recResp -and $recResp.d.responseData.outputActive) {
+              Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
+              $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
+              Send-OBSMessage $ws $stopRec
+              Write-Host "StopRecord issued (#361 defensive teardown)"
+              # ACK read in its OWN try/catch: a receive timeout here must NOT
+              # jump to the outer catch and print "skipped" -- the StopRecord was
+              # already sent (and near-certainly executed); mislabeling it would
+              # misdirect a future stray-recording investigation.
+              try { $null = Receive-Response $ws "teardown-rec-stop"; Write-Host "StopRecord acknowledged" }
+              catch { Write-Host "StopRecord issued; ACK not received (non-fatal): $_" }
+            } else {
+              Write-Host "No OBS recording active -- nothing to stop (#361)"
+            }
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "Defensive StopRecord skipped (non-fatal on teardown): $_"
           }
 
   e2e-gate:
