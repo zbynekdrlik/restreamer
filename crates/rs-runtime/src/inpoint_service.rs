@@ -40,8 +40,28 @@ pub(crate) struct InpointService {
 impl InpointService {
     /// Start the ingest runtime, then the supervision loop on the current
     /// runtime. Call it inside a tokio runtime.
-    pub(crate) fn start(p: InpointParams) -> std::io::Result<Self> {
-        let ingest = IngestRuntime::start()?;
+    pub(crate) fn start(p: InpointParams) -> Self {
+        Self::start_on(p, IngestRuntime::start())
+    }
+
+    /// [`InpointService::start`] with the ingest runtime given. If it could
+    /// not be started (no thread could be created), the RTMP server runs on
+    /// the current runtime as before #368: degraded and logged, but the app
+    /// keeps serving (#106), never a dead service.
+    fn start_on(p: InpointParams, ingest: std::io::Result<IngestRuntime>) -> Self {
+        let ingest = match ingest {
+            Ok(ingest) => Some(ingest),
+            Err(e) => {
+                log::error!(
+                    "ingest runtime NOT started ({e}); the RTMP inpoint runs on the app \
+                     runtime, unprotected from its stalls (#368)"
+                );
+                None
+            }
+        };
+        let server_runtime = ingest
+            .as_ref()
+            .map_or_else(Handle::current, |ingest| ingest.handle().clone());
         let sink = Arc::clone(&p.flv_chunk_sink);
         let supervisor = tokio::spawn(crate::orchestrator::run_inpoint_loop(
             p.bind,
@@ -51,13 +71,13 @@ impl InpointService {
             p.ws_tx,
             p.restart_rx,
             p.shutdown_rx,
-            ingest.handle().clone(),
+            server_runtime,
         ));
-        Ok(Self {
+        Self {
             supervisor: Some(supervisor),
-            ingest: Some(ingest),
+            ingest,
             sink: Some(sink),
-        })
+        }
     }
 
     /// The ingest runtime, for the stall detector's probe. `None` once
@@ -89,8 +109,9 @@ impl InpointService {
         }
         if let Some(mut ingest) = self.ingest.take() {
             // Joining the thread blocks: never on an async worker.
-            if let Err(e) = tokio::task::spawn_blocking(move || ingest.shutdown()).await {
-                log::error!("ingest runtime shutdown task failed: {e}");
+            match tokio::task::spawn_blocking(move || ingest.shutdown()).await {
+                Ok(joined) => log::info!("ingest runtime shut down (thread joined: {joined})"),
+                Err(e) => log::error!("ingest runtime shutdown task failed: {e}"),
             }
         }
         supervised

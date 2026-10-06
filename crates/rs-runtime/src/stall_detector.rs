@@ -436,7 +436,7 @@ pub fn spawn_runtime_stall_detector(
     let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
     let detector = Detector::new(runtime, handle, config, audit_tx);
     let thread = std::thread::Builder::new()
-        .name("stall-detector".into())
+        .name(format!("stall-detector-{runtime}"))
         .spawn(move || detector.run(stop_rx))?;
     Ok(StallDetectorGuard {
         stop_tx: Some(stop_tx),

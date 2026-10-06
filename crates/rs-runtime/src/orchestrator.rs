@@ -526,8 +526,7 @@ impl ServiceCore {
             ws_tx: ws_tx.clone(),
             restart_rx: inpoint_restart_rx,
             shutdown_rx: shutdown.subscribe(),
-        })
-        .context("failed to start the RTMP inpoint")?;
+        });
         // #368: a second stall detector probes the ingest runtime
         // (`logs/stall-ingest.log`, rows labelled runtime=ingest).
         let ingest_stall_detector = inpoint.ingest_handle().and_then(|ingest| {

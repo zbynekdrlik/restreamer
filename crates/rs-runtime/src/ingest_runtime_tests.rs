@@ -56,7 +56,7 @@ fn tasks_and_blocking_io_run_on_the_ingest_runtime_threads() {
     assert_eq!(task_thread.as_deref(), Some(INGEST_THREAD_NAME));
     let io_thread = wait(rt.handle().spawn_blocking(current_thread_name)).unwrap();
     assert_eq!(io_thread.as_deref(), Some(INGEST_BLOCKING_THREAD_NAME));
-    rt.shutdown();
+    assert!(rt.shutdown());
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn the_priority_is_raised_on_the_ingest_thread_itself() {
             now: OsCall::Done(THREAD_PRIORITY_HIGHEST),
         }
     );
-    rt.shutdown();
+    assert!(rt.shutdown());
 }
 
 /// `shutdown` stops the runtime and waits for its thread: a blocking task
@@ -103,7 +103,7 @@ fn shutdown_stops_the_runtime_and_joins_its_thread() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    rt.shutdown();
+    assert!(rt.shutdown(), "the thread exited in time");
     assert!(!rt.is_running(), "shutdown joins the runtime thread");
     assert!(
         written.load(Ordering::SeqCst),
@@ -141,4 +141,44 @@ fn dropping_the_runtime_stops_it() {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// A task blocking the ingest thread (the bug class #368 isolates) must not
+/// hang the app's exit: `shutdown` gives up after its join timeout, leaves
+/// the thread running and says so. Once the thread is free, a second
+/// shutdown joins it.
+#[test]
+fn shutdown_gives_up_on_a_wedged_thread() {
+    let mut rt = IngestRuntime::start().expect("ingest runtime");
+    rt.join_timeout = Duration::from_millis(200);
+    let wedged = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    {
+        let (wedged, release) = (Arc::clone(&wedged), Arc::clone(&release));
+        rt.handle().spawn(async move {
+            wedged.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !release.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !wedged.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the wedging task never ran");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let asked = Instant::now();
+    assert!(!rt.shutdown(), "a wedged thread cannot be joined in time");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "shutdown gave up after its join timeout, it did not hang"
+    );
+    assert!(rt.is_running(), "the wedged thread is still reported");
+
+    release.store(true, Ordering::SeqCst);
+    rt.join_timeout = Duration::from_secs(10);
+    assert!(rt.shutdown(), "a freed thread exits and is joined");
+    assert!(!rt.is_running());
 }

@@ -31,6 +31,10 @@ pub const INGEST_BLOCKING_THREAD_NAME: &str = "restreamer-ingest-io";
 /// How long a shutdown waits for blocking tasks still running (a chunk file
 /// write) before it lets them go.
 pub const INGEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`IngestRuntime::shutdown`] waits for the thread to exit. A
+/// healthy one exits within `INGEST_SHUTDOWN_TIMEOUT`; one wedged by a
+/// blocking call never would, and must not hang the app's exit.
+pub const INGEST_JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The ingest runtime and the thread that drives it.
 ///
@@ -42,6 +46,9 @@ pub struct IngestRuntime {
     thread_priority: ThreadPriorityReport,
     stop_tx: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Closed (or sent to) when the thread ends.
+    exited_rx: std::sync::mpsc::Receiver<()>,
+    join_timeout: Duration,
 }
 
 impl IngestRuntime {
@@ -54,10 +61,14 @@ impl IngestRuntime {
     /// [`IngestRuntime::start`] with the OS priority calls given.
     pub fn start_with<O: PriorityOs + Send + 'static>(os: O) -> std::io::Result<Self> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (exited_tx, exited_rx) = std::sync::mpsc::channel::<()>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let thread = std::thread::Builder::new()
             .name(INGEST_THREAD_NAME.into())
             .spawn(move || {
+                // Dropped on every exit path (a panic too): `shutdown` then
+                // knows the thread ended.
+                let _exited = exited_tx;
                 let thread_priority = raise_ingest_thread(&os);
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -107,6 +118,8 @@ impl IngestRuntime {
             thread_priority,
             stop_tx: Some(stop_tx),
             thread: Some(thread),
+            exited_rx,
+            join_timeout: INGEST_JOIN_TIMEOUT,
         })
     }
 
@@ -125,14 +138,32 @@ impl IngestRuntime {
         self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
 
-    /// Stop the runtime and wait for its thread to exit. Tasks still running
-    /// are dropped; blocking tasks get up to [`INGEST_SHUTDOWN_TIMEOUT`].
+    /// Stop the runtime and wait for its thread to exit, at most
+    /// [`INGEST_JOIN_TIMEOUT`]. Tasks still running are dropped; blocking
+    /// tasks get up to [`INGEST_SHUTDOWN_TIMEOUT`]. Returns `false` when the
+    /// thread did not exit in time (a task blocking it): it is then left
+    /// running and still reported by [`IngestRuntime::is_running`].
     /// Blocking: from async code call it through `spawn_blocking`.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> bool {
         self.stop_tx.take();
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                log::error!("ingest runtime thread {INGEST_THREAD_NAME} panicked");
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        match self.exited_rx.recv_timeout(self.join_timeout) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if thread.join().is_err() {
+                    log::error!("ingest runtime thread {INGEST_THREAD_NAME} panicked");
+                }
+                true
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                log::error!(
+                    "ingest runtime thread {INGEST_THREAD_NAME} did not exit within {:?} \
+                     (a task is blocking it); left running",
+                    self.join_timeout
+                );
+                self.thread = Some(thread);
+                false
             }
         }
     }

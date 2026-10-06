@@ -197,19 +197,17 @@ fn start_inpoint_with(clock: RecordingClock) -> Harness {
     let (restart_tx, restart_rx) = mpsc::channel(1);
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
     let (ws_tx, _) = broadcast::channel(16);
-    let service = main_rt
-        .block_on(async {
-            InpointService::start(InpointParams {
-                bind: "127.0.0.1".into(),
-                port,
-                flv_chunk_sink: Arc::clone(&flv_chunk_sink),
-                inpoint_state: InpointState::new(),
-                ws_tx,
-                restart_rx,
-                shutdown_rx,
-            })
+    let service = main_rt.block_on(async {
+        InpointService::start(InpointParams {
+            bind: "127.0.0.1".into(),
+            port,
+            flv_chunk_sink: Arc::clone(&flv_chunk_sink),
+            inpoint_state: InpointState::new(),
+            ws_tx,
+            restart_rx,
+            shutdown_rx,
         })
-        .expect("the inpoint starts");
+    });
     Harness {
         main_rt,
         service,
@@ -295,12 +293,43 @@ fn inpoint_restart_and_stop_run_on_the_dedicated_ingest_thread() {
     h.restart_tx
         .blocking_send(())
         .expect("the supervision loop takes restart requests");
-    spawn_publisher(h.port, Duration::from_millis(1_500))
-        .join()
-        .expect("publisher thread")
-        .expect("publish after the restart");
-    h.clock.wait_for_calls(first.len() + 3, "after the restart");
-    assert_all_on_ingest_thread(&h.clock.calls()[first.len()..], "after the restart");
+    // The loop has taken the request once the channel has room again; it
+    // then stops the old server (its MediaReceiver goes with it) within
+    // milliseconds. Frames processed after `restarted` can only have come
+    // through the NEW server.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.restart_tx.capacity() < h.restart_tx.max_capacity() {
+        assert!(
+            Instant::now() < deadline,
+            "the supervision loop never took the restart request"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let restarted = Instant::now() + Duration::from_millis(300);
+    let mut after = Vec::new();
+    // A publisher that reached the old server just before it stopped
+    // publishes into nothing: publish again until the new server has it.
+    for _ in 0..3 {
+        spawn_publisher(h.port, Duration::from_millis(1_500))
+            .join()
+            .expect("publisher thread")
+            .expect("publish after the restart");
+        after = h
+            .clock
+            .calls()
+            .into_iter()
+            .filter(|(at, _)| *at > restarted)
+            .collect();
+        if after.len() >= 3 {
+            break;
+        }
+    }
+    assert!(
+        after.len() >= 3,
+        "the restarted server processed no frames ({} clock reads)",
+        after.len()
+    );
+    assert_all_on_ingest_thread(&after, "after the restart");
 
     h.stop();
     assert!(
