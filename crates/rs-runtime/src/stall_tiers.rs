@@ -109,6 +109,11 @@ impl StallAuditGate {
     pub fn take_due(&mut self, now: Instant) -> Option<Suppressed> {
         self.throttle.take_due(now)
     }
+
+    /// The held-back aggregate regardless of the interval (the detector stops).
+    pub fn take_pending(&mut self) -> Option<Suppressed> {
+        self.throttle.take_pending()
+    }
 }
 
 /// The detector configuration the settings ask for, made consistent. Each
@@ -189,6 +194,8 @@ pub fn baseline_every_ticks(probe_interval: Duration) -> u32 {
 /// The tier fields of the `detector_started` record.
 pub fn tier_fields(cfg: &StallDetectorConfig) -> Value {
     json!({
+        // `stall_threshold_ms` (the #367 name) is the same value.
+        "record_threshold_ms": stall_log::ms(cfg.stall_threshold),
         "audit_threshold_ms": stall_log::ms(cfg.audit_threshold),
         "severe_threshold_ms": stall_log::ms(cfg.severe_threshold),
         "audit_min_interval_ms": stall_log::ms(cfg.audit_min_interval),

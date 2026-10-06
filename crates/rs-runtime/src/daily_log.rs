@@ -33,6 +33,10 @@ pub const KEEP_DAYS: usize = 14;
 /// The wall clock the writer rolls on.
 pub type Clock = Box<dyn Fn() -> DateTime<Utc> + Send>;
 
+/// Archives of one day at most (`.1` ... `.N`); past that, archiving fails
+/// and logging continues in the live file.
+pub const MAX_ARCHIVES_PER_DAY: u32 = 1_000;
+
 /// `restreamer.log` that rolls daily. Implements `Write` for
 /// `tracing_appender::non_blocking`.
 pub struct DailyLogFile {
@@ -41,20 +45,12 @@ pub struct DailyLogFile {
     day: NaiveDate,
     file: Option<File>,
     clock: Clock,
-}
-
-impl std::fmt::Debug for DailyLogFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DailyLogFile")
-            .field("dir", &self.dir)
-            .field("keep_days", &self.keep_days)
-            .field("day", &self.day)
-            .finish()
-    }
+    /// `fs::rename`; tests inject a refusing one to reach the fallback.
+    rename: fn(&Path, &Path) -> io::Result<()>,
 }
 
 /// `restreamer.<day>.log`, or `restreamer.<day>.<n>.log` for `n > 0` (a
-/// second archive of the same day, e.g. after a wall-clock step back).
+/// second archive of the same day, e.g. after a wall-clock step).
 pub fn archive_name(day: NaiveDate, n: u32) -> String {
     if n == 0 {
         format!("{LOG_STEM}.{}.log", day.format("%Y-%m-%d"))
@@ -97,6 +93,7 @@ impl DailyLogFile {
             day: today,
             file: None,
             clock,
+            rename: |from, to| fs::rename(from, to),
         };
         let mut note = None;
         if let Some(day) = log.live_file_day() {
@@ -138,11 +135,15 @@ impl DailyLogFile {
     /// without delete sharing), the content is copied and the live file
     /// truncated instead.
     fn archive_live(&self, day: NaiveDate) -> io::Result<()> {
-        let target = (0..)
+        let target = (0..MAX_ARCHIVES_PER_DAY)
             .map(|n| self.dir.join(archive_name(day, n)))
             .find(|p| !p.exists())
-            .expect("an unbounded range always yields a free name");
-        if fs::rename(self.live_path(), &target).is_ok() {
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{MAX_ARCHIVES_PER_DAY} archives of {day} already exist"
+                ))
+            })?;
+        if (self.rename)(&self.live_path(), &target).is_ok() {
             return Ok(());
         }
         fs::copy(self.live_path(), &target)?;
@@ -218,8 +219,10 @@ impl DailyLogFile {
 
 impl Write for DailyLogFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Any day change rolls, a clock step back too: a wrong clock that is
+        // corrected later must not freeze the roll until the next restart.
         let today = (self.clock)().date_naive();
-        if today > self.day {
+        if today != self.day {
             self.roll(today);
         }
         if self.file.is_none() {

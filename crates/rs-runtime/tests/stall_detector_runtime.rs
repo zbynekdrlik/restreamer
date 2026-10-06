@@ -571,3 +571,33 @@ fn a_stall_storm_writes_one_row_then_an_aggregate() {
     assert!(aggregate.detail["held_back"]["max"].as_u64().unwrap() >= 700);
     assert_eq!(stall_ends(&log_path).len(), 3, "stall.log keeps all three");
 }
+
+/// Stalls the throttle still holds back when the detector stops reach the
+/// audit log as one aggregate row (#368 review).
+#[test]
+fn held_back_stalls_are_flushed_when_the_detector_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = StallDetectorConfig {
+        audit_min_interval: Duration::from_secs(60),
+        ..production_tiers(dir.path())
+    };
+    let log_path = cfg.log_path.clone();
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, _) =
+        spawn_and_block_with(MAIN_RUNTIME, cfg, audit_tx, Duration::from_millis(900));
+    drive_until_stall_ends(&rt, &log_path, 1, Duration::from_millis(150));
+    rt.block_on(async { std::thread::sleep(Duration::from_millis(900)) });
+    drive_until_stall_ends(&rt, &log_path, 2, Duration::from_millis(150));
+    let first = audit_rx.try_recv().expect("the first stall is audited");
+    assert_eq!(first.detail["tier"], "major");
+    assert!(audit_rx.try_recv().is_err(), "the second is held back");
+
+    guard.stop();
+    let aggregate = audit_rx.try_recv().expect("flushed at stop");
+    assert_eq!(aggregate.detail["aggregate"], true);
+    assert_eq!(aggregate.detail["held_back"]["count"], 1);
+    assert_eq!(
+        records(&log_path).last().unwrap()["event"],
+        "detector_stopped"
+    );
+}

@@ -2560,15 +2560,21 @@ jobs:
           }
 
           # restreamer.log entries at or after $sinceMs as {Ms, Text}, oldest
-          # first. Lines start "2026-10-05T20:33:29.387602Z  INFO ...". The
-          # rotated file is read too when it changed since then, so a rotation
-          # in the middle of the step loses nothing.
+          # first. Lines start "2026-10-05T20:33:29.387602Z  INFO ...". Every
+          # rotated file that changed since then is read too, so a rotation in
+          # the middle of the step loses nothing: the daily archives
+          # restreamer.<YYYY-MM-DD>[.N].log (#368, a step crossing UTC
+          # midnight) and the legacy restreamer.log.old (before #368).
           function Get-RestreamerLog([int64]$sinceMs) {
             $since = [DateTimeOffset]::FromUnixTimeMilliseconds($sinceMs).UtcDateTime
             $sinceIso = $since.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
             $lines = @()
             $old = "$logPath.old"
             if ((Test-Path $old) -and (Get-Item $old).LastWriteTimeUtc -ge $since) { $lines += Read-LogTail $old }
+            $rotated = @(Get-ChildItem -Path (Split-Path $logPath) -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^restreamer\.\d{4}-\d{2}-\d{2}(\.\d+)?\.log$' -and $_.LastWriteTimeUtc -ge $since } |
+              Sort-Object LastWriteTimeUtc)
+            foreach ($file in $rotated) { $lines += Read-LogTail $file.FullName }
             $lines += Read-LogTail $logPath
             foreach ($line in $lines) {
               if ($line.Length -lt 28 -or [string]::CompareOrdinal($line, 0, $sinceIso, 0, 23) -lt 0) { continue }

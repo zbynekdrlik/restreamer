@@ -526,6 +526,7 @@ impl MediaReceiver {
             }),
         );
         self.flv_chunk_sink.start_new_session().await;
+        self.gaps.reset_session();
         self.session = Some(Session::new(identifier));
     }
 
@@ -661,7 +662,7 @@ impl MediaReceiver {
             }
         }
         info!("Subscribed to stream, processing frames");
-        self.gaps.reset_stream();
+        self.gaps.reset_subscription();
         self.phase = Phase::Streaming {
             frames,
             info,
@@ -686,7 +687,12 @@ impl MediaReceiver {
             }
         }
         match &frame {
-            FrameData::Video { timestamp, .. } => self.note_gaps(Some(*timestamp)),
+            // A replayed AVC sequence header carries its original ts (OBS:
+            // 0): it is an arrival, but not a step of the video timeline.
+            FrameData::Video { timestamp, data } => {
+                let sequence_header = data.len() > 1 && data[1] == 0x00;
+                self.note_gaps((!sequence_header).then_some(*timestamp));
+            }
             FrameData::Audio { .. } => self.note_gaps(None),
             FrameData::MediaInfo { .. } | FrameData::MetaData { .. } => {}
         }
@@ -716,7 +722,7 @@ impl MediaReceiver {
         };
         let (gaps, rows) = self.gaps.on_frame(
             Instant::now(),
-            SystemWallClock.now_ms(),
+            || SystemWallClock.now_ms(),
             video_ts,
             &session.identifier,
             self.inpoint_state.ingest_gaps(),
@@ -799,6 +805,7 @@ impl MediaReceiver {
         info!(reason, "Stream ended: {}", s.identifier);
         let held = self.gaps.flush(None, &s.identifier);
         crate::ingest_gap::record_rows(self.inpoint_state.audit_tx(), held);
+        self.inpoint_state.ingest_gaps().set_frame_interval_us(0);
         let duration_secs = self.inpoint_state.mark_disconnected();
         self.audit_rtmp(
             rs_core::audit::Action::RtmpDisconnected,

@@ -5,6 +5,10 @@
 # (#368 ROZHODNUTE issuecomment-6013075985 item 4). Use the tokio
 # equivalent, or `spawn_blocking` for genuinely blocking work.
 #
+# The lint sees only call sites IN this crate: a blocking call inside rs-core,
+# xiu or another dependency that the ingest path calls is not caught (the
+# rs-core LogBuffer and the stall probe were made lock-free by hand, #368).
+#
 # A test that legitimately uses one (reading a chunk file back, a std Mutex
 # in a test hub) allows it with `#[allow(clippy::disallowed_methods, reason = ..)]`
 # on its test module.
@@ -32,6 +36,20 @@ disallowed-methods = [
     { path = "std::fs::File::sync_all", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
     { path = "std::fs::File::sync_data", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
     { path = "std::fs::OpenOptions::open", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::create_dir", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::remove_dir", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::canonicalize", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::symlink_metadata", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::path::Path::exists", reason = "a blocking stat on the ingest thread: use tokio::fs::try_exists (#368)" },
+    { path = "std::path::Path::try_exists", reason = "a blocking stat on the ingest thread: use tokio::fs::try_exists (#368)" },
+    { path = "std::path::Path::is_file", reason = "a blocking stat on the ingest thread: use tokio::fs::metadata (#368)" },
+    { path = "std::path::Path::is_dir", reason = "a blocking stat on the ingest thread: use tokio::fs::metadata (#368)" },
+    { path = "std::path::Path::metadata", reason = "a blocking stat on the ingest thread: use tokio::fs::metadata (#368)" },
+    { path = "std::path::Path::read_dir", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::sync::Condvar::wait", reason = "blocks the ingest thread (#368)" },
+    { path = "std::sync::Condvar::wait_timeout", reason = "blocks the ingest thread (#368)" },
+    { path = "std::sync::Condvar::wait_while", reason = "blocks the ingest thread (#368)" },
+    { path = "std::sync::mpsc::SyncSender::send", reason = "blocks the ingest thread on a full channel: use a tokio channel (#368)" },
     { path = "std::sync::Mutex::lock", reason = "a std Mutex can block the ingest thread: use an atomic or a lock never held across work (#368)" },
     { path = "std::sync::RwLock::read", reason = "a std RwLock can block the ingest thread (#368)" },
     { path = "std::sync::RwLock::write", reason = "a std RwLock can block the ingest thread (#368)" },

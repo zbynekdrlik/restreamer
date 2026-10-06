@@ -21,9 +21,24 @@
 //! step over [`MAX_COUNTED_JUMP_MS`] (the chunker's `FarForward` bound) is a
 //! timeline discontinuity, a backward step a restart: neither counts frames.
 //!
+//! How exact the count is: once the cumulative mean has taken over (32
+//! normal deltas, about 1 s at 30 fps) the estimate is within ~1/N ms of the
+//! true interval, so a jump of up to several hundred frames is counted
+//! exactly. Before that (the window phase) a jump of more than ~100 frames
+//! can be off by one, and frames dropped during the 8-delta warm-up are seen
+//! only as an arrival gap.
+//!
+//! Sessions and subscriptions: a new session (a new publisher) forgets
+//! everything; a re-subscription of the same session forgets only the video
+//! timeline (xiu replays its GOP cache), so the stall that led to it is
+//! still ONE measured arrival gap. A replayed AVC sequence header is an
+//! arrival, never a video step (the receiver passes no ts for it).
+//!
 //! Cost on the ingest thread: a few integer ops per frame, a 16-entry sort
-//! per video frame, atomics for the counters, and an `audit::record`
-//! (`try_send`) per row the throttle lets through. No lock, no await.
+//! per video frame, atomics for the counters, a wall-clock read only for a
+//! frame with an incident, and an `audit::record` (`try_send`) per row the
+//! throttle lets through. No lock, no await; the incident's log line goes
+//! through `LogBuffer::push`, which never waits either.
 
 use std::fmt::Display;
 use std::time::Duration;
@@ -136,10 +151,18 @@ pub(crate) struct IngestGapTracker {
 }
 
 impl IngestGapTracker {
-    /// A new subscription: the wait for it is no gap, and its publisher may
-    /// run at another frame rate.
+    /// A new session (a new publisher): forget everything. The wait for it
+    /// is no gap, and the new publisher may run at another frame rate.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// A re-subscription of the same session: forget the video timeline
+    /// (xiu replays its cached GOP), but keep the arrival clock, so the
+    /// stall that led to the re-subscription is measured as a gap.
+    pub(crate) fn reset_video(&mut self) {
+        self.last_video_ts = None;
+        self.interval = FrameInterval::default();
     }
 
     /// A media frame arrived at `now`: the gap since the previous one, if it
@@ -155,17 +178,17 @@ impl IngestGapTracker {
         let Some(last) = self.last_video_ts.replace(ts) else {
             return VideoStep::Normal;
         };
-        if ts == last {
-            return VideoStep::Normal;
-        }
-        if ts < last || ts - last > MAX_COUNTED_JUMP_MS {
-            self.interval = FrameInterval::default();
-            return VideoStep::Discontinuity {
-                from_ts: last,
-                to_ts: ts,
-            };
-        }
-        let delta = ts - last;
+        let delta = match ts.cmp(&last) {
+            std::cmp::Ordering::Equal => return VideoStep::Normal,
+            std::cmp::Ordering::Greater if ts - last <= MAX_COUNTED_JUMP_MS => ts - last,
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Less => {
+                self.interval = FrameInterval::default();
+                return VideoStep::Discontinuity {
+                    from_ts: last,
+                    to_ts: ts,
+                };
+            }
+        };
         let Some(interval_ms) = self.interval.estimate() else {
             self.interval.accept(delta, false);
             return VideoStep::Normal;
@@ -242,23 +265,31 @@ pub(crate) fn ingest_frame_gap_row(detail: Value) -> AuditRow {
 }
 
 impl IngestGapMonitor {
-    /// A new subscription started (see [`IngestGapTracker::reset`]).
-    pub(crate) fn reset_stream(&mut self) {
+    /// A new session started (see [`IngestGapTracker::reset`]).
+    pub(crate) fn reset_session(&mut self) {
         self.tracker.reset();
     }
 
-    /// One media frame (`video_ts` for video) arrived at `now`, `wall_ms`
-    /// Unix-epoch ms. Counts the incidents into `counters` and returns the
-    /// `IngestFrameGap` details the throttles let through, plus what the
-    /// frame revealed (for the log line).
+    /// The session re-subscribed (see [`IngestGapTracker::reset_video`]).
+    pub(crate) fn reset_subscription(&mut self) {
+        self.tracker.reset_video();
+    }
+
+    /// One media frame (`video_ts` for a video frame that is not a sequence
+    /// header) arrived at `now`. `wall` gives Unix-epoch ms; it is read only
+    /// when the frame reveals an incident. Counts the incidents into
+    /// `counters` and returns the `IngestFrameGap` details the throttles let
+    /// through, plus what the frame revealed (for the log line).
     pub(crate) fn on_frame<S: Display + ?Sized>(
         &mut self,
         now: Instant,
-        wall_ms: i64,
+        wall: impl Fn() -> i64,
         video_ts: Option<u32>,
         stream: &S,
         counters: &IngestGapCounters,
     ) -> (FrameGaps, Vec<Value>) {
+        let wall_cell = std::cell::OnceCell::new();
+        let wall_ms = || *wall_cell.get_or_init(&wall);
         let gaps = FrameGaps {
             arrival: self.tracker.on_media(now),
             video: video_ts.map_or(VideoStep::Normal, |ts| self.tracker.on_video(ts)),
@@ -269,20 +300,20 @@ impl IngestGapMonitor {
         let mut rows = Vec::new();
         let at = now.into_std();
         if let Some(gap) = gaps.arrival {
-            counters.record_arrival_gap(ms(gap), wall_ms);
+            counters.record_arrival_gap(ms(gap), wall_ms());
             if let Admission::Emit { suppressed } = self.arrival_audit.admit(at, ms(gap)) {
                 rows.push(json!({
                     "kind": ARRIVAL_GAP,
                     "gap_ms": ms(gap),
                     "threshold_ms": ms(ARRIVAL_GAP_THRESHOLD),
-                    "resumed_at_ms": wall_ms,
+                    "resumed_at_ms": wall_ms(),
                     "stream_identifier": stream.to_string(),
                     "held_back_before": held_json(suppressed, "ms"),
                 }));
             }
         }
         if let VideoStep::Jump(j) = gaps.video {
-            counters.record_source_jump(j.dropped, wall_ms);
+            counters.record_source_jump(j.dropped, wall_ms());
             if let Admission::Emit { suppressed } = self.jump_audit.admit(at, j.dropped) {
                 rows.push(json!({
                     "kind": SOURCE_TS_JUMP,
@@ -291,7 +322,7 @@ impl IngestGapMonitor {
                     "delta_ms": j.delta_ms,
                     "frame_interval_ms": (j.interval_ms * 1_000.0).round() / 1_000.0,
                     "dropped_frames": j.dropped,
-                    "at_ms": wall_ms,
+                    "at_ms": wall_ms(),
                     "stream_identifier": stream.to_string(),
                     "held_back_before": held_json(suppressed, "frames"),
                 }));

@@ -205,10 +205,25 @@ fn tier_fields_and_with_fields_extend_a_record() {
         rec,
         json!({
             "event": "detector_started",
+            "record_threshold_ms": 500,
             "audit_threshold_ms": 700,
             "severe_threshold_ms": 5_000,
             "audit_min_interval_ms": 10_000,
         })
     );
     assert_eq!(with_fields(&json!("x"), &json!({"a": 1})), json!("x"));
+}
+
+#[test]
+fn take_pending_hands_over_the_aggregate_at_once() {
+    let mut gate = StallAuditGate::new(&prod());
+    let t0 = Instant::now();
+    gate.on_stall_end(t0, ms(800));
+    assert_eq!(
+        gate.on_stall_end(t0 + ms(1), ms(900)),
+        StallVerdict::HeldBack
+    );
+    let held = gate.take_pending().expect("held back");
+    assert_eq!((held.count, held.max), (1, 900));
+    assert_eq!(gate.take_pending(), None);
 }

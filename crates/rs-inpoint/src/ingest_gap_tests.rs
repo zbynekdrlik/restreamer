@@ -251,7 +251,7 @@ fn the_monitor_counts_and_audits_both_kinds_then_throttles() {
     for k in 0..=100 {
         let (gaps, rows) = m.on_frame(
             frame(k),
-            1_000 + k as i64,
+            || 1_000 + k as i64,
             Some(ts(k, 30.0)),
             "live/obs",
             &counters,
@@ -271,7 +271,13 @@ fn the_monitor_counts_and_audits_both_kinds_then_throttles() {
 
     // OBS stalled: 400 ms of silence, then a 10-frame ts jump.
     let resumed = frame(100) + Duration::from_millis(400);
-    let (gaps, rows) = m.on_frame(resumed, 50_000, Some(ts(110, 30.0)), "live/obs", &counters);
+    let (gaps, rows) = m.on_frame(
+        resumed,
+        || 50_000,
+        Some(ts(110, 30.0)),
+        "live/obs",
+        &counters,
+    );
     assert_eq!(gaps.arrival, Some(Duration::from_millis(400)));
     assert!(matches!(gaps.video, VideoStep::Jump(j) if j.dropped == 9));
     assert_eq!(rows.len(), 2, "{rows:?}");
@@ -306,7 +312,7 @@ fn the_monitor_counts_and_audits_both_kinds_then_throttles() {
 
     // A second incident 1 s later is counted, but its rows are held back.
     let again = resumed + Duration::from_millis(1_000);
-    let (_, rows) = m.on_frame(again, 51_000, Some(ts(113, 30.0)), "live/obs", &counters);
+    let (_, rows) = m.on_frame(again, || 51_000, Some(ts(113, 30.0)), "live/obs", &counters);
     assert!(rows.is_empty(), "throttled: {rows:?}");
     let snap = counters.snapshot();
     assert_eq!(
@@ -322,7 +328,7 @@ fn the_monitor_counts_and_audits_both_kinds_then_throttles() {
         let at = again + Duration::from_millis(33 * i);
         let (gaps, rows) = m.on_frame(
             at,
-            51_000 + i as i64,
+            || 51_000 + i as i64,
             Some(ts(113 + i, 30.0)),
             "live/obs",
             &counters,
@@ -367,9 +373,15 @@ fn the_end_of_a_stream_flushes_what_was_held_back() {
     let counters = IngestGapCounters::default();
     let mut m = IngestGapMonitor::default();
     let t0 = Instant::now();
-    m.on_frame(t0, 0, None, "s", &counters);
-    m.on_frame(t0 + Duration::from_millis(500), 0, None, "s", &counters);
-    let (_, rows) = m.on_frame(t0 + Duration::from_millis(1_000), 0, None, "s", &counters);
+    m.on_frame(t0, || 0, None, "s", &counters);
+    m.on_frame(t0 + Duration::from_millis(500), || 0, None, "s", &counters);
+    let (_, rows) = m.on_frame(
+        t0 + Duration::from_millis(1_000),
+        || 0,
+        None,
+        "s",
+        &counters,
+    );
     assert!(rows.is_empty());
     let rows = m.flush(None, "s");
     assert_eq!(
@@ -387,12 +399,12 @@ fn reset_stream_keeps_the_throttles() {
     let counters = IngestGapCounters::default();
     let mut m = IngestGapMonitor::default();
     let t0 = Instant::now();
-    m.on_frame(t0, 0, None, "s", &counters);
-    let (_, rows) = m.on_frame(t0 + Duration::from_millis(400), 0, None, "s", &counters);
+    m.on_frame(t0, || 0, None, "s", &counters);
+    let (_, rows) = m.on_frame(t0 + Duration::from_millis(400), || 0, None, "s", &counters);
     assert_eq!(rows.len(), 1);
-    m.reset_stream();
-    m.on_frame(t0 + Duration::from_millis(500), 0, None, "s", &counters);
-    let (gaps, rows) = m.on_frame(t0 + Duration::from_millis(900), 0, None, "s", &counters);
+    m.reset_session();
+    m.on_frame(t0 + Duration::from_millis(500), || 0, None, "s", &counters);
+    let (gaps, rows) = m.on_frame(t0 + Duration::from_millis(900), || 0, None, "s", &counters);
     assert_eq!(gaps.arrival, Some(Duration::from_millis(400)));
     assert!(
         rows.is_empty(),
@@ -464,4 +476,83 @@ fn record_rows_writes_one_ingest_frame_gap_row_per_detail() {
     );
     assert_eq!(rx.try_recv().unwrap().detail["kind"], "b");
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn exactly_one_and_a_half_intervals_is_not_a_jump() {
+    // 8 deltas of 34 ms: the window estimate is exactly 34 ms, so a 51 ms
+    // step is exactly 1.5 intervals: still normal (the bound is exclusive).
+    let mut t = IngestGapTracker::default();
+    for k in 0..=8u32 {
+        assert_eq!(t.on_video(k * 34), VideoStep::Normal);
+    }
+    assert_eq!(t.interval_us(), 34_000);
+    assert_eq!(t.on_video(8 * 34 + 51), VideoStep::Normal);
+    let mut t = IngestGapTracker::default();
+    for k in 0..=8u32 {
+        t.on_video(k * 34);
+    }
+    assert!(matches!(t.on_video(8 * 34 + 52), VideoStep::Jump(j) if j.dropped == 1));
+}
+
+#[test]
+fn the_next_row_after_the_interval_carries_what_was_held_back() {
+    let counters = IngestGapCounters::default();
+    let mut m = IngestGapMonitor::default();
+    let t0 = Instant::now();
+    let ms = Duration::from_millis;
+    m.on_frame(t0, || 0, None, "s", &counters);
+    let (_, rows) = m.on_frame(t0 + ms(400), || 1, None, "s", &counters);
+    assert_eq!(rows[0]["held_back_before"], Value::Null);
+    let (_, rows) = m.on_frame(t0 + ms(1_000), || 2, None, "s", &counters);
+    assert!(rows.is_empty(), "held back");
+    // The next gap ends exactly one interval after the first row.
+    let (_, rows) = m.on_frame(
+        t0 + ms(400) + AUDIT_MIN_INTERVAL,
+        || 3,
+        None,
+        "s",
+        &counters,
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["kind"], "arrival_gap");
+    assert_eq!(
+        rows[0]["held_back_before"],
+        json!({"count": 1, "max": 600, "total": 600, "unit": "ms", "span_ms": 0})
+    );
+
+    // Same for source-ts jumps (unit: frames).
+    let mut m = IngestGapMonitor::default();
+    let at = |k: u64| t0 + ms(33 * k);
+    for k in 0..=100 {
+        m.on_frame(at(k), || 0, Some(ts(k, 30.0)), "s", &counters);
+    }
+    let (_, rows) = m.on_frame(at(101), || 0, Some(ts(103, 30.0)), "s", &counters);
+    assert_eq!(rows[0]["held_back_before"], Value::Null);
+    let (_, rows) = m.on_frame(at(102), || 0, Some(ts(106, 30.0)), "s", &counters);
+    assert!(rows.is_empty(), "held back");
+    let later = at(101) + AUDIT_MIN_INTERVAL;
+    let (_, rows) = m.on_frame(later, || 0, Some(ts(110, 30.0)), "s", &counters);
+    let jump = rows
+        .iter()
+        .find(|r| r["kind"] == "source_ts_jump")
+        .expect("the jump row");
+    assert_eq!(jump["held_back_before"]["count"], 1);
+    assert_eq!(jump["held_back_before"]["total"], 2, "frames 104 and 105");
+    assert_eq!(jump["held_back_before"]["unit"], "frames");
+}
+
+#[test]
+fn a_resubscription_keeps_the_arrival_clock_but_not_the_video_timeline() {
+    let mut t = warmed(30.0, 100);
+    let t0 = Instant::now();
+    t.on_media(t0);
+    t.reset_video();
+    assert_eq!(t.interval_us(), 0, "the video timeline starts over");
+    assert_eq!(
+        t.on_media(t0 + Duration::from_secs(35)),
+        Some(Duration::from_secs(35)),
+        "the stall before the re-subscription is a gap"
+    );
+    assert_eq!(t.on_video(0), VideoStep::Normal, "no previous ts");
 }

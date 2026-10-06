@@ -224,15 +224,81 @@ fn prune_keeps_every_archive_of_a_kept_day() {
 }
 
 #[test]
-fn a_clock_step_back_never_rolls() {
+fn a_clock_step_back_rolls_without_losing_anything() {
     let dir = tempfile::tempdir().unwrap();
     let clock = TestClock::at("2026-10-05T00:00:10Z");
     let mut log = DailyLogFile::open_with_clock(dir.path(), KEEP_DAYS, clock.boxed()).unwrap();
     log.write_all(b"a\n").unwrap();
     clock.set("2026-10-04T23:59:59Z");
     log.write_all(b"b\n").unwrap();
-    assert!(archives(dir.path()).is_empty());
-    assert_eq!(read(&log.live_path()), "a\nb\n");
+    clock.set("2026-10-05T00:00:11Z");
+    log.write_all(b"c\n").unwrap();
+    assert_eq!(read(&dir.path().join("restreamer.2026-10-05.log")), "a\n");
+    assert_eq!(read(&dir.path().join("restreamer.2026-10-04.log")), "b\n");
+    assert_eq!(read(&log.live_path()), "c\n");
+}
+
+#[test]
+fn a_refused_rename_falls_back_to_copy_and_truncate() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::at("2026-10-04T10:00:00Z");
+    let mut log = DailyLogFile::open_with_clock(dir.path(), KEEP_DAYS, clock.boxed()).unwrap();
+    // Windows refuses to rename a file another process holds open without
+    // delete sharing (the tray's Get-Content -Wait).
+    log.rename = |_, _| Err(io::Error::other("held open"));
+    log.write_all(b"sunday\n").unwrap();
+    clock.set("2026-10-05T00:00:01Z");
+    log.write_all(b"monday\n").unwrap();
+    log.flush().unwrap();
+    assert_eq!(
+        read(&dir.path().join("restreamer.2026-10-04.log")),
+        "sunday\n"
+    );
+    assert_eq!(
+        read(&log.live_path()),
+        "monday\n",
+        "the live file was truncated"
+    );
+}
+
+#[test]
+fn a_failed_archive_is_noted_in_the_live_file_and_logging_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in 0..MAX_ARCHIVES_PER_DAY {
+        File::create(dir.path().join(archive_name(day("2026-10-04"), n))).unwrap();
+    }
+    let clock = TestClock::at("2026-10-04T10:00:00Z");
+    let mut log = DailyLogFile::open_with_clock(dir.path(), KEEP_DAYS, clock.boxed()).unwrap();
+    log.write_all(b"sunday\n").unwrap();
+    clock.set("2026-10-05T00:00:01Z");
+    log.write_all(b"monday\n").unwrap();
+    log.flush().unwrap();
+    let live = read(&log.live_path());
+    assert!(live.starts_with("sunday\n"), "{live}");
+    assert!(
+        live.contains(
+            "restreamer.log: archiving restreamer.2026-10-04.log failed \
+             (1000 archives of 2026-10-04 already exist)"
+        ),
+        "{live}"
+    );
+    assert!(live.ends_with("monday\n"), "{live}");
+}
+
+#[test]
+fn a_failed_prune_is_noted_in_the_live_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory with an archive's name cannot be removed as a file.
+    fs::create_dir(dir.path().join("restreamer.2026-09-01.log")).unwrap();
+    fs::write(dir.path().join("restreamer.2026-09-02.log"), "x").unwrap();
+    let clock = TestClock::at("2026-10-04T10:00:00Z");
+    let mut log = DailyLogFile::open_with_clock(dir.path(), 1, clock.boxed()).unwrap();
+    log.flush().unwrap();
+    let live = read(&log.live_path());
+    assert!(
+        live.contains("restreamer.log: pruning old log archives failed"),
+        "{live}"
+    );
 }
 
 #[test]

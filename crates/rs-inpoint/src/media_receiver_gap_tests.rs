@@ -107,11 +107,111 @@ async fn a_resubscription_starts_the_gap_measurement_over() {
         .await
         .expect("republish must be subscribed");
     for k in 0..30 {
-        tx.send(a_frame(ts30(k) + 90_000)).unwrap();
+        // 5 s ahead: without the reset this would be a counted jump.
+        tx.send(a_frame(ts30(k) + 5_000)).unwrap();
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
     let gaps = state.ingest_gaps().snapshot();
     assert_eq!(gaps.arrival_gaps, 0, "{gaps:?}");
     assert_eq!(gaps.source_ts_jumps, 0, "{gaps:?}");
     drop(tx);
+}
+
+/// The 30 s frame stall and the re-subscription that follows are ONE
+/// arrival gap of the same session, the biggest dropout there is (#368
+/// review): the re-subscription forgets the video timeline, never the
+/// arrival clock.
+#[tokio::test(start_paused = true)]
+async fn a_frame_stall_and_its_resubscription_are_one_measured_gap() {
+    let _wd = watchdog("a_frame_stall_and_its_resubscription_are_one_measured_gap");
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    for k in 0..30 {
+        tx.send(a_frame(ts30(k))).unwrap();
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    // The publisher stays registered but sends nothing: FRAME_TIMEOUT, then
+    // the receiver re-subscribes and gets a fresh frame channel.
+    let (tx_again, rx_again) = tokio::sync::mpsc::unbounded_channel();
+    *slot.lock().unwrap() = Some(rx_again);
+    next_accepted(&mut log_rx, FRAME_TIMEOUT + Duration::from_secs(5))
+        .await
+        .expect("the stalled subscription must be re-subscribed");
+    // xiu replays the GOP from an older timestamp: no jump, no discontinuity
+    // counted; the arrival gap is.
+    for k in 0..10 {
+        tx_again.send(a_frame(ts30(k))).unwrap();
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    let gaps = state.ingest_gaps().snapshot();
+    assert_eq!(gaps.arrival_gaps, 1, "{gaps:?}");
+    assert!(
+        gaps.last_arrival_gap_ms >= FRAME_TIMEOUT.as_millis() as u64,
+        "{gaps:?}"
+    );
+    assert_eq!(gaps.source_ts_jumps, 0, "{gaps:?}");
+    drop(tx);
+}
+
+/// A replayed AVC sequence header (ts 0) is an arrival, not a video step.
+#[tokio::test(start_paused = true)]
+async fn a_sequence_header_is_no_video_step() {
+    let _wd = watchdog("a_sequence_header_is_no_video_step");
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    for k in 0..60 {
+        tx.send(a_frame(ts30(k) + 20_000)).unwrap();
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    let header = FrameData::Video {
+        timestamp: 0,
+        data: bytes::BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01][..]),
+    };
+    tx.send(header).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // The next frame 20 s "after" the header would be a counted jump if the
+    // header were a step; it is the next normal frame instead.
+    for k in 60..90 {
+        tx.send(a_frame(ts30(k) + 20_000)).unwrap();
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    let gaps = state.ingest_gaps().snapshot();
+    assert_eq!(gaps.source_ts_jumps, 0, "{gaps:?}");
+    assert!(
+        gaps.frame_interval_us > 0,
+        "the estimate survived: {gaps:?}"
+    );
+    drop(tx);
+}
+
+/// The status no longer shows the previous stream's frame interval once it
+/// ended.
+#[tokio::test(start_paused = true)]
+async fn the_frame_interval_is_cleared_when_the_stream_ends() {
+    let _wd = watchdog("the_frame_interval_is_cleared_when_the_stream_ends");
+    let state = InpointState::new();
+    let (event_tx, slot, mut log_rx) =
+        running_receiver(Arc::new(FlvChunkSink::new_null()), state.clone());
+    let tx = publish(&slot, &event_tx, &test_identifier());
+    next_accepted(&mut log_rx, Duration::from_secs(5))
+        .await
+        .expect("publish must be subscribed");
+    for k in 0..30 {
+        tx.send(a_frame(ts30(k))).unwrap();
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    assert!(state.ingest_gaps().snapshot().frame_interval_us > 0);
+    drop(tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.ingest_gaps().snapshot().frame_interval_us, 0);
 }

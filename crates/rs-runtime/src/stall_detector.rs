@@ -40,8 +40,9 @@
 //! (where OBS starts dropping frames), `tier: "severe"` from 5 s.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
@@ -64,7 +65,10 @@ pub use stall_log::{DetectedStall, StallLog, WallAnchor};
 use tiers::{StallAuditGate, StallTier, StallVerdict};
 
 /// `stall.log` is rotated to `stall.log.old` once it reaches this size.
-pub const STALL_LOG_MAX_BYTES: u64 = 1_000_000;
+/// 10 MB since the #368 tiers record every stall from 500 ms (about 3 KB of
+/// records each), so a micro-stall-heavy day cannot rotate away last week's
+/// evidence; the pair is bounded at ~20 MB.
+pub const STALL_LOG_MAX_BYTES: u64 = 10_000_000;
 /// The app-wide runtime (Tauri's in GUI mode): DB, HTTP, delivery, uploads.
 pub const MAIN_RUNTIME: &str = "main";
 /// The dedicated RTMP ingest runtime (#368).
@@ -542,17 +546,46 @@ impl BaselineSchedule {
     }
 }
 
-/// The newest probe the runtime answered.
-#[derive(Debug, Default)]
-struct ProbeAck(Mutex<Option<(u64, Instant)>>);
+/// The newest probe the runtime answered. Two atomics, no lock (#368): the
+/// probe runs on the runtime it measures, the ingest one included, whose
+/// thread runs at THREAD_PRIORITY_HIGHEST, and must never wait for the
+/// detector thread. Exactly one probe is in flight, so the two stores of
+/// one answer never interleave with another's.
+#[derive(Debug)]
+struct ProbeAck {
+    /// Origin of `at_ns`.
+    anchor: Instant,
+    /// Nanoseconds from `anchor` when the newest answered probe ran.
+    at_ns: AtomicU64,
+    /// Its sequence number; 0 = none yet (sequences start at 1).
+    seq: AtomicU64,
+}
+
+impl Default for ProbeAck {
+    fn default() -> Self {
+        Self {
+            anchor: Instant::now(),
+            at_ns: AtomicU64::new(0),
+            seq: AtomicU64::new(0),
+        }
+    }
+}
 
 impl ProbeAck {
     fn record(&self, seq: u64, at: Instant) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((seq, at));
+        let ns = at.saturating_duration_since(self.anchor).as_nanos();
+        self.at_ns
+            .store(u64::try_from(ns).unwrap_or(u64::MAX), Ordering::Relaxed);
+        // Release: a reader that sees `seq` also sees its `at_ns`.
+        self.seq.store(seq, Ordering::Release);
     }
 
     fn latest(&self) -> Option<(u64, Instant)> {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+        let seq = self.seq.load(Ordering::Acquire);
+        (seq != 0).then(|| {
+            let ns = self.at_ns.load(Ordering::Relaxed);
+            (seq, self.anchor + Duration::from_nanos(ns))
+        })
     }
 }
 
@@ -647,6 +680,10 @@ impl Detector {
             }
         };
         self.write(&stall_log::stopped_record(&reason, WallAnchor::read()));
+        // Stalls the throttle still holds back reach the audit log too.
+        if let Some(held) = self.gate.take_pending() {
+            self.emit_aggregate(&held);
+        }
     }
 
     fn start(&mut self) {
@@ -771,29 +808,26 @@ impl Detector {
             &tier_json,
         ));
         let detected = self.open.take();
+        // Taken whatever the verdict: a later stall's row reports only
+        // errors from ITS OWN records.
+        let write_error = self.write_error.take();
         match self.gate.on_stall_end(now, report.duration) {
-            StallVerdict::LogOnly | StallVerdict::HeldBack => {
-                log::info!(
-                    "process stall: runtime={} tier={} class={} duration_ms={} (stall log only{}) evidence={}",
-                    self.runtime,
-                    tier.as_str(),
-                    report.class.as_str(),
-                    stall_log::ms(report.duration),
-                    if tier == StallTier::Minor {
-                        ""
-                    } else {
-                        ", audit row held back by the rate limit"
-                    },
-                    self.log.path().display()
-                );
+            StallVerdict::LogOnly => {
+                self.log_unaudited(report, tier, "stall log only", &write_error)
             }
+            StallVerdict::HeldBack => self.log_unaudited(
+                report,
+                tier,
+                "audit row held back by the rate limit",
+                &write_error,
+            ),
             StallVerdict::Audit { suppressed } => {
                 let detail = stall_log::audit_detail(
                     report,
                     detected.as_ref(),
                     &snap,
                     self.log.path(),
-                    self.write_error.take(),
+                    write_error,
                     at,
                 );
                 let extra = serde_json::json!({
@@ -804,6 +838,25 @@ impl Detector {
                 self.emit_after_recovery(report, stall_log::with_runtime(&detail, self.runtime));
             }
         }
+    }
+
+    /// The log line of a stall that gets no audit row.
+    fn log_unaudited(
+        &self,
+        report: &StallReport,
+        tier: StallTier,
+        why: &str,
+        write_error: &Option<String>,
+    ) {
+        log::info!(
+            "process stall: runtime={} tier={} class={} duration_ms={} ({why}) evidence={} evidence_write_error={}",
+            self.runtime,
+            tier.as_str(),
+            report.class.as_str(),
+            stall_log::ms(report.duration),
+            self.log.path().display(),
+            write_error.as_deref().unwrap_or("none")
+        );
     }
 
     /// Flush the stalls the throttle held back as one aggregate row.

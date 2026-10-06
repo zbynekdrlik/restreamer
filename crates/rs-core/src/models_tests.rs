@@ -161,6 +161,16 @@ fn inpoint_state_set_connected() {
     assert!(state.is_connected());
 }
 
+/// #368: the MediaReceiver counts frame gaps into its `InpointState` clone;
+/// the API reads them through its own clone.
+#[test]
+fn inpoint_state_clones_share_the_ingest_gap_counters() {
+    let state = InpointState::new();
+    let api_copy = state.clone();
+    state.ingest_gaps().record_source_jump(11, 1_000);
+    assert_eq!(api_copy.ingest_gaps().snapshot().dropped_frames, 11);
+}
+
 #[test]
 fn inpoint_state_clone_shares_state() {
     let state = InpointState::new();
