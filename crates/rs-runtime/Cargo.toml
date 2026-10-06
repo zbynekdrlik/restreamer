@@ -26,7 +26,7 @@ log.workspace = true
 # sysinfo memory-only fallback keeps Linux CI compiling and testing the path.
 # Both versions are the ones already in Cargo.lock (no new packages).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [target.'cfg(not(windows))'.dependencies]
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

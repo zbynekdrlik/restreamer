@@ -439,6 +439,11 @@ const MAX_SESSION_START: Duration = Duration::from_secs(1);
 /// as when its runtime stalls mid-handler. Since #368 that is a copied value
 /// and nothing stays held; with the tokio `Mutex` it was the lock guard.
 /// Returns once the task has taken it.
+///
+/// After the fix the TYPE is the guard (`StableSince` has no lock and
+/// `mark_connected` is a plain `fn`), so this test now catches a regression
+/// back to an awaited lock only if that lock is shared again; it stays as the
+/// end-to-end latency check of a session start beside an API task.
 fn api_task_holds(main_rt: &tokio::runtime::Runtime, cell: &StableSince, hold: Duration) {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let cell = cell.clone();

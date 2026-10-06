@@ -10,17 +10,17 @@ fn a_new_cell_has_no_publisher() {
     }
 }
 
-/// A publisher that became stable before the cell existed (every API test
-/// sets "stable for 120 s") reads back exactly, as does one after it.
+/// A publisher that became stable before the cell existed (the API tests
+/// set "stable for 120 s") reads back exactly, as does one after it.
 #[test]
 fn an_instant_on_either_side_of_the_anchor_reads_back_exactly() {
     let cell = StableSince::new();
-    let earlier = Instant::now() - Duration::from_secs(120);
+    let earlier = Instant::now() - Duration::from_secs(20);
     cell.set(Some(earlier));
     assert_eq!(cell.get(), Some(earlier));
-    assert_eq!(cell.stable_secs(), 120);
+    assert_eq!(cell.stable_secs(), 20);
 
-    let later = Instant::now() + Duration::from_millis(1_500);
+    let later = Instant::now() + Duration::from_secs(60);
     cell.set(Some(later));
     assert_eq!(cell.get(), Some(later));
     assert_eq!(

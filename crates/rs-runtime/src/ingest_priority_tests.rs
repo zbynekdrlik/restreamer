@@ -153,13 +153,14 @@ fn constants_are_the_windows_values() {
 fn level_constants_are_the_windows_values() {
     assert_eq!(
         [
+            MEMORY_PRIORITY_LOWEST,
             MEMORY_PRIORITY_VERY_LOW,
             MEMORY_PRIORITY_LOW,
             MEMORY_PRIORITY_MEDIUM,
             MEMORY_PRIORITY_BELOW_NORMAL,
             MEMORY_PRIORITY_NORMAL,
         ],
-        [1, 2, 3, 4, 5]
+        [0, 1, 2, 3, 4, 5]
     );
     assert_eq!(
         [
@@ -402,6 +403,7 @@ fn memory_and_io_are_raised_only_from_a_known_level_below_normal() {
         )
     };
     for memory in [
+        MEMORY_PRIORITY_LOWEST,
         MEMORY_PRIORITY_VERY_LOW,
         MEMORY_PRIORITY_LOW,
         MEMORY_PRIORITY_MEDIUM,
@@ -413,7 +415,7 @@ fn memory_and_io_are_raised_only_from_a_known_level_below_normal() {
             "memory {memory}"
         );
     }
-    for memory in [MEMORY_PRIORITY_NORMAL, 0, 6, 99] {
+    for memory in [MEMORY_PRIORITY_NORMAL, 6, 99] {
         assert_eq!(
             raised(memory, IO_PRIORITY_NORMAL),
             (false, false, 0),
@@ -446,10 +448,10 @@ fn memory_and_io_are_raised_only_from_a_known_level_below_normal() {
 /// and makes the line a warning.
 #[test]
 fn kept_and_unreadable_levels_are_named_in_the_log_line() {
-    let report = apply_process_priority(&FakeOs::levels(0, IO_PRIORITY_HIGH));
+    let report = apply_process_priority(&FakeOs::levels(6, IO_PRIORITY_HIGH));
     assert_eq!(
         report.summary(),
-        "process priority class normal; class kept; memory priority unknown (0), kept; \
+        "process priority class normal; class kept; memory priority unknown (6), kept; \
          I/O priority high (3), kept; EcoQoS throttling off: ok"
     );
     assert_eq!(report.level(), log::Level::Info);
@@ -514,7 +516,7 @@ fn process_levels_name_their_values_and_their_normal() {
     assert_eq!(
         memory,
         [
-            "unknown",
+            "lowest",
             "very_low",
             "low",
             "medium",
@@ -538,7 +540,7 @@ fn a_level_is_raised_only_from_a_known_value_below_normal() {
     assert_eq!(
         memory,
         [
-            Keep,
+            RaiseToNormal,
             RaiseToNormal,
             RaiseToNormal,
             RaiseToNormal,

@@ -34,7 +34,9 @@ pub const THREAD_PRIORITY_HIGHEST: i32 = 2;
 pub const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
 pub const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 1;
 /// Memory priorities (`MEMORY_PRIORITY_INFORMATION.MemoryPriority`). A
-/// process the Task Scheduler starts at task priority 7 gets LOW.
+/// process the Task Scheduler starts at task priority 7 gets LOW. LOWEST is
+/// in windows-sys `SystemServices`, the others in `Threading`.
+pub const MEMORY_PRIORITY_LOWEST: u32 = 0;
 pub const MEMORY_PRIORITY_VERY_LOW: u32 = 1;
 pub const MEMORY_PRIORITY_LOW: u32 = 2;
 pub const MEMORY_PRIORITY_MEDIUM: u32 = 3;
@@ -64,7 +66,8 @@ pub enum ProcessLevel {
 }
 
 /// The memory priorities, lowest first.
-const MEMORY_LEVELS: [(u32, &str); 5] = [
+const MEMORY_LEVELS: [(u32, &str); 6] = [
+    (MEMORY_PRIORITY_LOWEST, "lowest"),
     (MEMORY_PRIORITY_VERY_LOW, "very_low"),
     (MEMORY_PRIORITY_LOW, "low"),
     (MEMORY_PRIORITY_MEDIUM, "medium"),
