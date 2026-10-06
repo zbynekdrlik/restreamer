@@ -222,7 +222,10 @@ impl Session {
         // Recorded BEFORE the start, so a crash inside it still leaves the
         // boot reconcile an event to stop.
         self.row.event_id = Some(event.id);
-        self.persist().await;
+        if !self.persist().await {
+            self.row.event_id = None;
+            return Err("could not record the event before starting it".to_string());
+        }
         match self.ctx.rig.start_event(event.id).await {
             Ok(()) => Ok(event.drain),
             Err(StartEventError::Refused(r)) => {
@@ -391,27 +394,44 @@ impl Session {
         }
     }
 
-    /// Stop the event (once) and wait for its servers. A stop that never
-    /// succeeded is retried: the active event is then still this session's.
-    /// Once it did succeed, an event that is active AGAIN on a retry belongs
-    /// to another run (restreamer's own CI E2E uses it too): its servers are
-    /// not ours to wait for, and anything of ours left behind has no live
-    /// delivery row, so the orphan reaper (#352) deletes it.
+    /// Stop the event and wait for its servers.
+    ///
+    /// `event_stopped` = the event was DEACTIVATED by us. `stop_stream`
+    /// deactivates first and can fail after it (the delivery stop), so on an
+    /// error the event is re-read: inactive means our deactivation landed.
+    /// - not yet deactivated: the active event is still ours, stop it;
+    /// - deactivated and active AGAIN on a retry: another run took it
+    ///   (restreamer's own CI E2E uses it too); neither stop it nor wait for
+    ///   its servers; anything of ours left has no live delivery row, so the
+    ///   orphan reaper (#352) deletes it;
+    /// - deactivated and still inactive on a retry: stop again (a no-op on the
+    ///   flags, it re-runs the delivery stop that may have failed).
     async fn release_event(&mut self, event_id: i64, retry: bool) -> Result<(), String> {
         if !self.row.event_stopped {
+            let stopped = self.ctx.rig.stop_event(event_id).await;
+            let deactivated = match &stopped {
+                Ok(()) => true,
+                Err(_) => matches!(self.ctx.rig.event_active(event_id).await, Ok(false)),
+            };
+            if deactivated {
+                self.row.event_stopped = true;
+                self.persist().await;
+            }
+            stopped.map_err(|e| format!("stopping the event failed: {e}"))?;
+        } else if retry {
+            if self.ctx.rig.event_active(event_id).await? {
+                warn!(
+                    session = %self.row.id,
+                    "av-gate: event {event_id} is in use by another run; leaving any server \
+                     of ours to the orphan reaper"
+                );
+                return Ok(());
+            }
             self.ctx
                 .rig
                 .stop_event(event_id)
                 .await
                 .map_err(|e| format!("stopping the event failed: {e}"))?;
-            self.row.event_stopped = true;
-        } else if retry && self.ctx.rig.event_active(event_id).await? {
-            warn!(
-                session = %self.row.id,
-                "av-gate: event {event_id} is in use by another run; leaving any server of \
-                 ours to the orphan reaper"
-            );
-            return Ok(());
         }
         self.wait_servers_gone(event_id).await
     }

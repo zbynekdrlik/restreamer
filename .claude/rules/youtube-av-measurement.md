@@ -58,11 +58,14 @@ measurement.
   recorded (`broadcast_done`, `event_stopped`, `event_done`) and never repeated. A teardown with a
   problem sets `cleanup_pending`; the maintenance task (`run_av_gate_maintenance`:
   a supervisor around the loop, spawned by the runtime after the delivery reconcile)
-  retries only the missing step with backoff (5 min doubling, 2 h cap). A stop that
-  never succeeded is retried (the active event is still ours); **once the stop
-  succeeded, an event that is active again belongs to another run**: the retry neither
-  stops it nor waits for its servers (anything of ours left has no live delivery row,
-  so the #352 orphan reaper deletes it). `live` is only sent after `went_live` was
+  retries only the missing step with backoff (5 min doubling, 2 h cap).
+  `event_stopped` means OUR DEACTIVATION landed: `stop_stream` deactivates before the
+  delivery stop that can fail, so after an error the event is re-read. Not yet
+  deactivated: the active event is still ours, stop it. **Deactivated and active again
+  on a retry: another run took it** (restreamer's CI E2E): neither stop it nor wait for
+  its servers (anything of ours left has no live delivery row, so the #352 orphan
+  reaper deletes it). Deactivated and still inactive: stop again (re-runs the delivery
+  stop). `live` is only sent after `went_live` was
   saved. A force-clear during a retry round gets `409 retry_running`. Audit rows:
   `av_gate_session_{started,ready,stop_requested,processing,done,failed,reaped}`
   (`reaped.cause`: `idle_timeout`, `boot_reconcile`, `driver_died`, `cleanup_retry`,

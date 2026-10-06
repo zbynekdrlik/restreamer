@@ -337,3 +337,46 @@ async fn a_project_bucket_with_room_admits_the_session() {
         "{outcome:?}"
     );
 }
+
+#[tokio::test]
+async fn an_event_that_cannot_be_recorded_is_never_started() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.resolve_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let h = Harness::with(rig, timings()).await;
+    let create = tokio::spawn({
+        let ctx = Arc::clone(&h.ctx);
+        let yt = h.yt();
+        async move { create_session(ctx, yt, "s1".into(), "r".into(), "t".into()).await }
+    });
+    let at_resolve = async {
+        while !h.rig.called("resolve:E2E-Test") {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), at_resolve)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE av_gate_sessions RENAME TO av_gate_sessions_away")
+        .execute(&h.ctx.pool)
+        .await
+        .unwrap();
+    gate.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), create)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("ALTER TABLE av_gate_sessions_away RENAME TO av_gate_sessions")
+        .execute(&h.ctx.pool)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&outcome, CreateOutcome::StartFailed { reason, .. }
+            if reason.contains("could not record the event")),
+        "{outcome:?}"
+    );
+    assert!(
+        !h.rig.called(&format!("start:{EVENT}")),
+        "an event the boot reconcile could not know about must not start"
+    );
+}

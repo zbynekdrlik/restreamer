@@ -33,6 +33,11 @@ pub(crate) struct FakeRig {
     pub active: AtomicBool,
     /// When set, `server_count` panics once (then clears itself).
     pub panic_on_servers: AtomicBool,
+    /// A FAILING stop still deactivates the event (the real `stop_stream`
+    /// deactivates before the delivery stop that can fail).
+    pub stop_deactivates: AtomicBool,
+    /// When set, `resolve_event` waits for a notification first.
+    pub resolve_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
     /// When set, `start_event` waits for a notification first.
     pub start_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
 }
@@ -53,6 +58,8 @@ impl Default for FakeRig {
             panic_on_start: AtomicBool::new(false),
             active: AtomicBool::new(false),
             panic_on_servers: AtomicBool::new(false),
+            stop_deactivates: AtomicBool::new(false),
+            resolve_gate: StdMutex::new(None),
             start_gate: StdMutex::new(None),
         }
     }
@@ -83,6 +90,10 @@ impl FakeRig {
 impl AvGateRig for FakeRig {
     async fn resolve_event(&self, name: &str) -> Result<RigEvent, String> {
         self.log(format!("resolve:{name}"));
+        let gate = self.resolve_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.resolve.lock().unwrap().clone()
     }
     async fn start_event(&self, event_id: i64) -> Result<(), StartEventError> {
@@ -95,7 +106,12 @@ impl AvGateRig for FakeRig {
             !self.panic_on_start.load(Ordering::SeqCst),
             "scripted start panic"
         );
-        self.start.lock().unwrap().clone()
+        let result = self.start.lock().unwrap().clone();
+        // Like `start_stream`: anything but a refusal leaves the event active.
+        if !matches!(result, Err(StartEventError::Refused(_))) {
+            self.active.store(true, Ordering::SeqCst);
+        }
+        result
     }
     async fn delivery(&self, event_id: i64) -> Result<RigDelivery, String> {
         self.log(format!("delivery:{event_id}"));
@@ -107,7 +123,11 @@ impl AvGateRig for FakeRig {
     }
     async fn stop_event(&self, event_id: i64) -> Result<(), String> {
         self.log(format!("stop:{event_id}"));
-        self.stop.lock().unwrap().clone()
+        let result = self.stop.lock().unwrap().clone();
+        if result.is_ok() || self.stop_deactivates.load(Ordering::SeqCst) {
+            self.active.store(false, Ordering::SeqCst);
+        }
+        result
     }
     async fn event_active(&self, event_id: i64) -> Result<bool, String> {
         self.log(format!("active:{event_id}"));

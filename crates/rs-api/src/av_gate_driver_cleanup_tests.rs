@@ -362,3 +362,39 @@ async fn a_dead_driver_of_a_finished_session_only_frees_the_slot() {
     assert!(h.rig.calls().is_empty());
     assert_eq!(h.ctx.registry.holder(), None);
 }
+
+#[tokio::test]
+async fn a_stop_that_failed_after_deactivating_never_stops_the_next_run() {
+    let rig = FakeRig::default();
+    *rig.stop.lock().unwrap() = Err("delivery stop failed".to_string());
+    rig.stop_deactivates.store(true, Ordering::SeqCst);
+    let h = Harness::with(rig, timings()).await;
+    h.ready_session("s1").await;
+    let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
+    assert!(row.cleanup_pending && row.event_stopped, "{row:?}");
+    // Another run (restreamer's CI E2E) takes the event.
+    h.rig.active.store(true, Ordering::SeqCst);
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
+    assert_eq!(stops(&h), 1, "the other run's event must not be stopped");
+    assert!(h.rig.active.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_deactivated_event_whose_delivery_stop_failed_is_stopped_again() {
+    let rig = FakeRig::default();
+    *rig.stop.lock().unwrap() = Err("delivery stop failed".to_string());
+    rig.stop_deactivates.store(true, Ordering::SeqCst);
+    let h = Harness::with(rig, timings()).await;
+    h.ready_session("s1").await;
+    stop_and_wait(&h, "s1", SessionState::Failed).await;
+    assert_eq!(
+        retry_cleanups(&h.ctx, &h.clients()).await,
+        1,
+        "still failing"
+    );
+    *h.rig.stop.lock().unwrap() = Ok(());
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
+    assert_eq!(stops(&h), 3);
+    let row = h.row("s1").await;
+    assert!(row.event_done && !row.cleanup_pending);
+}
