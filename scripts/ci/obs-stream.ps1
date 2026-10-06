@@ -9,17 +9,26 @@
 #   -Action Stop               StopStream, then waits until OBS reports not streaming.
 #                              ci.yml runs it only with
 #                              `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`.
+#   -Action Republish          mid-run unpublish/republish of OUR stream (the disconnect
+#   -GapSeconds N              and A/V-republish gates): Stop, marker=false, N s of dead
+#                              air, then the full Start (lease + readiness + checked
+#                              StartStream). If camera-box took OBS during the gap, the
+#                              start is refused and the marker stays false.
 #   -Action AssertNotStreaming read-only: fails when OBS is streaming (into the inpoint
-#                              it would keep rtmp_connected true); OBS unreachable is a
-#                              warning (a down OBS streams nothing).
+#                              it would keep rtmp_connected true) or rejects us; only an
+#                              unreachable OBS is a warning (a down OBS streams nothing).
 #
 # Stream OBS is camera-box's development target; owner directive 2026-08-30: only
 # Start/Stop streaming. Nothing here changes a scene, a setting or a recording.
+# scripts/ci/verify_no_obs_mutation.py allows the StartStream request only in
+# Start-OurStream and StopStream only in Stop-OurStream, and checks their structure;
+# tests/ci/test_obs_stream.py runs every action against a mock obs-websocket.
 
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("Start", "Stop", "AssertNotStreaming")]
-  [string]$Action
+  [ValidateSet("Start", "Stop", "Republish", "AssertNotStreaming")]
+  [string]$Action,
+  [int]$GapSeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +50,8 @@ function Wait-StreamActive([bool]$want, [int]$seconds) {
   return $null
 }
 
-function Invoke-Start {
+# Opens its own session; exits 1 (with the reason) when the rig is not ours to use.
+function Start-OurStream([bool]$sampleBitrate) {
   $holder = Get-RigLeaseHolder
   if ($holder) { Write-NotReady "camera-box holds the rig lease: $holder"; exit 1 }
   $why = Test-ObsProcess
@@ -50,7 +60,6 @@ function Invoke-Start {
   try {
     $why = Test-ObsReady
     if ($why) { Write-NotReady $why; exit 1 }
-
     Set-StartedMarker "true"
     $resp = Invoke-ObsRequest "StartStream"
     if (-not $resp.requestStatus.result) {
@@ -60,19 +69,24 @@ function Invoke-Start {
     }
     $active = Wait-StreamActive $true 30
     if ($null -eq $active) { throw "OBS did not report streaming within 30 s after StartStream" }
-    # Read-only bitrate sample: the YouTube health gates run on whatever encoder
-    # camera-box's TEST mode sets, so log what OBS actually sends.
-    $b0 = [double]$active.outputBytes
-    Start-Sleep -Seconds 10
-    $later = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
-    $kbps = [math]::Round((([double]$later.outputBytes - $b0) * 8 / 1000) / 10)
-    Write-Host "OBS streaming to the restreamer inpoint (~$kbps kbps over 10 s, TEST-mode encoder settings)"
+    if ($sampleBitrate) {
+      # Read-only bitrate sample: the YouTube health gates run on whatever encoder
+      # camera-box's TEST mode sets, so log what OBS actually sends.
+      $b0 = [double]$active.outputBytes
+      Start-Sleep -Seconds 10
+      $later = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
+      $kbps = [math]::Round((([double]$later.outputBytes - $b0) * 8 / 1000) / 10)
+      Write-Host "OBS streaming to the restreamer inpoint (~$kbps kbps over 10 s, TEST-mode encoder settings)"
+    } else {
+      Write-Host "OBS streaming to the restreamer inpoint"
+    }
   } finally {
     Close-Obs
   }
 }
 
-function Invoke-Stop {
+# Stops the stream this job started (the caller's if:/sequence guarantees that).
+function Stop-OurStream {
   Connect-Obs
   try {
     $resp = Invoke-ObsRequest "StopStream"
@@ -89,8 +103,13 @@ function Invoke-Stop {
 
 function Invoke-AssertNotStreaming {
   try { Connect-Obs } catch {
-    Write-Host "::warning::stream OBS not reachable ($($_.Exception.Message)) -- it streams nothing; proceeding"
-    return
+    $msg = $_.Exception.Message
+    if ($msg -like "unreachable:*") {
+      Write-Host "::warning::stream OBS not reachable ($msg) -- it streams nothing; proceeding"
+      return
+    }
+    Write-NotReady "websocket $msg"
+    exit 1
   }
   try {
     $data = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
@@ -106,8 +125,15 @@ function Invoke-AssertNotStreaming {
 
 try {
   switch ($Action) {
-    "Start" { Invoke-Start }
-    "Stop" { Invoke-Stop }
+    "Start" { Start-OurStream $true }
+    "Stop" { Stop-OurStream }
+    "Republish" {
+      Stop-OurStream
+      Set-StartedMarker "false"
+      Write-Host "Dead-air gap: ${GapSeconds}s..."
+      Start-Sleep -Seconds $GapSeconds
+      Start-OurStream $false
+    }
     "AssertNotStreaming" { Invoke-AssertNotStreaming }
   }
 } catch {

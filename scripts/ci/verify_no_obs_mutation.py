@@ -9,32 +9,29 @@ included, #374 scope addition). Before #374, CI force-killed and relaunched OBS
 and rewrote its settings (four force-kills on 2026-10-06 lost camera-box's
 unsaved runtime settings).
 
-Scope: every job that runs on a self-hosted runner in every
-`.github/workflows/*.yml` (its steps' `run`, `with`, `env`, `uses` and name, plus
-the job `env`), and every file under `scripts/`. A GitHub-hosted job cannot reach
-OBS, so its text (e.g. a guard's grep pattern) is not scanned. The guard fails on:
+The shape this guard enforces:
+  * workflows never talk to OBS inline. They run only the canonical
+    invocations of scripts/ci/obs-readiness-check.ps1 and scripts/ci/obs-stream.ps1
+    (Start / Stop / Republish / AssertNotStreaming);
+  * scripts/ci/obs-ws.ps1 is the only obs-websocket client, and its one request
+    function, Invoke-ObsRequest, is called with allowlisted literals only;
+  * the StartStream request lives only in obs-stream.ps1 Start-OurStream (lease +
+    readiness + marker=true + checked start, marker=false when refused), and
+    StopStream only in Stop-OurStream;
+  * per self-hosted job: Start comes first and is unconditional; Republish and Stop
+    come after it; Stop runs only under `if: always() && env.OBS_STREAMING_STARTED_BY_CI
+    == 'true'`; the marker is written nowhere else.
+And everywhere it scans: no OBS process action (kill, suspend, launch, close,
+scheduled task, the port-4455 owner, a wildcard name), no obs-studio / streamEncoder
+touch, no request batch, no third-party OBS client.
 
-  * a process action on OBS (kill, suspend, launch, clean close, scheduled task,
-    the process owning port 4455, a wildcard process name);
-  * any touch of OBS's install or config tree (`obs-studio`, `streamEncoder`);
-  * an obs-websocket request type outside READ_ONLY_AND_STREAMING; any
-    `requestType` written in another shape than a literal assignment (fail-closed);
-    a request batch; a third-party OBS client;
-  * a function that forwards a request type, unless it is one of PASSTHROUGH_FUNCS,
-    and a call to one of those that does not pass an allowed literal;
-  * a step named like an OBS set/switch/restore/kill;
-  * Restreamer's fire-and-forget `/api/v1/obs/start-stream` (it skips readiness);
-  * a job whose first OBS start is not exactly `obs-stream.ps1 -Action Start`
-    (rig lease + readiness + a checked StartStream in one session) as an
-    unconditional step;
-  * a StopStream before that start, and a non-success-only StopStream whose `if:`
-    is not exactly the started-by-CI condition;
-  * the started-by-CI marker set anywhere but obs-stream.ps1 (an `env:` map, a run);
-  * obs-stream.ps1 issuing StartStream before its readiness check / marker write.
-
-Self-match-proof (#325): the patterns and the self-test mutations live only in
-this file, which the scan skips by path; the ci.yml step that runs it carries
-none of them, and runs in a GitHub-hosted job (checked here too).
+Scope: every job that runs on a self-hosted runner in every `.github/workflows/*.yml`
+(step run/with/env/uses/name, job env) and every file under `scripts/`. A
+GitHub-hosted job cannot reach OBS, so it is not scanned; that is also why this
+file's own ci.yml step and the test-integrity grep patterns never self-match (#325).
+This file is skipped by path and may only run in a GitHub-hosted job (checked).
+The scripts' runtime behaviour is tested separately against a mock obs-websocket:
+tests/ci/test_obs_stream.py (ci.yml job obs-scripts-test).
 
 `--self-test` copies the real tree, applies each known-bad mutation, and requires
 every copy to go red for its own reason, and the unmodified copy to pass.
@@ -57,9 +54,17 @@ CI = WORKFLOWS / "ci.yml"
 SCRIPTS = Path("scripts")
 SELF = Path("scripts/ci/verify_no_obs_mutation.py")
 OBS_STREAM = Path("scripts/ci/obs-stream.ps1")
+OBS_LIB = Path("scripts/ci/obs-ws.ps1")
 MARKER = "OBS_STREAMING_STARTED_BY_CI"
-START_RUN = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start"
+PS = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/"
+START_RUN = PS + "obs-stream.ps1 -Action Start"
+STOP_RUN = PS + "obs-stream.ps1 -Action Stop"
+ASSERT_RUN = PS + "obs-stream.ps1 -Action AssertNotStreaming"
+READINESS_RUN = PS + "obs-readiness-check.ps1"
+REPUBLISH_LINE = re.compile(r"&\s*" + re.escape(PS + "obs-stream.ps1 -Action Republish -GapSeconds") + r" \d+")
+WHOLE_RUNS = {START_RUN, STOP_RUN, ASSERT_RUN, READINESS_RUN}
 TEARDOWN_IF = f"always() && env.{MARKER} == 'true'"
+SUCCESS_ONLY = {"", "success()"}
 
 READ_ONLY_AND_STREAMING = {
     "StartStream",
@@ -70,9 +75,9 @@ READ_ONLY_AND_STREAMING = {
     "GetCurrentProgramScene",
     "GetStreamServiceSettings",
 }
-# Functions allowed to forward a `$requestType` parameter; every call to them must
-# pass an allowed literal.
-PASSTHROUGH_FUNCS = {"Invoke-ObsRequest", "Send-ObsRequest"}
+PASSTHROUGH_FUNCS = {"Invoke-ObsRequest"}
+# Request literal -> the one obs-stream.ps1 function allowed to send it.
+CONFINED_REQUESTS = {"StartStream": "Start-OurStream", "StopStream": "Stop-OurStream"}
 
 # "obs" as a word or a prefix (obs64, obs-studio, "obs-*", OBSStudio, Start OBS),
 # plus the StartOBS task name -- but not the "obs" inside "jobs"/"blobs".
@@ -109,9 +114,9 @@ LINE_RULES: list[tuple[re.Pattern[str], str]] = [
         "a third-party OBS client",
     ),
     (
-        re.compile(r"/api/v1/obs/start-stream", re.I),
-        "Restreamer's /api/v1/obs/start-stream is fire-and-forget and skips the readiness check; "
-        "use scripts/ci/obs-stream.ps1 -Action Start",
+        re.compile(r"/api/v1/obs/(?:start|stop)-stream", re.I),
+        "Restreamer's /api/v1/obs/start|stop-stream skips the readiness check and the marker; "
+        "use scripts/ci/obs-stream.ps1",
     ),
 ]
 
@@ -123,13 +128,14 @@ UNIT_PROCESS_ACTION = re.compile(
     r"stop-process|taskkill|\.kill\s*\(|start-process|closemainwindow|schtasks|scheduledtask|suspend",
     re.I,
 )
+# The websocket client internals: only in obs-ws.ps1, never in a workflow.
+CLIENT_INTERNALS = re.compile(r"clientwebsocket|ws://|requesttype|send-obsjson|receive-obsjson|obssocket", re.I)
 
-# Accepted requestType shapes; everything else that mentions requestType fails.
 RT_LITERAL = re.compile(r"""\brequestType\s*=\s*"(?P<name>\w+)"(?=\s*(?:;|\}|$))""")
 RT_JSON = re.compile(r"""\\?"requestType\\?"\s*:\s*\\?"(?P<name>\w+)\\?"(?=\s*(?:,|\}|$))""")
 RT_PASSTHROUGH = re.compile(r"""\brequestType\s*=\s*\$requestType(?=\s*(?:;|\}|$))""")
 RT_VAR_READ = re.compile(r"""\$\{?requestType\}?(?!\s*=)""")
-FUNC_DEF = re.compile(r"^\s*function\s+(?P<name>[\w-]+)", re.I | re.M)
+FUNC_DEF = re.compile(r"^[ \t]*function\s+(?P<name>[\w-]+)", re.I | re.M)
 
 BAD_STEP_NAME = [
     re.compile(r"\brestore\b.*\bobs\b|\bobs\b.*\brestore\b", re.I),
@@ -137,12 +143,11 @@ BAD_STEP_NAME = [
     re.compile(r"\b(kill|relaunch|restart|launch)\b.*\bobs\b|\bensure obs is running\b", re.I),
     re.compile(r"\bstoprecord\b", re.I),
 ]
-
-START_TOKENS = re.compile(r"""obs-stream\.ps1\s+-Action\s+Start\b|["']StartStream["']""")
-STOP_TOKENS = re.compile(r"""obs-stream\.ps1\s+-Action\s+Stop\b|["']StopStream["']|/api/v1/obs/stop-stream""")
-SUCCESS_ONLY = {"", "success()"}
 HOSTED_LABEL = re.compile(r"^(ubuntu|windows|macos)-[\w.]+$")
 SKIP_DIRS = {"__pycache__"}
+
+
+# ------------------------------------------------------------------ helpers --
 
 
 def strip_comments(text: str) -> str:
@@ -152,10 +157,8 @@ def strip_comments(text: str) -> str:
 
 
 def norm_if(cond: object) -> str:
-    c = str(cond if cond is not None else "").strip()
-    m = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", c, flags=re.S)
-    if m:
-        c = m.group(1)
+    c = str(cond if cond is not None else "")
+    c = c.replace("${{", " ").replace("}}", " ")
     return re.sub(r"\s+", " ", c).strip()
 
 
@@ -163,6 +166,41 @@ def runs_on_hosted(job: dict) -> bool:
     runs_on = job.get("runs-on", "")
     labels = runs_on if isinstance(runs_on, list) else [runs_on]
     return bool(labels) and all(isinstance(l, str) and HOSTED_LABEL.match(l.strip()) for l in labels)
+
+
+def function_spans(code: str) -> list[tuple[str, int, int]]:
+    """(name, start, end) of each PowerShell function body, by brace matching."""
+    masked = re.sub(r'"[^"\n]*"|\'[^\'\n]*\'', lambda m: " " * len(m.group(0)), code)
+    spans = []
+    for m in FUNC_DEF.finditer(code):
+        i = masked.find("{", m.end())
+        if i < 0:
+            continue
+        depth = 0
+        for j in range(i, len(masked)):
+            if masked[j] == "{":
+                depth += 1
+            elif masked[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    spans.append((m.group("name"), m.start(), j + 1))
+                    break
+    return spans
+
+
+def owner_at(spans: list[tuple[str, int, int]], pos: int) -> str | None:
+    inside = [(e - s, n) for n, s, e in spans if s <= pos < e]
+    return min(inside)[1] if inside else None
+
+
+def body_of(code: str, name: str) -> str | None:
+    for n, s, e in function_spans(code):
+        if n == name:
+            return code[s:e]
+    return None
+
+
+# --------------------------------------------------------------- unit rules --
 
 
 def request_errors(label: str, lines: list[str]) -> list[str]:
@@ -184,14 +222,10 @@ def request_errors(label: str, lines: list[str]) -> list[str]:
 
 
 def passthrough_errors(label: str, code: str) -> list[str]:
-    """Every `requestType = $requestType` must sit inside an allowlisted function."""
     errors: list[str] = []
-    defs = [(m.start(), m.group("name")) for m in FUNC_DEF.finditer(code)]
+    spans = function_spans(code)
     for m in RT_PASSTHROUGH.finditer(code):
-        owner = None
-        for start, name in defs:
-            if start <= m.start():
-                owner = name
+        owner = owner_at(spans, m.start())
         if owner not in PASSTHROUGH_FUNCS:
             errors.append(
                 f"{label}: requestType forwarded by '{owner or 'top level'}', not an allowlisted "
@@ -208,7 +242,6 @@ def call_errors(label: str, lines: list[str]) -> list[str]:
             m = call.search(line)
             if not m or re.search(r"\bfunction\s", line, re.I):
                 continue
-            # The request type is the first PascalCase literal after the call.
             lit = re.search(r"""["']([A-Z][A-Za-z]+)["']""", line[m.end():])
             if not lit:
                 errors.append(f"{label}: {fn} called without a literal request type: {line.strip()}")
@@ -235,6 +268,9 @@ def check_unit(label: str, text: str) -> list[str]:
     return errors
 
 
+# ----------------------------------------------------------- workflow rules --
+
+
 def step_text(step: dict) -> str:
     parts = [str(step.get("run") or "")]
     for key in ("with", "env"):
@@ -243,43 +279,63 @@ def step_text(step: dict) -> str:
     return "\n".join(parts)
 
 
+def invocation_errors(label: str, code: str) -> list[str]:
+    errors = []
+    for line in code.splitlines():
+        if not re.search(r"obs-stream\.ps1|obs-readiness-check\.ps1", line, re.I):
+            continue
+        s = line.strip()
+        if s in WHOLE_RUNS:
+            if code.strip() != s:
+                errors.append(f"{label}: `{s}` must be the whole run: of its step")
+        elif not REPUBLISH_LINE.fullmatch(s):
+            errors.append(f"{label}: not a canonical obs-stream.ps1 / obs-readiness-check.ps1 invocation: {s}")
+    return errors
+
+
 def check_job(wf_name: str, job_name: str, job: dict) -> list[str]:
     errors: list[str] = []
-    steps = job.get("steps") or []
     where = f"{wf_name} {job_name}"
     if job.get("env"):
-        errors += check_unit(f"{where} (job env)", json.dumps(job["env"], indent=1))
-        if MARKER in json.dumps(job["env"]):
+        env_text = json.dumps(job["env"], indent=1)
+        errors += check_unit(f"{where} (job env)", env_text)
+        if MARKER in env_text:
             errors.append(f"{where}: {MARKER} may not be set in an env: map")
-    start_idx = None
-    for i, step in enumerate(steps):
+    started = False
+    for i, step in enumerate(job.get("steps") or []):
         name = str(step.get("name", ""))
         uses = str(step.get("uses") or "")
         label = f"{where} / {name or uses or f'step {i}'}"
         text = step_text(step)
+        code = strip_comments(str(step.get("run") or ""))
+        cond = norm_if(step.get("if"))
         errors += check_unit(label, text)
+        errors += invocation_errors(label, code)
+        for line in strip_comments(text).splitlines():
+            if CLIENT_INTERNALS.search(line):
+                errors.append(f"{label}: inline obs-websocket client in a workflow; use scripts/ci/obs-stream.ps1: {line.strip()}")
         if MARKER in text:
-            errors.append(f"{label}: {MARKER} may only be written by {OBS_STREAM} (found in run/with/env)")
+            errors.append(f"{label}: {MARKER} may only be written by {OBS_STREAM}")
         if re.search(OBS_WORD, uses, re.I):
             errors.append(f"{label}: uses an OBS action: {uses}")
         for rx in BAD_STEP_NAME:
             if rx.search(name):
                 errors.append(f"{label}: step name describes an OBS mutation")
-        code = strip_comments(str(step.get("run") or ""))
-        cond = norm_if(step.get("if"))
-        if START_TOKENS.search(code) and start_idx is None:
-            start_idx = i
-            if str(step.get("run") or "").strip() != START_RUN:
-                errors.append(f"{label}: the first OBS start must be exactly `{START_RUN}`")
+        run = code.strip()
+        republish = any(REPUBLISH_LINE.fullmatch(l.strip()) for l in code.splitlines())
+        if run == START_RUN:
+            if started:
+                errors.append(f"{label}: a second OBS Start in one job")
+            started = True
             if cond not in SUCCESS_ONLY or step.get("continue-on-error"):
                 errors.append(f"{label}: the OBS start step must be unconditional (no if:/continue-on-error)")
-        if STOP_TOKENS.search(code):
-            if start_idx is None or i <= start_idx:
+        if run == STOP_RUN or republish:
+            if not started:
                 errors.append(f"{label}: stops OBS streaming before this job started it (not ours to stop)")
-            elif cond not in SUCCESS_ONLY and cond != TEARDOWN_IF:
-                errors.append(f"{label}: a teardown StopStream needs exactly `if: {TEARDOWN_IF}` (got `{cond}`)")
-            if "obs-stream.ps1" in code and cond != TEARDOWN_IF:
-                errors.append(f"{label}: the obs-stream.ps1 teardown needs exactly `if: {TEARDOWN_IF}`")
+        if run == STOP_RUN and cond != TEARDOWN_IF:
+            errors.append(f"{label}: the OBS stop teardown needs exactly `if: {TEARDOWN_IF}` (got `{cond}`)")
+        if republish and (cond not in SUCCESS_ONLY or step.get("continue-on-error")):
+            errors.append(f"{label}: an OBS republish must run only on success (no always()/continue-on-error)")
     return errors
 
 
@@ -297,42 +353,74 @@ def check_workflows(root: Path) -> list[str]:
     return errors
 
 
-def check_obs_stream_order(root: Path) -> list[str]:
-    """obs-stream.ps1 must check readiness and set the marker before StartStream."""
+# ------------------------------------------------------------- script rules --
+
+
+def script_errors(rel: Path, text: str) -> list[str]:
+    errors = check_unit(str(rel), text)
+    code = strip_comments(text)
+    if rel != OBS_LIB:
+        for line in code.splitlines():
+            if CLIENT_INTERNALS.search(line):
+                errors.append(f"{rel}: obs-websocket client internals outside {OBS_LIB}: {line.strip()}")
+    if rel != OBS_STREAM and (MARKER in code or "Set-StartedMarker" in code):
+        errors.append(f"{rel}: {MARKER} may only be written by {OBS_STREAM}")
+    spans = function_spans(code)
+    for req, fn in CONFINED_REQUESTS.items():
+        for m in re.finditer(rf"""["']{req}["']""", code):
+            owner = owner_at(spans, m.start())
+            if rel != OBS_STREAM or owner != fn:
+                errors.append(f"{rel}: the {req} request is allowed only in {OBS_STREAM} {fn} (found in {owner or 'top level'})")
+    return errors
+
+
+START_SHAPE = [
+    (r'if \(\$holder\) \{ Write-NotReady "camera-box holds the rig lease: \$holder"; exit 1 \}',
+     "Start-OurStream must fail on a held rig lease"),
+    (r"\$why = Test-ObsReady\s*\n\s*if \(\$why\) \{ Write-NotReady \$why; exit 1 \}",
+     "Start-OurStream must run Test-ObsReady and exit on its verdict"),
+    (r'Set-StartedMarker "true"\s*\n\s*\$resp = Invoke-ObsRequest "StartStream"\s*\n'
+     r'\s*if \(-not \$resp\.requestStatus\.result\) \{\s*\n\s*Set-StartedMarker "false"',
+     "Start-OurStream must write the marker true right before StartStream and false when it is refused"),
+]
+
+
+def check_obs_stream_shape(root: Path) -> list[str]:
     path = root / OBS_STREAM
     if not path.is_file():
         return [f"{OBS_STREAM} is missing"]
     code = strip_comments(path.read_text(encoding="utf-8"))
-    start = code.find('Invoke-ObsRequest "StartStream"')
-    ready = re.search(r"=\s*Test-ObsReady\b", code)
-    mark = code.find('Set-StartedMarker "true"')
     errs = []
-    if start < 0:
-        errs.append(f"{OBS_STREAM}: no StartStream found")
-    if not ready or ready.start() > start:
+    start = body_of(code, "Start-OurStream")
+    if start is None:
+        return [f"{OBS_STREAM}: function Start-OurStream is missing"]
+    ready_at = re.search(r"\$why = Test-ObsReady", start)
+    start_at = start.find('Invoke-ObsRequest "StartStream"')
+    if not ready_at or start_at < 0 or ready_at.start() > start_at:
         errs.append(f"{OBS_STREAM}: StartStream must come after the Test-ObsReady readiness check")
-    if mark < 0 or mark > start:
-        errs.append(f"{OBS_STREAM}: {MARKER}=true must be written before StartStream")
+    for rx, why in START_SHAPE:
+        if not re.search(rx, start):
+            errs.append(f"{OBS_STREAM}: {why}")
+    if not re.search(r'"Republish"\s*\{\s*\n\s*Stop-OurStream\s*\n\s*Set-StartedMarker "false"', code):
+        errs.append(f"{OBS_STREAM}: Republish must write the marker false right after stopping our stream")
     return errs
 
 
 def check(root: Path) -> list[str]:
     errors = check_workflows(root)
-    errors += check_obs_stream_order(root)
+    errors += check_obs_stream_shape(root)
+    if not (root / OBS_LIB).is_file():
+        errors.append(f"{OBS_LIB} is missing")
     for f in sorted((root / SCRIPTS).rglob("*")):
         if not f.is_file() or f.relative_to(root) == SELF or SKIP_DIRS & set(f.parts):
             continue
-        rel = f.relative_to(root)
-        text = f.read_text(encoding="utf-8", errors="replace")
-        errors += check_unit(str(rel), text)
-        if MARKER in strip_comments(text) and rel != OBS_STREAM:
-            errors.append(f"{rel}: {MARKER} may only be written by {OBS_STREAM}")
+        errors += script_errors(f.relative_to(root), f.read_text(encoding="utf-8", errors="replace"))
     return errors
 
 
 # ---------------------------------------------------------------- self-test --
 
-# Inserted into scripts/ci/obs-stream.ps1, right before its Stop's StopStream.
+# Inserted into obs-stream.ps1 Stop-OurStream, right before its StopStream.
 STREAM_ANCHOR = '$resp = Invoke-ObsRequest "StopStream"'
 INSERTIONS: list[tuple[str, str]] = [
     ("Stop-Process -Name obs64 -Force", "process action"),
@@ -358,6 +446,7 @@ INSERTIONS: list[tuple[str, str]] = [
     ('$d.Add("requestType", "SetCurrentProgramScene")', "unrecognized requestType shape"),
     ('$j = @"\n{i}{"op":6,"d":{"requestType":\n{i}"StopRecord"}}\n{i}"@', "unrecognized requestType shape"),
     ('$r = @{ d = @{ requestType = "StartStream".Replace("StartStream","StopRecord") } }', "unrecognized requestType shape"),
+    ('$k = "request" + "Type"; $d = @{}; $d[$k] = "StopRecord"; Send-ObsJson @{ op = 6; d = $d }', "client internals outside"),
     ("$b = @{ op = 8; d = @{ requestId = 'b'; requests = @() } }", "request batch"),
     ("obs-cmd scene switch PRO", "third-party OBS client"),
     ('$s = "<#"; Stop-Process -Name obs64 -Force; $t = "#>"', "process action"),
@@ -365,101 +454,97 @@ INSERTIONS: list[tuple[str, str]] = [
     ("Get-Process -Name ob*64 | Stop-Process -Force", "wildcard process name"),
     ('$null = Invoke-ObsRequest "StopRecord"', "Invoke-ObsRequest sends 'StopRecord'"),
     ("$null = Invoke-ObsRequest $kind", "without a literal request type"),
+    ('$null = Invoke-ObsRequest "StartStream"', "StartStream request is allowed only in"),
     (
-        "function Set-It { param([string]$requestType) Send-ObsJson @{ op = 6; d = @{ requestType = $requestType } } }",
+        "function Set-It { param([string]$requestType) Write-Host @{ d = @{ requestType = $requestType } } }",
         "not an allowlisted pass-through",
     ),
 ]
 
-# (description, old, new, expected-reason): one-shot text replacements on ci.yml.
 YT_STOP = "      - name: Stop OBS stream\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
-FB_START = (
-    "        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start\n"
-    "\n      - name: Start delivery"
-)
-ST_ASSERT = "        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action AssertNotStreaming"
+FB_START = f"        run: {START_RUN}\n\n      - name: Start delivery"
+ST_ASSERT = f"        run: {ASSERT_RUN}"
+DISCONNECT = "      - name: OBS disconnect/reconnect resilience test\n        if: success()"
+REPUB_CALL = "& " + PS + "obs-stream.ps1 -Action Republish -GapSeconds 10"
 CI_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("YT teardown without the started marker", YT_STOP, "      - name: Stop OBS stream\n        if: always()", "needs exactly"),
-    (
-        "YT teardown with an || marker condition",
-        YT_STOP,
-        "      - name: Stop OBS stream\n        if: always() || env.OBS_STREAMING_STARTED_BY_CI == 'true'",
-        "needs exactly",
-    ),
-    (
-        "YT teardown with a != marker condition",
-        YT_STOP,
-        "      - name: Stop OBS stream\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI != 'true'",
-        "needs exactly",
-    ),
+    ("YT teardown with an || marker condition", YT_STOP,
+     "      - name: Stop OBS stream\n        if: always() || env.OBS_STREAMING_STARTED_BY_CI == 'true'", "needs exactly"),
+    ("YT teardown with a != marker condition", YT_STOP,
+     "      - name: Stop OBS stream\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI != 'true'", "needs exactly"),
+    ("YT teardown with a mixed ${{ }} || condition", YT_STOP,
+     "      - name: Stop OBS stream\n        if: ${{ always() }} || env.OBS_STREAMING_STARTED_BY_CI == 'true'", "needs exactly"),
     ("YT teardown on failure() only", YT_STOP, "      - name: Stop OBS stream\n        if: failure()", "needs exactly"),
-    (
-        "FB start made non-blocking (; exit 0)",
-        FB_START,
-        FB_START.replace("-Action Start\n", "-Action Start; exit 0\n", 1),
-        "must be exactly",
-    ),
-    (
-        "FB start with continue-on-error",
-        FB_START,
-        FB_START.replace("        run:", "        continue-on-error: true\n        run:", 1),
-        "must be unconditional",
-    ),
-    (
-        "FB start with if: false",
-        FB_START,
-        FB_START.replace("        run:", "        if: false\n        run:", 1),
-        "must be unconditional",
-    ),
-    (
-        "e2e-streaming-test stops a stream it did not start (the removed bug)",
-        ST_ASSERT,
-        "        run: |\n"
-        '          $stop = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "stop-stream" } } | ConvertTo-Json -Depth 5',
-        "before this job started it",
-    ),
-    (
-        "marker forced true in a job env",
-        '      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}\n      # Dedicated event',
-        '      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}\n      OBS_STREAMING_STARTED_BY_CI: "true"\n      # Dedicated event',
-        "may not be set in an env",
-    ),
-    (
-        "a restore step re-appears",
-        "- name: Verify cache_delay_secs unchanged",
-        "- name: Restore OBS scene",
-        "step name describes an OBS mutation",
-    ),
-    (
-        "the fire-and-forget API start re-appears",
-        "          $startBody = @{ event_id = $ev.id } | ConvertTo-Json",
-        '          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-stream" -Method POST -TimeoutSec 30\n'
-        "          $startBody = @{ event_id = $ev.id } | ConvertTo-Json",
-        "fire-and-forget",
-    ),
-    (
-        "an OBS kill hidden in a step's with: input",
-        "      - name: Start delivery",
-        "      - name: evil\n        uses: some/action@v1\n        with:\n          cmd: taskkill /F /IM obs64.exe\n\n      - name: Start delivery",
-        "obs64.exe",
-    ),
-    (
-        "the guard moved onto the stream box",
-        "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
-        "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
-        "may only run in a GitHub-hosted job",
-    ),
-    (
-        "a self-hosted runner group is not treated as hosted",
-        "    runs-on: [self-hosted, windows, stream-lan]\n    timeout-minutes: 20\n    steps:",
-        "    runs-on: {group: stream}\n    timeout-minutes: 20\n    steps:\n      - run: taskkill /F /IM obs64.exe",
-        "obs64.exe",
-    ),
+    ("FB start made non-blocking (; exit 0)", FB_START, FB_START.replace("-Action Start\n", "-Action Start; exit 0\n", 1),
+     "not a canonical"),
+    ("FB start with continue-on-error", FB_START,
+     FB_START.replace("        run:", "        continue-on-error: true\n        run:", 1), "must be unconditional"),
+    ("FB start with if: false", FB_START, FB_START.replace("        run:", "        if: false\n        run:", 1),
+     "must be unconditional"),
+    ("e2e-streaming-test stops via positional `Stop`", ST_ASSERT, f"        run: {PS}obs-stream.ps1 Stop", "not a canonical"),
+    ("e2e-streaming-test stops via -Action \"Stop\"", ST_ASSERT, f'        run: {PS}obs-stream.ps1 -Action "Stop"', "not a canonical"),
+    ("e2e-streaming-test stops via -Action:Stop", ST_ASSERT, f"        run: {PS}obs-stream.ps1 -Action:Stop", "not a canonical"),
+    ("e2e-streaming-test runs the canonical Stop before any start", ST_ASSERT, f"        run: {STOP_RUN}",
+     "before this job started it"),
+    ("YT teardown stops via -Action 'Stop'", YT_STOP + f"\n        shell: powershell\n        timeout-minutes: 2\n        run: {STOP_RUN}",
+     YT_STOP + f"\n        shell: powershell\n        timeout-minutes: 2\n        run: {PS}obs-stream.ps1 -Action 'Stop'",
+     "not a canonical"),
+    ("e2e-streaming-test inline StopStream (the removed bug)", ST_ASSERT,
+     "        run: |\n          $stop = @{ op = 6; d = @{ requestType = \"StopStream\"; requestId = \"stop-stream\" } }",
+     "inline obs-websocket client"),
+    ("an inline websocket client re-appears", "          Write-Host \"Republishing OBS stream (10 s outage)...\"",
+     "          $ws = New-Object System.Net.WebSockets.ClientWebSocket\n          Write-Host \"Republishing OBS stream (10 s outage)...\"",
+     "inline obs-websocket client"),
+    ("the disconnect republish runs on always()", DISCONNECT,
+     "      - name: OBS disconnect/reconnect resilience test\n        if: always()", "only on success"),
+    ("a republish before the job's start", ST_ASSERT, f"        run: |\n          {REPUB_CALL}", "before this job started it"),
+    ("marker forced true in a job env", '      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}\n      # Dedicated event',
+     '      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}\n      OBS_STREAMING_STARTED_BY_CI: "true"\n      # Dedicated event',
+     "may not be set in an env"),
+    ("a restore step re-appears", "- name: Verify cache_delay_secs unchanged", "- name: Restore OBS scene",
+     "step name describes an OBS mutation"),
+    ("the fire-and-forget API start re-appears", "          $startBody = @{ event_id = $ev.id } | ConvertTo-Json",
+     '          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-stream" -Method POST -TimeoutSec 30\n'
+     "          $startBody = @{ event_id = $ev.id } | ConvertTo-Json", "skips the readiness check"),
+    ("an OBS kill hidden in a step's with: input", "      - name: Start delivery",
+     "      - name: evil\n        uses: some/action@v1\n        with:\n          cmd: taskkill /F /IM obs64.exe\n\n      - name: Start delivery",
+     "obs64.exe"),
+    ("the guard moved onto the stream box", "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
+     "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
+     "may only run in a GitHub-hosted job"),
+    ("a self-hosted runner group is not treated as hosted",
+     "    runs-on: [self-hosted, windows, stream-lan]\n    timeout-minutes: 20\n    steps:",
+     "    runs-on: {group: stream}\n    timeout-minutes: 20\n    steps:\n      - run: taskkill /F /IM obs64.exe", "obs64.exe"),
 ]
-# (description, old, new, expected-reason): replacements on obs-stream.ps1.
 STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Start skips the readiness check", "$why = Test-ObsReady", "$why = $null", "after the Test-ObsReady"),
-    ("the marker is never written", '    Set-StartedMarker "true"\n', "", "must be written before StartStream"),
+    ("Start ignores the readiness verdict", "    if ($why) { Write-NotReady $why; exit 1 }\n    Set-StartedMarker", "    Set-StartedMarker",
+     "exit on its verdict"),
+    ("Start never writes the marker", '    Set-StartedMarker "true"\n', "", "marker true right before"),
+    ("a refused start keeps the marker true", '      Set-StartedMarker "false"\n      Write-Host "::error::StartStream refused',
+     '      Write-Host "::error::StartStream refused', "false when it is refused"),
+    ("Start ignores a held rig lease", 'if ($holder) { Write-NotReady "camera-box holds the rig lease: $holder"; exit 1 }',
+     "$null = $holder", "held rig lease"),
+    ("Republish keeps the marker true across the gap", '      Stop-OurStream\n      Set-StartedMarker "false"\n',
+     "      Stop-OurStream\n", "Republish must write the marker false"),
+    ("AssertNotStreaming stops a foreign stream",
+     '      Write-Host "::error::stream OBS is already streaming',
+     '      $null = Invoke-ObsRequest "StopStream"\n      Write-Host "::error::stream OBS is already streaming',
+     "StopStream request is allowed only in"),
+]
+EXTRA_SCRIPTS: list[tuple[str, dict[str, str], str]] = [
+    ("a new script restarts OBS", {"scripts/ci/fix-obs.ps1": 'Stop-Process -Name obs64 -Force\nschtasks /run /tn "StartOBS"\n'},
+     "process action"),
+    ("another script writes the started marker",
+     {"scripts/ci/fake.ps1": f'"{MARKER}=true" | Out-File $env:GITHUB_ENV -Append\n'}, "may only be written by"),
+    ("a helper script frees the inpoint with StopStream",
+     {"scripts/ci/free-inpoint.ps1": '. "$PSScriptRoot\\obs-ws.ps1"\nConnect-Obs\n$null = Invoke-ObsRequest "StopStream"\n'},
+     "StopStream request is allowed only in"),
+    ("a helper script starts without readiness",
+     {"scripts/ci/quick-start.ps1": '. "$PSScriptRoot\\obs-ws.ps1"\nConnect-Obs\n$null = Invoke-ObsRequest "StartStream"\n'},
+     "StartStream request is allowed only in"),
+    ("a helper script opens its own websocket",
+     {"scripts/ci/own-ws.ps1": "$w = New-Object System.Net.WebSockets.ClientWebSocket\n"}, "client internals outside"),
 ]
 
 
@@ -476,8 +561,10 @@ def self_test(root: Path) -> int:
     failures: list[str] = []
     real_ci = (root / CI).read_text(encoding="utf-8")
     real_stream = (root / OBS_STREAM).read_text(encoding="utf-8")
+    count = 0
 
     def run_case(desc: str, files: dict[Path, str], expect: str | None) -> None:
+        nonlocal count
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
             shutil.copytree(root / WORKFLOWS, t / WORKFLOWS)
@@ -492,6 +579,7 @@ def self_test(root: Path) -> int:
             else:
                 print("  ok   clean copy passes")
             return
+        count += 1
         hit = [e for e in errs if expect in e]
         if hit:
             print(f"  ok   RED  {desc}: {hit[0][:150]}")
@@ -506,8 +594,7 @@ def self_test(root: Path) -> int:
 
     run_case("clean", {}, None)
     for line, expect in INSERTIONS:
-        desc = f"insert `{line.splitlines()[0][:60]}`"
-        run_case(desc, {OBS_STREAM: _insert_before(real_stream, STREAM_ANCHOR, line)}, expect)
+        run_case(f"insert `{line.splitlines()[0][:60]}`", {OBS_STREAM: _insert_before(real_stream, STREAM_ANCHOR, line)}, expect)
     for desc, old, new, expect in CI_MUTATIONS:
         text = replaced(real_ci, old, new, desc)
         if text is not None:
@@ -516,22 +603,14 @@ def self_test(root: Path) -> int:
         text = replaced(real_stream, old, new, desc)
         if text is not None:
             run_case(desc, {OBS_STREAM: text}, expect)
-    run_case(
-        "a new script restarts OBS",
-        {SCRIPTS / "ci" / "fix-obs.ps1": 'Stop-Process -Name obs64 -Force\nschtasks /run /tn "StartOBS"\n'},
-        "process action",
-    )
-    run_case(
-        "another script writes the started marker",
-        {SCRIPTS / "ci" / "fake.ps1": f'"{MARKER}=true" | Out-File $env:GITHUB_ENV -Append\n'},
-        "may only be written by",
-    )
+    for desc, files, expect in EXTRA_SCRIPTS:
+        run_case(desc, {Path(k): v for k, v in files.items()}, expect)
     if failures:
         print("SELF-TEST FAILED:")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("self-test OK: every regressed copy is red, the clean copy is green")
+    print(f"self-test OK: all {count} regressed copies are red, the clean copy is green")
     return 0
 
 

@@ -1520,6 +1520,20 @@ jobs:
           path: e2e/playwright-report/
           if-no-files-found: ignore
 
+  obs-scripts-test:
+    name: OBS scripts vs mock obs-websocket (#374)
+    # #374: stream OBS is camera-box's, so the scripts that start/stop it
+    # (scripts/ci/obs-stream.ps1, obs-readiness-check.ps1, obs-ws.ps1) are executed
+    # here first, in Windows PowerShell 5.1 (what the stream box runs), against a
+    # mock obs-websocket + rig lease + fake obs64 process. Every scenario also
+    # asserts the scripts sent only Start/Stop streaming and read-only requests.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the OBS scripts against the mock (25 scenarios)
+        run: python tests/ci/test_obs_stream.py
+
   rust-ci-gate:
     name: Rust CI Gate
     if: always()
@@ -1538,6 +1552,7 @@ jobs:
         frontend-e2e,
         mutation-plan,
         mutation-testing,
+        obs-scripts-test,
       ]
     runs-on: ubuntu-latest
     steps:
@@ -1556,6 +1571,7 @@ jobs:
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
           echo "mutation-plan:  ${{ needs.mutation-plan.result }}"
           echo "mutation-testing: ${{ needs.mutation-testing.result }}"
+          echo "obs-scripts-test: ${{ needs.obs-scripts-test.result }}"
 
           FAILED=0
 
@@ -1603,7 +1619,8 @@ jobs:
             "file-size:${{ needs.file-size.result }}" \
             "secret-scan:${{ needs.secret-scan.result }}" \
             "test-integrity:${{ needs.test-integrity.result }}" \
-            "frontend-e2e:${{ needs.frontend-e2e.result }}"; do
+            "frontend-e2e:${{ needs.frontend-e2e.result }}" \
+            "obs-scripts-test:${{ needs.obs-scripts-test.result }}"; do
             name="${job_result%%:*}"
             result="${job_result##*:}"
             if [[ "$result" != "success" ]]; then
@@ -3424,13 +3441,6 @@ jobs:
           }
           Write-Host "Stream started: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
 
-      # #374: re-check right before StartStream -- camera-box may have started
-      # streaming or recording, or changed the program scene, while we set up.
-      - name: "Stream OBS readiness: final re-check right before StartStream (#374)"
-        shell: powershell
-        timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
-
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
       # not recording), then StartStream with its response checked. Writes
@@ -4831,47 +4841,13 @@ jobs:
           $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           Write-Host "Before disconnect: endpoints=$($statusBefore.endpoints.Count)"
 
-          # Connect to OBS WebSocket
-          $ws = New-Object System.Net.WebSockets.ClientWebSocket
-          $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
-          $cts = New-Object System.Threading.CancellationTokenSource(30000)
-          $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
-          $buf = [byte[]]::new(8192)
-          $seg = [ArraySegment[byte]]$buf
-          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-          $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
-          if ($hello.d.authentication) {
-            $salt = $hello.d.authentication.salt
-            $challenge = $hello.d.authentication.challenge
-            $sha = [System.Security.Cryptography.SHA256]::Create()
-            $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
-            $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
-            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
-            $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
-            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-          }
-
-          # Stop OBS stream
-          Write-Host "Stopping OBS stream..."
-          $stop = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "disconnect-test-stop" } } | ConvertTo-Json -Depth 5
-          $bytes = [System.Text.Encoding]::UTF8.GetBytes($stop)
-          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
-          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-          Write-Host "OBS stream stopped"
-
-          # Wait 10 seconds (simulate brief outage)
-          Write-Host "Waiting 10 seconds with OBS disconnected..."
-          Start-Sleep -Seconds 10
-
-          # Restart OBS stream
-          Write-Host "Restarting OBS stream..."
-          $start = @{ op = 6; d = @{ requestType = "StartStream"; requestId = "disconnect-test-start" } } | ConvertTo-Json -Depth 5
-          $bytes = [System.Text.Encoding]::UTF8.GetBytes($start)
-          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
-          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-          Write-Host "OBS stream restarted"
-          $ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+          # #374: stop OUR stream, 10 s of dead air (a brief outage), then the
+          # checked restart (rig lease + readiness + StartStream). If camera-box
+          # took OBS during the gap, the restart is refused and the marker stays
+          # false, so no teardown ever stops camera-box's stream.
+          Write-Host "Republishing OBS stream (10 s outage)..."
+          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 10
+          if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish for the disconnect test (see the ::error:: line above)" }
 
           # Wait for RTMP to reconnect
           Write-Host "Waiting for RTMP reconnect..."
@@ -4942,38 +4918,6 @@ jobs:
           $eventId = $appStatus.streaming_event.id
           Write-Host "Active event ID: $eventId"
 
-          # Helper: open an authenticated OBS WebSocket and return the socket +
-          # a shared buffer/segment for request/response round-trips.
-          function Connect-ObsWs {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
-            $cts = New-Object System.Threading.CancellationTokenSource(30000)
-            $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
-            $buf = [byte[]]::new(8192)
-            $seg = [ArraySegment[byte]]$buf
-            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-            $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
-            if ($hello.d.authentication) {
-              $salt = $hello.d.authentication.salt
-              $challenge = $hello.d.authentication.challenge
-              $sha = [System.Security.Cryptography.SHA256]::Create()
-              $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
-              $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
-              $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
-              $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
-            }
-            return @{ Ws = $ws; Cts = $cts; Seg = $seg }
-          }
-
-          function Send-ObsRequest($conn, $requestType, $requestId) {
-            $req = @{ op = 6; d = @{ requestType = $requestType; requestId = $requestId } } | ConvertTo-Json -Depth 5
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($req)
-            $conn.Ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $conn.Cts.Token).Wait()
-            $null = $conn.Ws.ReceiveAsync($conn.Seg, $conn.Cts.Token).Result
-          }
-
           # One or more republish cycles (issue asks "one or more times").
           # Each cycle: StopStream -> dead-air gap -> StartStream, the same
           # session churn a real OBS restart produces.
@@ -4981,14 +4925,10 @@ jobs:
           $deadAirSecs = 8
           for ($c = 1; $c -le $cycles; $c++) {
             Write-Host "--- Republish cycle $c of $cycles ---"
-            $conn = Connect-ObsWs
-            Write-Host "Stopping OBS stream (cycle $c)..."
-            Send-ObsRequest $conn "StopStream" "av-align-stop-$c"
-            Write-Host "Dead-air gap: ${deadAirSecs}s..."
-            Start-Sleep -Seconds $deadAirSecs
-            Write-Host "Restarting OBS stream (cycle $c)..."
-            Send-ObsRequest $conn "StartStream" "av-align-start-$c"
-            $conn.Ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+            # #374: stop OUR stream, dead air, checked restart (see obs-stream.ps1).
+            Write-Host "Republishing OBS stream (cycle $c, ${deadAirSecs}s dead air)..."
+            & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 8
+            if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish in cycle $c (see the ::error:: line above)" }
 
             # Wait for RTMP to reconnect after this cycle.
             $reconnected = $false
@@ -6335,13 +6275,6 @@ jobs:
         env:
           RIG_LEASE_BUDGET_S: "600"
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
-
-      # #374: re-check right before StartStream -- camera-box may have started
-      # streaming or recording, or changed the program scene, while we set up.
-      - name: "Stream OBS readiness: final re-check right before StartStream (#374)"
-        shell: powershell
-        timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
