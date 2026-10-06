@@ -526,6 +526,9 @@ pub struct InpointState {
     /// `ingest_skew_active`, so the copy wired into the inpoint loop and the
     /// copy held by `AppState.inpoint_state` see the same value.
     rtmp_bind_error: Arc<std::sync::Mutex<Option<String>>>,
+    /// Ingest frame-gap counters (#368): arrival gaps and source-ts jumps,
+    /// written lock-free by the `MediaReceiver`, read by `/status`.
+    ingest_gaps: Arc<crate::ingest_gaps::IngestGapCounters>,
 }
 
 impl InpointState {
@@ -538,7 +541,13 @@ impl InpointState {
             ingest_skew_ms: Arc::new(AtomicI64::new(0)),
             ingest_skew_active: Arc::new(AtomicBool::new(false)),
             rtmp_bind_error: Arc::new(std::sync::Mutex::new(None)),
+            ingest_gaps: Arc::default(),
         }
+    }
+
+    /// The ingest frame-gap counters (#368), shared by every clone.
+    pub fn ingest_gaps(&self) -> &crate::ingest_gaps::IngestGapCounters {
+        &self.ingest_gaps
     }
 
     /// Wire the audit channel. Call once at runtime startup; all clones

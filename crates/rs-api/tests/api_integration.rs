@@ -176,6 +176,38 @@ async fn status_exposes_rtmp_bind_error_when_set() {
     );
 }
 
+/// #368: `/api/v1/status` shows the ingest frame-gap counters (arrival
+/// gaps, source-ts jumps = frames OBS dropped) under
+/// `inpoint.details.ingest_gaps`, read from the shared `InpointState`.
+#[tokio::test]
+async fn status_exposes_the_ingest_gap_counters() {
+    let inpoint = InpointState::new();
+    inpoint
+        .ingest_gaps()
+        .record_arrival_gap(812, 1_700_000_000_000);
+    inpoint
+        .ingest_gaps()
+        .record_source_jump(11, 1_700_000_000_500);
+    inpoint.ingest_gaps().set_frame_interval_us(33_367);
+    let state = test_state().await.with_inpoint_state(inpoint);
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let gaps = &body["inpoint"]["details"]["ingest_gaps"];
+    assert_eq!(gaps["arrival_gaps"], 1, "{gaps}");
+    assert_eq!(gaps["arrival_gap_max_ms"], 812);
+    assert_eq!(gaps["last_arrival_gap_at_ms"], 1_700_000_000_000i64);
+    assert_eq!(gaps["source_ts_jumps"], 1);
+    assert_eq!(gaps["dropped_frames"], 11);
+    assert_eq!(gaps["last_jump_at_ms"], 1_700_000_000_500i64);
+    assert_eq!(gaps["frame_interval_us"], 33_367);
+}
+
 #[tokio::test]
 async fn streaming_event_lifecycle() {
     let state = test_state().await;

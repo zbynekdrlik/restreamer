@@ -214,6 +214,7 @@ impl ServiceCore {
         // ProcessStall audit row. Stops when this guard drops at shutdown.
         let _stall_detector = crate::stall_detector::start_for_service(
             self.db_path.parent().unwrap_or(std::path::Path::new(".")),
+            &self.config.stall_detector,
             audit_tx.clone(),
         );
 
@@ -535,6 +536,7 @@ impl ServiceCore {
                 crate::stall_detector::INGEST_RUNTIME,
                 ingest.clone(),
                 self.db_path.parent().unwrap_or(std::path::Path::new(".")),
+                &self.config.stall_detector,
                 audit_tx.clone(),
             )
         });

@@ -54,6 +54,11 @@ fn test_config(dir: &Path) -> StallDetectorConfig {
     StallDetectorConfig {
         probe_interval: PROBE_INTERVAL,
         stall_threshold: STALL_THRESHOLD,
+        // Every recorded stall is also audited here, and never throttled:
+        // these tests are about the evidence, the tiers have their own.
+        audit_threshold: STALL_THRESHOLD,
+        severe_threshold: Duration::from_secs(5),
+        audit_min_interval: Duration::ZERO,
         tick_late_threshold: Duration::from_secs(2),
         baseline_every_ticks: 2,
         log_path: dir.join("logs").join("stall.log"),
@@ -139,11 +144,20 @@ fn spawn_and_block_runtime(
     dir: &Path,
     audit_tx: mpsc::Sender<AuditRow>,
 ) -> (tokio::runtime::Runtime, StallDetectorGuard, Duration) {
+    spawn_and_block_with(runtime, test_config(dir), audit_tx, BLOCKED_FOR)
+}
+
+/// `spawn_and_block_runtime` with an explicit config and block length.
+fn spawn_and_block_with(
+    runtime: &'static str,
+    cfg: StallDetectorConfig,
+    audit_tx: mpsc::Sender<AuditRow>,
+    block_for: Duration,
+) -> (tokio::runtime::Runtime, StallDetectorGuard, Duration) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let cfg = test_config(dir);
     let log_path = cfg.log_path.clone();
     let guard = rt
         .block_on(async {
@@ -158,7 +172,7 @@ fn spawn_and_block_runtime(
     wait_for_event(&log_path, "detector_started");
     wait_for_first_probe(&rt);
     let block_start = Instant::now();
-    rt.block_on(async { std::thread::sleep(BLOCKED_FOR) });
+    rt.block_on(async { std::thread::sleep(block_for) });
     (rt, guard, block_start.elapsed())
 }
 
@@ -404,4 +418,156 @@ fn a_stall_names_the_runtime_that_stalled() {
     for record in records(&log_path) {
         assert_eq!(record["runtime"], "ingest", "{record}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// #368 tiers: stall.log from 500 ms, a ProcessStall row from 700 ms, rows
+// throttled with an aggregated count.
+// ---------------------------------------------------------------------------
+
+/// The production tiers (probe 100 ms, record 500 ms, audit 700 ms), with
+/// the evidence file under `dir` and no throttle.
+fn production_tiers(dir: &Path) -> StallDetectorConfig {
+    StallDetectorConfig {
+        audit_min_interval: Duration::ZERO,
+        ..StallDetectorConfig::production(dir)
+    }
+}
+
+/// Drive `rt` until `stall.log` holds `n` `stall_end` records, then keep
+/// driving it for `grace` (a row would be emitted right after the end).
+fn drive_until_stall_ends(rt: &tokio::runtime::Runtime, path: &Path, n: usize, grace: Duration) {
+    rt.block_on(async {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while events(path).iter().filter(|e| *e == "stall_end").count() < n {
+            assert!(Instant::now() < deadline, "no stall_end #{n} within 10 s");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(grace).await;
+    });
+}
+
+fn stall_ends(path: &Path) -> Vec<Value> {
+    records(path)
+        .into_iter()
+        .filter(|r| r["event"] == "stall_end")
+        .collect()
+}
+
+/// A 600 ms block is a stall worth recording (>= 500 ms) but, on a scale
+/// whose audit threshold sits far above any measurement slack, never an
+/// audit row.
+#[test]
+fn a_stall_below_the_audit_threshold_is_recorded_but_not_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = StallDetectorConfig {
+        audit_threshold: Duration::from_millis(1_500),
+        ..production_tiers(dir.path())
+    };
+    let log_path = cfg.log_path.clone();
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, blocked) =
+        spawn_and_block_with(MAIN_RUNTIME, cfg, audit_tx, Duration::from_millis(600));
+    drive_until_stall_ends(&rt, &log_path, 1, Duration::from_millis(300));
+    guard.stop();
+
+    let ends = stall_ends(&log_path);
+    let duration = ends[0]["duration_ms"].as_u64().unwrap();
+    assert!(duration >= blocked.as_millis() as u64, "{duration} ms");
+    assert_eq!(ends[0]["tier"], "minor");
+    assert!(audit_rx.try_recv().is_err(), "no ProcessStall row");
+}
+
+/// The production tiers on a real runtime: a 600 ms block is recorded in
+/// stall.log, and is audited exactly when it measured 700 ms or more.
+#[test]
+fn a_600_ms_block_is_a_stall_record_on_the_production_tiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = production_tiers(dir.path());
+    let log_path = cfg.log_path.clone();
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, blocked) =
+        spawn_and_block_with(MAIN_RUNTIME, cfg, audit_tx, Duration::from_millis(600));
+    drive_until_stall_ends(&rt, &log_path, 1, Duration::from_millis(300));
+    guard.stop();
+
+    let ends = stall_ends(&log_path);
+    assert_eq!(ends.len(), 1, "one block = one stall record");
+    let duration = ends[0]["duration_ms"].as_u64().unwrap();
+    assert!(duration >= blocked.as_millis() as u64, "{duration} ms");
+    let audited = audit_rx.try_recv().is_ok();
+    if duration < 700 {
+        assert_eq!(ends[0]["tier"], "minor");
+        assert!(!audited, "a {duration} ms stall is below the audit tier");
+    } else {
+        assert_eq!(ends[0]["tier"], "major");
+        assert!(audited, "a {duration} ms stall is audited");
+    }
+}
+
+/// A 900 ms block on the production tiers is a `major` ProcessStall row.
+#[test]
+fn a_block_of_700_ms_or_more_writes_a_process_stall_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = production_tiers(dir.path());
+    let log_path = cfg.log_path.clone();
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, blocked) =
+        spawn_and_block_with(MAIN_RUNTIME, cfg, audit_tx, Duration::from_millis(900));
+    let row = rt
+        .block_on(async { tokio::time::timeout(Duration::from_secs(10), audit_rx.recv()).await })
+        .expect("ProcessStall row within 10 s of recovery")
+        .expect("audit channel open");
+    guard.stop();
+
+    assert_eq!(row.action, Action::ProcessStall);
+    assert_eq!(row.severity, Severity::Warn);
+    assert_eq!(row.detail["tier"], "major");
+    assert_eq!(row.detail["runtime"], "main");
+    assert_eq!(row.detail["held_back_before"], Value::Null);
+    assert!(row.detail["duration_ms"].as_u64().unwrap() >= blocked.as_millis() as u64);
+    let ends = stall_ends(&log_path);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0]["tier"], "major");
+    let started = &records(&log_path)[0];
+    assert_eq!(started["audit_threshold_ms"], 700);
+    assert_eq!(started["stall_threshold_ms"], 500);
+}
+
+/// A storm of stalls inside the audit interval writes ONE row; the rest are
+/// counted and flushed as one aggregate row once the interval has passed.
+/// stall.log still holds every one of them.
+#[test]
+fn a_stall_storm_writes_one_row_then_an_aggregate() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = StallDetectorConfig {
+        audit_min_interval: Duration::from_secs(5),
+        ..production_tiers(dir.path())
+    };
+    let log_path = cfg.log_path.clone();
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, _) =
+        spawn_and_block_with(MAIN_RUNTIME, cfg, audit_tx, Duration::from_millis(900));
+    drive_until_stall_ends(&rt, &log_path, 1, Duration::from_millis(150));
+    for n in 2..=3 {
+        rt.block_on(async { std::thread::sleep(Duration::from_millis(900)) });
+        drive_until_stall_ends(&rt, &log_path, n, Duration::from_millis(150));
+    }
+    let first = audit_rx.try_recv().expect("the first stall is audited");
+    assert_eq!(first.detail["tier"], "major");
+    assert!(audit_rx.try_recv().is_err(), "stalls 2 and 3 are held back");
+
+    let aggregate = rt
+        .block_on(async { tokio::time::timeout(Duration::from_secs(10), audit_rx.recv()).await })
+        .expect("the aggregate row once the interval has passed")
+        .expect("audit channel open");
+    guard.stop();
+    assert_eq!(aggregate.action, Action::ProcessStall);
+    assert_eq!(aggregate.detail["aggregate"], true);
+    assert_eq!(aggregate.detail["runtime"], "main");
+    assert_eq!(aggregate.detail["held_back"]["count"], 2);
+    // Only audit-tier stalls are held back. A block's stall is measured from
+    // the probe in flight, which a later block may only get mid-block.
+    assert!(aggregate.detail["held_back"]["max"].as_u64().unwrap() >= 700);
+    assert_eq!(stall_ends(&log_path).len(), 3, "stall.log keeps all three");
 }

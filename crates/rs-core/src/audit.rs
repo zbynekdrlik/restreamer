@@ -213,7 +213,28 @@ pub enum Action {
     /// PRE-stall reading), resources_at_detect (mid-stall for runtime_starved,
     /// right after the freeze for whole_process), resources_at_end, stall_log,
     /// stall_log_error}. The same evidence is in `logs/stall.log`.
+    ///
+    /// Since #368 the threshold is tiered (`config.stall_detector`): a stall
+    /// of 700 ms or more gets this row (`tier: "major"`, or `"severe"` from
+    /// 5 s; 500-700 ms stalls stay in stall.log only). Detail adds `runtime`,
+    /// `tier` and `held_back_before` (the stalls the rate limit held back
+    /// since the previous row: {count, max, total, unit, span_ms}, or null).
+    /// At most one row per `audit_min_interval_ms` (10 s); a held-back
+    /// aggregate with no later stall to carry it is flushed as its own row
+    /// `{aggregate: true, runtime, held_back, stall_log}`.
     ProcessStall,
+    /// Inpoint-side (#368): a gap in the frames reaching the ingest. Emitted
+    /// by the `MediaReceiver` on the ingest runtime. Severity::Warn,
+    /// Source::Inpoint. `kind` is `arrival_gap` (no media frame arrived for
+    /// 300 ms or more: {gap_ms, resumed_at_ms, stream_identifier}) or
+    /// `source_ts_jump` (the publisher's video timestamps jumped by more than
+    /// 1.5 frame intervals, i.e. OBS dropped frames before sending:
+    /// {from_ts, to_ts, delta_ms, frame_interval_ms, dropped_frames, at_ms,
+    /// stream_identifier}). `*_at_ms` are Unix-epoch ms. Rate-limited per
+    /// kind to one row per 10 s; `held_back_before` carries what was held
+    /// back since the previous row, and an aggregate the stream did not
+    /// carry is flushed as `{kind, aggregate: true, held_back}`.
+    IngestFrameGap,
     /// Local chunk-store volume crossed a disk-pressure threshold on the
     /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
     /// chunks are never dropped (continuity guarantee). Detail JSON:
@@ -733,6 +754,14 @@ mod tests {
         let a = Action::ProcessStall;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"process_stall\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_ingest_frame_gap_serdes() {
+        let a = Action::IngestFrameGap;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"ingest_frame_gap\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 

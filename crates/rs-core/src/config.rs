@@ -23,6 +23,67 @@ pub struct Config {
     pub obs: ObsConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub stall_detector: StallDetectorSettings,
+}
+
+/// Process-stall detector tiers (#368). Both runtimes (main and ingest) are
+/// probed every `probe_interval_ms`. A probe unanswered for
+/// `record_threshold_ms` opens a stall: `stall_start`/`stall_end` lines in
+/// `logs/stall*.log`. A stall of `audit_threshold_ms` or more (OBS starts
+/// dropping frames above ~700 ms of send queue) also writes a `ProcessStall`
+/// audit row, at most one per `audit_min_interval_ms` with the rest counted
+/// into an aggregate. `severe_threshold_ms` labels a record `tier: "severe"`.
+/// A detector wake-up `tick_late_threshold_ms` late during a stall makes it
+/// `whole_process` (the OS did not run us) instead of `runtime_starved`.
+/// None of these is a credential: all `readable` in CONFIG_INVENTORY.
+/// Read once at startup (restart to apply).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StallDetectorSettings {
+    #[serde(default = "default_stall_probe_interval_ms")]
+    pub probe_interval_ms: u64,
+    #[serde(default = "default_stall_record_threshold_ms")]
+    pub record_threshold_ms: u64,
+    #[serde(default = "default_stall_audit_threshold_ms")]
+    pub audit_threshold_ms: u64,
+    #[serde(default = "default_stall_severe_threshold_ms")]
+    pub severe_threshold_ms: u64,
+    #[serde(default = "default_stall_tick_late_threshold_ms")]
+    pub tick_late_threshold_ms: u64,
+    #[serde(default = "default_stall_audit_min_interval_ms")]
+    pub audit_min_interval_ms: u64,
+}
+
+fn default_stall_probe_interval_ms() -> u64 {
+    1_000
+}
+fn default_stall_record_threshold_ms() -> u64 {
+    5_000
+}
+fn default_stall_audit_threshold_ms() -> u64 {
+    5_000
+}
+fn default_stall_severe_threshold_ms() -> u64 {
+    5_000
+}
+fn default_stall_tick_late_threshold_ms() -> u64 {
+    1_000
+}
+fn default_stall_audit_min_interval_ms() -> u64 {
+    0
+}
+
+impl Default for StallDetectorSettings {
+    fn default() -> Self {
+        Self {
+            probe_interval_ms: default_stall_probe_interval_ms(),
+            record_threshold_ms: default_stall_record_threshold_ms(),
+            audit_threshold_ms: default_stall_audit_threshold_ms(),
+            severe_threshold_ms: default_stall_severe_threshold_ms(),
+            tick_late_threshold_ms: default_stall_tick_late_threshold_ms(),
+            audit_min_interval_ms: default_stall_audit_min_interval_ms(),
+        }
+    }
 }
 
 /// Operator-facing outage notifications (#261, #306). All fields are runtime
@@ -664,6 +725,7 @@ impl Config {
                 ..ObsConfig::default()
             },
             notifications: NotificationsConfig::default(),
+            stall_detector: StallDetectorSettings::default(),
         }
     }
 }
@@ -687,6 +749,7 @@ impl Default for Config {
             delivery: DeliveryConfig::default(),
             obs: ObsConfig::default(),
             notifications: NotificationsConfig::default(),
+            stall_detector: StallDetectorSettings::default(),
         }
     }
 }

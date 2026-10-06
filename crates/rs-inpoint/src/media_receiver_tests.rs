@@ -717,3 +717,6 @@ async fn resubscribe_after_frames_reanchors_the_chunker_session() {
 
 #[path = "media_receiver_takeover_tests.rs"]
 mod takeover;
+
+#[path = "media_receiver_gap_tests.rs"]
+mod gaps;

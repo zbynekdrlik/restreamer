@@ -365,3 +365,37 @@ fn s3_config_debug_redacts_credentials() {
     assert!(!debug_str.contains("test-key"));
     assert!(!debug_str.contains("test-secret"));
 }
+
+/// #368: an installed config.json predates the stall-detector section. It
+/// must load with the designed tiers, and a partial section keeps the
+/// defaults for the fields it omits.
+#[test]
+fn stall_detector_settings_default_to_the_designed_tiers() {
+    let base = r#""client_uuid": "abc",
+        "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" }"#;
+    let config: Config = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+    assert_eq!(
+        config.stall_detector,
+        StallDetectorSettings {
+            probe_interval_ms: 100,
+            record_threshold_ms: 500,
+            audit_threshold_ms: 700,
+            severe_threshold_ms: 5_000,
+            tick_late_threshold_ms: 250,
+            audit_min_interval_ms: 10_000,
+        }
+    );
+    assert_eq!(config.stall_detector, StallDetectorSettings::default());
+
+    let partial: Config = serde_json::from_str(&format!(
+        r#"{{{base}, "stall_detector": {{ "audit_threshold_ms": 900 }} }}"#
+    ))
+    .unwrap();
+    assert_eq!(
+        partial.stall_detector,
+        StallDetectorSettings {
+            audit_threshold_ms: 900,
+            ..StallDetectorSettings::default()
+        }
+    );
+}
