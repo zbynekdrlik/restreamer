@@ -118,12 +118,13 @@ impl ProcessLevel {
             .map_or("unknown", |(_, name)| name)
     }
 
-    /// Raise a known value below Normal to Normal. Normal and above (I/O
-    /// High, Critical) and unknown values are kept: restreamer never lowers
-    /// a priority and never raises one above Normal.
+    /// Raise a value below Normal to Normal. Normal and above (I/O High,
+    /// Critical) and unknown values are kept: restreamer never lowers a
+    /// priority and never raises one above Normal. Every value below Normal
+    /// is a known level (memory 0-4, I/O 0-1), so an unknown value is always
+    /// above Normal and needs no check of its own.
     pub fn action(self, current: u32) -> ClassAction {
-        let known = self.levels().iter().any(|(v, _)| *v == current);
-        if known && current < self.normal() {
+        if current < self.normal() {
             ClassAction::RaiseToNormal
         } else {
             ClassAction::Keep

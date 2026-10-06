@@ -532,6 +532,16 @@ fn process_levels_name_their_values_and_their_normal() {
     );
 }
 
+/// `ProcessLevel::action` relies on this: only a known level can be raised.
+#[test]
+fn every_value_below_normal_is_a_known_level() {
+    for level in [ProcessLevel::Memory, ProcessLevel::Io] {
+        for value in 0..level.normal() {
+            assert_ne!(level.value_name(value), "unknown", "{level:?} {value}");
+        }
+    }
+}
+
 /// The raise decision at its boundaries, for both levels.
 #[test]
 fn a_level_is_raised_only_from_a_known_value_below_normal() {
