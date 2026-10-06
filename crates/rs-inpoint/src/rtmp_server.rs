@@ -212,6 +212,10 @@ impl RtmpServer {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: #[tokio::test] expands to Runtime::block_on, and tests read chunk files back and share hub state synchronously; never on the ingest runtime (#368 clippy.toml)"
+)]
 mod tests {
     use super::*;
 

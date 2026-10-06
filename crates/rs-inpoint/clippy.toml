@@ -1,0 +1,52 @@
+# rs-inpoint runs on the single-threaded `restreamer-ingest` runtime (#368).
+# One blocking call there stops the OBS socket read for its whole duration,
+# and OBS drops frames once its send queue holds ~700 ms. There is no second
+# worker to take over. These methods are therefore banned in this crate
+# (#368 ROZHODNUTE issuecomment-6013075985 item 4). Use the tokio
+# equivalent, or `spawn_blocking` for genuinely blocking work.
+#
+# A test that legitimately uses one (reading a chunk file back, a std Mutex
+# in a test hub) allows it with `#[allow(clippy::disallowed_methods, reason = ..)]`
+# on its test module.
+
+# Clippy reads only the NEAREST clippy.toml (no merge), so the workspace
+# thresholds from the root clippy.toml are repeated here.
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 100
+
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "blocks the ingest thread: use tokio::time::sleep (#368)" },
+    { path = "std::fs::read", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::read_to_string", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::write", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::copy", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::rename", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::remove_file", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::remove_dir_all", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::create_dir_all", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::metadata", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::read_dir", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::File::open", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::File::create", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::File::sync_all", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::File::sync_data", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::fs::OpenOptions::open", reason = "blocking file IO on the ingest thread: use tokio::fs (#368)" },
+    { path = "std::sync::Mutex::lock", reason = "a std Mutex can block the ingest thread: use an atomic or a lock never held across work (#368)" },
+    { path = "std::sync::RwLock::read", reason = "a std RwLock can block the ingest thread (#368)" },
+    { path = "std::sync::RwLock::write", reason = "a std RwLock can block the ingest thread (#368)" },
+    { path = "std::sync::mpsc::Receiver::recv", reason = "blocks the ingest thread: use a tokio channel (#368)" },
+    { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "blocks the ingest thread: use a tokio channel (#368)" },
+    { path = "std::thread::JoinHandle::join", reason = "blocks the ingest thread (#368)" },
+    { path = "std::net::TcpStream::connect", reason = "blocking network IO on the ingest thread: use tokio::net (#368)" },
+    { path = "std::net::TcpListener::accept", reason = "blocking network IO on the ingest thread: use tokio::net (#368)" },
+    { path = "tokio::runtime::Runtime::block_on", reason = "nested block_on on the ingest thread (#368)" },
+    { path = "tokio::runtime::Handle::block_on", reason = "nested block_on on the ingest thread (#368)" },
+    { path = "tokio::task::block_in_place", reason = "panics on the current_thread ingest runtime (#368)" },
+    { path = "tokio::sync::Mutex::blocking_lock", reason = "blocks the ingest thread: lock().await (#368)" },
+    { path = "tokio::sync::RwLock::blocking_read", reason = "blocks the ingest thread (#368)" },
+    { path = "tokio::sync::RwLock::blocking_write", reason = "blocks the ingest thread (#368)" },
+    { path = "tokio::sync::mpsc::Sender::blocking_send", reason = "blocks the ingest thread: send().await or try_send (#368)" },
+    { path = "tokio::sync::mpsc::Receiver::blocking_recv", reason = "blocks the ingest thread: recv().await (#368)" },
+    { path = "tokio::sync::oneshot::Receiver::blocking_recv", reason = "blocks the ingest thread (#368)" },
+]

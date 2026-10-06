@@ -6,6 +6,10 @@
 //! -> chunk files on disk.
 //!
 //! Requires: ffmpeg with libx264 and aac encoder support.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: #[tokio::test] expands to Runtime::block_on, and the tests read chunk files back synchronously; never on the ingest runtime (#368 clippy.toml)"
+)]
 
 use std::sync::Arc;
 use std::time::Duration;
