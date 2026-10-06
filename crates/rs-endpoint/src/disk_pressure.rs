@@ -3,7 +3,7 @@
 //! lifecycle goes RED Attention (operator must act).
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -62,6 +62,30 @@ pub(crate) fn should_log_transition(prev: DiskPressure, now: DiskPressure) -> bo
     prev != now
 }
 
+/// How often the volume holding the chunk dir is sampled.
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// `(used_bytes, total_bytes)` of the volume holding a path, `None` when no
+/// mounted volume holds it. Production: [`volume_usage`].
+pub(crate) type VolumeProbe = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
+
+/// Runs the volume probe for the disk monitor, every `interval`.
+pub(crate) struct VolumeSampler {
+    probe: VolumeProbe,
+    interval: Duration,
+}
+
+impl VolumeSampler {
+    pub(crate) fn new(probe: VolumeProbe, interval: Duration) -> Self {
+        Self { probe, interval }
+    }
+
+    /// One sample of the volume holding `path`.
+    pub(crate) async fn sample(&mut self, path: &Path) -> Option<(u64, u64)> {
+        (self.probe)(path)
+    }
+}
+
 /// Sample the volume containing `chunk_dir` every 10s; emit LocalDiskPressure
 /// on level transitions (Ok↔Warn↔Critical) only. Returns when the
 /// shutdown channel fires.
@@ -76,15 +100,35 @@ pub async fn run_disk_monitor(
     audit_tx: Option<mpsc::Sender<AuditRow>>,
     disk_critical: Option<Arc<std::sync::atomic::AtomicBool>>,
     disk_level: Option<Arc<std::sync::atomic::AtomicU8>>,
+    shutdown: broadcast::Receiver<()>,
+) {
+    run_disk_monitor_with(
+        VolumeSampler::new(Arc::new(volume_usage), SAMPLE_INTERVAL),
+        chunk_dir,
+        audit_tx,
+        disk_critical,
+        disk_level,
+        shutdown,
+    )
+    .await;
+}
+
+/// [`run_disk_monitor`] with the volume probe and the sample interval given.
+pub(crate) async fn run_disk_monitor_with(
+    mut sampler: VolumeSampler,
+    chunk_dir: PathBuf,
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
+    disk_critical: Option<Arc<std::sync::atomic::AtomicBool>>,
+    disk_level: Option<Arc<std::sync::atomic::AtomicU8>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let mut last_pressure = DiskPressure::Ok;
     loop {
         tokio::select! {
             _ = shutdown.recv() => return,
-            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = tokio::time::sleep(sampler.interval) => {}
         }
-        let Some((used, total)) = volume_usage(&chunk_dir) else {
+        let Some((used, total)) = sampler.sample(&chunk_dir).await else {
             continue;
         };
         if total == 0 {
