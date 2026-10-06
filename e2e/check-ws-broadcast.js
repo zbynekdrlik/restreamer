@@ -10,8 +10,9 @@
 //   (a) names a mock push route itself instead of calling the lib/ws helper;
 //   (b) calls a push helper before waitForWsClient() — counted since the last
 //       page.goto()/page.reload() of the same test (a reload opens a NEW
-//       socket), and reset at every test/hook start and every top-level
-//       (column-0) statement, so a wait never leaks into a later helper;
+//       socket), and reset at every test/hook start and every statement at or
+//       outside the test's own indent, so a wait never leaks into a later
+//       helper (top-level or inside a describe);
 //   (c) calls a push helper without `await` (a floating push races the test);
 //   (d) imports a lib/ws helper under an alias (the scan matches by name).
 // Comments and string contents never count as calls; a route string inside a
@@ -107,13 +108,19 @@ function findViolations(source) {
     violations.push({ line: 1, reason: `a lib/ws helper is imported under an alias -- import it by its own name` });
   }
   let waited = false;
+  let testIndent = 0; // indent of the most recent test/hook start
   lexed.forEach(({ code, bare, lead }, idx) => {
     const lineNo = idx + 1;
     const raw = lines[idx];
+    const indent = raw.length - raw.trimStart().length;
     if (TEST_START_RE.test(raw)) {
       waited = false;
-    } else if (lead && /^\S/.test(raw) && bare.trim() !== "") {
-      waited = false; // a top-level statement: nothing from the previous test carries over
+      testIndent = indent;
+    } else if (lead && bare.trim() !== "" && indent <= testIndent) {
+      // A statement at (or outside) the test's own level -- its closing `});`,
+      // a sibling helper inside a describe, a top-level helper: nothing from
+      // the previous test carries over.
+      waited = false;
     }
     for (const route of RAW_ROUTES) {
       if (code.includes(route)) {
@@ -217,6 +224,12 @@ const SELF_TEST_CASES = [
     want: 1,
     src: T(OPEN, '  await page.goto("/");', "  await waitForWsClient(page, request);", "});",
       "async function sendIt(request) {", '  await broadcast(request, { type: "X" });', "}"),
+  },
+  {
+    name: "wait does not leak into a helper nested in a describe",
+    want: 1,
+    src: T('test.describe("d", () => {', "  " + OPEN, '    await page.goto("/");', "    await waitForWsClient(page, request);", "  });",
+      "  async function sendIt(request) {", '    await broadcast(request, { type: "X" });', "  }", "});"),
   },
   {
     name: "reload after wait needs a new wait",

@@ -29,7 +29,7 @@ interface WsClientsReport {
   open: number;
   snapshot_sent?: number;
   page_load?: number;
-  initial_load_done?: boolean;
+  obs_status?: { pageLoad: number; conn: number };
 }
 
 /**
@@ -38,8 +38,9 @@ interface WsClientsReport {
  * latest page load, its connect-time snapshot was already sent, and the
  * page's initial HTTP state load finished — so neither the snapshot nor an
  * initial fetch can overwrite what the test broadcasts next. See
- * `GET /api/v1/_test/ws-clients` in mock-api.js. Call once after navigation,
- * before the first `broadcast`.
+ * `isWsClientReady()` in mock-api.js. Call once after navigation, before the
+ * first `broadcast`. One page per test: only sockets of the LATEST document
+ * navigation count, so `min` > 1 is reserved for a future multi-socket page.
  */
 export async function waitForWsClient(
   page: Page,
@@ -84,16 +85,19 @@ async function postAndExpectDelivered(
   const res = await request.post(`${MOCK_API}/${route}`, { data });
   expect(res.ok(), `POST /${route} -> HTTP ${res.status()}`).toBe(true);
   const body = await res.json();
+  // `ready` counts only the broadcast-ready clients the mock reached (the
+  // same predicate waitForWsClient polls); `delivered` counts every OPEN one.
   expect(
-    body.delivered,
-    `${what} reached no WebSocket client — call waitForWsClient() first`,
+    body.ready,
+    `${what} reached no broadcast-ready WebSocket client (delivered to ${body.delivered} open) — call waitForWsClient() first`,
   ).toBeGreaterThanOrEqual(1);
 }
 
 /**
  * Broadcast one WebSocket event through the mock API. Fails immediately if
- * the mock delivered it to zero clients (a lost message), instead of letting
- * the caller's UI assertion time out with a misleading value.
+ * it reached no broadcast-ready client (a lost or overwritable message) —
+ * the runtime net behind the static guard — instead of letting the caller's
+ * UI assertion time out with a misleading value.
  */
 export async function broadcast(
   request: APIRequestContext,

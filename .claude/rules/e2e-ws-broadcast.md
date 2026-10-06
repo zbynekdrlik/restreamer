@@ -1,6 +1,6 @@
 ---
 paths:
-  - "e2e/*.spec.ts"
+  - "e2e/**/*.ts"
   - "e2e/mock-api.js"
   - "e2e/lib/ws.ts"
   - "e2e/check-ws-broadcast.js"
@@ -27,7 +27,7 @@ await broadcast(request, { type: "InpointStatus", data: { ... } });
 
 ## What "broadcast-ready" means
 
-`GET /_test/ws-clients` returns `{count, open, snapshot_sent, page_load, initial_load_done}`.
+`GET /_test/ws-clients` returns `{count, open, snapshot_sent, page_load, obs_status}`; `count` is `isWsClientReady()` in `mock-api.js`.
 A client is counted in `count` only when all four of these hold:
 
 1. **It is OPEN.**
@@ -45,13 +45,29 @@ A client is counted in `count` only when all four of these hold:
    - LAST, `/obs/status`.
 
    An unfinished chain can overwrite a push. The mock records when `/obs/status` is
-   requested for the current page load. **If you reorder or extend `load_initial_state`,
-   keep a fetch the mock can key on as its LAST step, and update the middleware at the top
-   of `mock-api.js`.**
+   requested for the current page load. A WS reconnect re-runs the chain, so a reconnect
+   socket needs an `/obs/status` that arrived after it connected. **If you reorder or
+   extend `load_initial_state`, keep a fetch the mock can key on as its LAST step, and
+   update the middleware at the top of `mock-api.js`.** Two ways to break readiness:
+   - a spec `page.route("**/obs/status")` that fulfills the request means it never
+     reaches the mock, so the page never becomes ready;
+   - a mock JSON route for `/obs/status` would turn its response into a store write that
+     lands AFTER readiness.
 
-`broadcast` fails at once when the mock delivered to 0 clients, instead of letting a UI
-assertion time out on a misleading value. Never use `waitForTimeout(…)` "to let the WS
-connect"; that is the band-aid this replaced.
+`broadcast` asserts the mock's `ready` count. That is the same `isWsClientReady()`
+predicate the wait polls, so a guard miss still fails loudly at runtime instead of
+letting a UI assertion time out on a misleading value. Never use `waitForTimeout(…)` "to
+let the WS connect"; that is the band-aid this replaced. One page per test: only sockets
+of the LATEST document navigation count.
+
+## Polled fields: readiness does not cover them
+
+The ControlBar polls `/status` every 2 s and writes `rtmp_bind_error`, `disk_pressure`,
+`vps_orphan_count`, `long_stream_warning` and `ingest_skew_*`. A push of one of those
+fields can be cleared by a poll answered just after it. `rtmp-bind-error-banner.spec.ts`
+shows the fix that keeps the test's "only the WS arm can raise it" meaning: track
+`/status` requests from before `goto`, `page.route` to hold every later poll, wait until
+no earlier poll is still open, then push.
 
 ## The guard
 
@@ -65,6 +81,12 @@ It scans every `e2e/**/*.ts` except `lib/ws.ts`, and fails on:
 - an aliased import of a `lib/ws` helper.
 
 Comments and string contents never count. The wait state resets at every `test(`/hook
-start AND at every top-level (column-0) statement, so a wait placed in a `beforeEach` is
-not credited: put it in the test. When you change a rule, add a case to the
-`--self-test` table.
+start AND at every statement at or outside the test's own indent. So a wait placed in a
+`beforeEach` is not credited: put it in the test. When you change a rule, add a case to
+the `--self-test` table.
+
+Known static limits (the runtime `ready` assertion catches them):
+- the lexer does not parse regex literals, so `/a\//` or a backtick inside a regex can
+  hide the rest of a line or file;
+- navigation not written as `page.goto/reload/goBack/goForward` (`page2.goto`, a
+  full-page `click`, `location.reload()` in `evaluate`) does not reset the wait.

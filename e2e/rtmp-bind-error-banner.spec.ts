@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Request } from "@playwright/test";
 import { broadcast, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
@@ -64,6 +64,18 @@ test("RtmpBindFailed WebSocket event raises the banner instantly (no poll wait)"
   await request.post("http://127.0.0.1:8910/api/v1/__reset");
   // Default scenario => the /status poll reports NO bind error, so the banner
   // can only appear from the WebSocket event — proving the ws.rs arm wires it.
+  // #377: that same 2 s ControlBar poll WRITES rtmp_bind_error (null here), so
+  // a poll answered just after the push would clear the banner again. Track
+  // every /status request so we can hold the poll before pushing (below).
+  const isStatus = (url: string) => new URL(url).pathname === "/api/v1/status";
+  const openStatus = new Set<Request>();
+  const heldStatus = new Set<Request>();
+  page.on("request", (r) => {
+    if (isStatus(r.url())) openStatus.add(r);
+  });
+  page.on("requestfinished", (r) => openStatus.delete(r));
+  page.on("requestfailed", (r) => openStatus.delete(r));
+
   await page.goto("/");
   await expect(page.locator(".event-selector")).toBeVisible({ timeout: 10000 });
 
@@ -71,6 +83,21 @@ test("RtmpBindFailed WebSocket event raises the banner instantly (no poll wait)"
   await expect(banner).toHaveCount(0);
 
   await waitForWsClient(page, request);
+  // Hold every later /status poll (never answered while the test runs), then
+  // wait until no poll sent BEFORE the hold is still unanswered: from here no
+  // /status response can reach the store, so the banner below can only come
+  // from the WebSocket arm, and nothing can clear it.
+  await page.route(
+    (url) => isStatus(url.toString()),
+    (route) => {
+      heldStatus.add(route.request());
+    },
+  );
+  await expect
+    .poll(() => [...openStatus].filter((r) => !heldStatus.has(r)).length, {
+      message: "a /status poll sent before the hold is still in flight",
+    })
+    .toBe(0);
   await broadcast(request, {
     type: "RtmpBindFailed",
     data: {
