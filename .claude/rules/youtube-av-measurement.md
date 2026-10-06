@@ -20,8 +20,9 @@ measurement.
 
 - `POST /api/v1/av-gate/session` `{"requester": "...", "title"?: "..."}` -> `201
   {session_id, broadcast_id}`. `409 {error:"busy", holder:{session_id, requester}}` while
-  another session holds the rig; `429` over the rolling-24 h quota budget
-  (`av_gate.daily_quota_budget`, default 4000, ~400 per session); `409
+  another session holds the rig; `429 quota` over the rolling-24 h budget
+  (`av_gate.daily_quota_budget`, default 4000, ~400 per session) and `429 project_quota`
+  when the project bucket shared with the health polling has < 400 left; `409
   {error:"cleanup_pending", sessions}` while an earlier teardown is being retried; `502
   {session_id, state:"failed", reason}` when a start step failed (already torn down);
   `503 not_provisioned` without a usable token or oauth file; `503 starting_up` until
@@ -37,6 +38,11 @@ measurement.
   runs (the boot reconcile owns it). The stop drains the event cache (`cache_delay_secs`
   + 15 s) BEFORE completing the broadcast, so `done` arrives ~2.5 min + YouTube's
   processing after the stop.
+- `GET /api/v1/av-gate/status` -> `{reconciled, holder, cleanup_pending: [ids]}`: why a
+  POST would be refused. `POST /api/v1/av-gate/session/{id}/clear-cleanup` drops a
+  pending cleanup WITHOUT retrying it (audited, `reaped.cause = operator_clear`): the
+  way out when a cleanup can never succeed (a broken oauth file, a VPS deleted by hand).
+  Whoever clears it owns what may still be live or billing.
 - **Auth:** LAN origin only (a tunneled request is refused even with an Access JWT)
   AND `Authorization: Bearer <token>` where the token is the content of
   `av_gate.api_token_file` (default `C:\ProgramData\Restreamer\av-gate\api-token`,
@@ -46,20 +52,30 @@ measurement.
   before ready, the idle reaper (`av_gate.idle_timeout_secs`, default 45 min from
   creation), a dead driver task, and the boot reconcile (`starting`/`ready` rows are
   torn down and failed, a `processing` row resumes its VOD wait). Teardown = complete
-  the broadcast if it is `live`/`testing` (never a never-live one), `stop-stream` the
-  event, then poll Hetzner (`app=restreamer,client_uuid=<box>,event_id=<id>`) until 0.
-  A teardown with any problem sets `cleanup_pending`; the maintenance task
-  (`run_av_gate_maintenance`, spawned by the runtime after the delivery reconcile)
-  retries it with backoff (5 min doubling, 2 h cap) until clean. Audit rows:
+  the broadcast if a live transition was ever attempted (`went_live` is persisted
+  BEFORE the call), `stop-stream` the event, then poll Hetzner
+  (`app=restreamer,client_uuid=<box>,event_id=<id>`) until 0. Each half that succeeds is
+  recorded (`broadcast_done`, `event_done`) and never repeated. A teardown with a
+  problem sets `cleanup_pending`; the maintenance task (`run_av_gate_maintenance`:
+  a supervisor around the loop, spawned by the runtime after the delivery reconcile)
+  retries only the missing half with backoff (5 min doubling, 2 h cap). **A retry never
+  stops an event that is active again**: the session is over, so an active `E2E-Test`
+  belongs to another run. Audit rows:
   `av_gate_session_{started,ready,stop_requested,processing,done,failed,reaped}`
-  (`reaped.cause`: `idle_timeout`, `boot_reconcile`, `driver_died`, `cleanup_retry`).
+  (`reaped.cause`: `idle_timeout`, `boot_reconcile`, `driver_died`, `cleanup_retry`,
+  `operator_clear`).
 - **Safety:** the rig refuses while ANY event is active, the CI event included (another
   run owns it: restreamer's own CI E2E uses `E2E-Test` too), and without a Hetzner
   token, both before any YouTube write. It uses the dashboard's own
   `start_stream`/`stop_stream` (single-event guard, #354 skew gate), binds only a
-  reusable stream, and never touches OBS. The event id is persisted before the start.
+  reusable stream, and never touches OBS. The event id is persisted before the start,
+  and the event is re-checked inactive right before it is started. Admission claims the
+  slot first, then checks pending cleanups and quota.
 - **Quota:** the manage client draws from the same project bucket as the health
   polling (`delivery_status::youtube_quota_tracker`), on top of the av-gate budget.
+  Completing a broadcast and reading its life cycle are charged without being refused
+  (`QuotaTracker::charge`, the bucket goes into debt): a broadcast must never stay live
+  because the health polling used the quota.
 - **VOD done** = `processingDetails.processingStatus == succeeded` OR
   `status.uploadStatus == processed` (both read: which one a live archive reports is
   undocumented). UNVERIFIED against the real channel until part 2's first run.
@@ -68,7 +84,11 @@ measurement.
   `idle_timeout_secs`, `processing_timeout_secs` (2 h), `daily_quota_budget`.
 - **Testing:** the session tests use a scripted rig (`FakeRig`) and a stateful wiremock
   YouTube (`fake_youtube` in `av_gate_driver_tests.rs`; a transition updates the
-  life cycle the next read returns). The production rig is tested on its own against the
+  life cycle the next read returns), split into driver / create / stop / cleanup test
+  files. A test that needs a small project bucket sets `TestSeam.quota_bucket` to its
+  own static tracker: draining the process-wide one breaks every parallel test.
+  Read the DB BEFORE aborting a spawned maintenance task: an abort mid-query can leave
+  the single in-memory SQLite connection unusable. The production rig is tested on its own against the
   real DB + stream handlers + a wiremock Hetzner. `ManageClient` takes its endpoints as
   constructor arguments, so no process-global URL override and no test lock.
 
