@@ -79,6 +79,8 @@ class ObsState:
     stream_age_s: float = 300.0       # how long the initially active stream has run
     foreign_delay_s: float = 0.3       # camera-box's takeover delay after our stop
     stream_started: float = 0.0
+    reconnecting: bool = False         # OBS auto-reconnecting (output stays active)
+    reconnect_ends_after_s: float = 0.0  # the reconnect succeeds; outputDuration restarts at 0
     requests: list[str] = field(default_factory=list)
     unexpected: list[str] = field(default_factory=list)
     output_bytes: int = 0
@@ -142,7 +144,8 @@ def _respond(state: ObsState, req: dict) -> dict:
             state.output_bytes += 1_500_000
         data = {"outputActive": state.streaming, "outputTimecode": "00:00:01.000",
                 "outputBytes": state.output_bytes,
-                "outputDuration": int((time.time() - state.stream_started) * 1000) if state.streaming else 0}
+                "outputDuration": int((time.time() - state.stream_started) * 1000) if state.streaming else 0,
+                "outputReconnecting": state.reconnecting}
         if state.omit_output_active:
             del data["outputActive"]
     elif rtype == "GetRecordStatus":
@@ -322,6 +325,7 @@ class Case:
     may_change_state: bool = False  # only a successful start / stop / republish may change OBS
     max_stops: int = 1
     ours_age_s: float | None = None  # our recorded start, seconds ago (None = no record)
+    pre_actions: list[list[str]] = field(default_factory=list)  # run first, each must exit 0
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
@@ -334,6 +338,7 @@ START = ["-Action", "Start"]
 STOP = ["-Action", "Stop"]
 ASSERT = ["-Action", "AssertNotStreaming"]
 REPUBLISH = ["-Action", "Republish", "-GapSeconds", "1"]
+REBASELINE = ["-Action", "Rebaseline"]
 RC = "obs-readiness-check.ps1"
 OS_ = "obs-stream.ps1"
 
@@ -376,6 +381,22 @@ CASES = [
     Case("stop: a newer stream is active (camera-box, 5 s old) -> refused, kept", OS_, STOP,
          ObsState(streaming=True, stream_age_s=5), 1, "newer than ours -- not ours, not touching it", ["false"],
          may_stop=True, ours_age_s=600, forbid_requests={"StopStream"}),
+    Case("stop: ours reconnected (duration reset), NOT rebaselined -> refused (the trap Rebaseline closes)", OS_, STOP,
+         ObsState(streaming=True, stream_age_s=120), 1, "newer than ours", ["false"],
+         may_stop=True, ours_age_s=1200, forbid_requests={"StopStream"}),
+    Case("rebaseline after the reconnect, then stop -> stopped", OS_, STOP,
+         ObsState(streaming=True, stream_age_s=120), 0, "OBS stream stopped", [],
+         may_stop=True, may_change_state=True, ours_age_s=1200, pre_actions=[REBASELINE],
+         require_requests={"StopStream"}),
+    Case("rebaseline waits out a reconnect in progress, then stop -> stopped", OS_, STOP,
+         ObsState(streaming=True, stream_age_s=900, reconnecting=True, reconnect_ends_after_s=2.0), 0,
+         "OBS stream stopped", [], may_stop=True, may_change_state=True, ours_age_s=1200,
+         pre_actions=[REBASELINE], require_requests={"StopStream"}),
+    Case("rebaseline: OBS gave up reconnecting -> marker false, nothing stopped", OS_, REBASELINE,
+         ObsState(), 0, "no longer active", ["false"], ours_age_s=1200),
+    Case("rebaseline: active -> re-anchored, read-only", OS_, REBASELINE,
+         ObsState(streaming=True, stream_age_s=30), 0, "re-anchored", [], ours_age_s=1200,
+         forbid_requests={"StopStream", "StartStream"}),
     Case("assert: not streaming -> ok", OS_, ASSERT, ObsState(), 0, "not streaming - good", [],
          forbid_requests={"StopStream", "StartStream"}),
     Case("assert: streaming -> fail, never stopped", OS_, ASSERT, ObsState(streaming=True), 1, "already streaming", [],
@@ -427,6 +448,11 @@ def run_case(case: Case) -> list[str]:
     before = (case.state.streaming, case.state.recording)
     if case.state.streaming:
         case.state.stream_started = time.time() - case.state.stream_age_s
+    if case.state.reconnecting:
+        def reconnected() -> None:
+            case.state.stream_started = time.time()
+            case.state.reconnecting = False
+        threading.Timer(case.state.reconnect_ends_after_s, reconnected).start()
     with tempfile.TemporaryDirectory() as tmp_s:
         tmp = Path(tmp_s)
         obs = None if case.obs_down else MockObs(case.state)
@@ -448,6 +474,15 @@ def run_case(case: Case) -> list[str]:
             "RUNNER_TEMP": str(tmp),
         })
         try:
+            pre_out = ""
+            for pre in case.pre_actions:
+                p0 = subprocess.run(
+                    interpreter() + ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPTS / case.script)] + pre,
+                    capture_output=True, text=True, env=env, timeout=180,
+                )
+                pre_out += p0.stdout + p0.stderr
+                if p0.returncode != 0:
+                    problems.append(f"pre-action {pre} exited {p0.returncode}")
             proc = subprocess.run(
                 interpreter() + ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPTS / case.script)] + case.args,
                 capture_output=True, text=True, env=env, timeout=120,
@@ -459,7 +494,7 @@ def run_case(case: Case) -> list[str]:
                 obs.close()
             if lease:
                 lease.close()
-        out = proc.stdout + proc.stderr
+        out = pre_out + proc.stdout + proc.stderr
         got = markers(env_file)
     if proc.returncode != case.expect_exit:
         problems.append(f"exit {proc.returncode}, expected {case.expect_exit}")

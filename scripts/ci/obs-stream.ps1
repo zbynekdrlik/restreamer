@@ -14,6 +14,11 @@
 #                              air, then the full Start (lease + readiness + checked
 #                              StartStream). If camera-box took OBS during the gap, the
 #                              start is refused and the marker stays false.
+#   -Action Rebaseline         read-only, right after every step that kills/restarts
+#                              Restreamer.exe while we stream: OBS reconnects, which
+#                              RESETS outputDuration. Waits out the reconnect, then
+#                              re-records when our (reconnected) session began; an
+#                              output that went inactive is gone: marker=false.
 #   -Action AssertNotStreaming read-only: fails when OBS is streaming (into the inpoint
 #                              it would keep rtmp_connected true) or rejects us; only an
 #                              unreachable OBS is a warning (a down OBS streams nothing).
@@ -27,16 +32,19 @@
 # Start-/Stop-OurStream / marker functions appear: change them together with
 # DISPATCH / PINNED_COUNTS in the guard (.claude/rules/stream-obs-ci.md).
 #
-# Stream identity (OBS outputs carry no session id): Start records when OUR stream
-# began in $env:RUNNER_TEMP\obs-streaming-started-at (job-scoped, survives steps,
-# updated by every restart). Before StopStream, and while waiting for idle, the
-# active stream counts as ours only if its outputDuration fits that start; a
-# younger session (camera-box started streaming after ours dropped) is never
-# stopped: marker=false and exit 1.
+# Stream identity (OBS outputs carry no session id): Start records when OUR session
+# began in $env:RUNNER_TEMP\obs-streaming-started-at (job-scoped, survives steps).
+# outputDuration is frames since the last (re)connect, and OBS zeroes it on every
+# automatic reconnect (libobs obs_output_begin_data_capture), so every restart of
+# Restreamer.exe is followed by -Action Rebaseline. While OBS reconnects its output
+# stays active, so no second session can start meanwhile. Before StopStream the
+# active session counts as ours only if its duration covers half the time since
+# that record; while waiting for idle, a duration that drops means a new session.
+# A session that is not ours is never stopped: marker=false and exit 1.
 
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("Start", "Stop", "Republish", "AssertNotStreaming")]
+  [ValidateSet("Start", "Stop", "Republish", "Rebaseline", "AssertNotStreaming")]
   [string]$Action,
   [int]$GapSeconds = 10
 )
@@ -64,11 +72,10 @@ function Set-StartedAt($data) {
   "$began" | Out-File -FilePath (Get-StartedAtFile) -Encoding ascii
 }
 
-# Is the active output (GetStreamStatus data) the session we started? Its
-# outputDuration counts only frames sent, so OBS reconnect stalls (the crash
-# gates) make it lag the wall clock; it must still cover half our run. A
-# session younger than that began after ours: not ours. No record (the start
-# step died between StartStream and the record) -> ours.
+# Is the active output (GetStreamStatus data) the session we started (or last
+# rebaselined)? Its outputDuration must cover half the time since that record
+# (slack for frames OBS drops); a younger session began after ours: not ours.
+# No record (the start step died between StartStream and the record) -> ours.
 function Test-OurStream($data) {
   $file = Get-StartedAtFile
   if (-not (Test-Path -LiteralPath $file)) { return $true }
@@ -77,6 +84,14 @@ function Test-OurStream($data) {
   $elapsed = (Get-NowEpoch) - $ours
   $duration = [double]$data.outputDuration / 1000.0
   return -not ($elapsed -gt 60 -and $duration -lt 0.5 * $elapsed)
+}
+
+function Get-IdentityNote($data) {
+  $file = Get-StartedAtFile
+  $ours = if (Test-Path -LiteralPath $file) { (Get-Content -LiteralPath $file -Raw).Trim() -as [double] } else { $null }
+  $since = if ($null -ne $ours) { "$([math]::Round((Get-NowEpoch) - $ours))s" } else { "unknown" }
+  return "active session outputDuration=$([math]::Round([double]$data.outputDuration / 1000))s, our recorded start $since ago; " +
+    "if this IS ours (a Restreamer restart without -Action Rebaseline), see .claude/skills/obs-recovery"
 }
 
 function Wait-StreamActive([bool]$want, [int]$seconds) {
@@ -131,7 +146,7 @@ function Stop-OurStream {
     $now = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
     if ((Get-ObsActive "GetStreamStatus" $now) -and -not (Test-OurStream $now)) {
       Set-StartedMarker "false"
-      Write-Host "::error::the active stream is newer than ours -- not ours, not touching it"
+      Write-Host "::error::the active stream is newer than ours -- not ours, not touching it ($(Get-IdentityNote $now))"
       exit 1
     }
     $resp = Invoke-ObsRequest "StopStream"
@@ -149,12 +164,40 @@ function Stop-OurStream {
       # A shorter duration than just before our stop = a new session took OBS.
       if ([double]$data.outputDuration -lt $before - 1000) {
         Set-StartedMarker "false"
-        Write-Host "::error::a newer stream replaced ours while it stopped -- not ours, not touching it"
+        Write-Host "::error::a newer stream replaced ours while it stopped -- not ours, not touching it ($(Get-IdentityNote $data))"
         exit 1
       }
       Start-Sleep -Seconds 1
     }
     throw "OBS still streaming 20 s after StopStream"
+  } finally {
+    Close-Obs
+  }
+}
+
+# Read-only. After Restreamer.exe was killed/restarted, OBS reconnects and its
+# outputDuration restarts at 0: re-record when our session (re)began.
+function Invoke-Rebaseline {
+  Connect-Obs
+  try {
+    for ($i = 0; $i -lt 90; $i++) {
+      $data = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
+      if (-not (Get-ObsActive "GetStreamStatus" $data)) {
+        Set-StartedMarker "false"
+        Write-Host "::warning::our OBS stream is no longer active (OBS gave up reconnecting) -- nothing of ours left to stop"
+        return
+      }
+      if (-not $data.outputReconnecting) {
+        Set-StartedAt $data
+        Write-Host "OBS stream re-anchored after the Restreamer restart (outputDuration $([math]::Round([double]$data.outputDuration / 1000))s)"
+        return
+      }
+      Start-Sleep -Seconds 1
+    }
+    # Still reconnecting: still our output (no second session can start while it is
+    # active). Anchor at now; the reconnect's own duration then only grows from here.
+    Set-StartedAt @{ outputDuration = 0 }
+    Write-Host "::warning::OBS still reconnecting after 90 s; anchored our stream at now"
   } finally {
     Close-Obs
   }
@@ -195,6 +238,7 @@ try {
       Start-OurStream $false
       Write-Host "Measured dead air (stopped -> streaming again): $([math]::Round($deadAir.Elapsed.TotalSeconds, 1)) s"
     }
+    "Rebaseline" { Invoke-Rebaseline }
     "AssertNotStreaming" { Invoke-AssertNotStreaming }
   }
 } catch {

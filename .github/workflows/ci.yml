@@ -5644,6 +5644,17 @@ jobs:
           }
           throw "Restreamer API did not come back - subsequent cleanup will fail"
 
+      # #374: the crash recovery test, the crash-exhaustion gate and the always()
+      # step above kill/restart Restreamer.exe, so OBS reconnected and its
+      # outputDuration restarted at 0. Re-anchor our stream's identity, read-only, or
+      # the teardown would mistake our reconnected stream for a newer (camera-box) one.
+      # The guard requires this right after any such chain.
+      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"
+        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
+        shell: powershell
+        timeout-minutes: 3
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Rebaseline
+
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell

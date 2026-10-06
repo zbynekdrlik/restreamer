@@ -57,6 +57,7 @@ when ci.yml or scripts/ contain any of the above.
 | `stream OBS is recording` | a recording camera-box or the owner started |
 | `camera-box holds the rig lease: <job> (<run>)` | `obs-stream.ps1 -Action Start` saw a live lease at start time |
 | `StartStream refused: code ...` | OBS refused the start (usually camera-box started streaming first) |
+| `the active stream is newer than ours` / `a newer stream replaced ours` | the teardown refused: the active session is not the one CI recorded. The line prints its duration and our record. Usually camera-box's stream, so leave it. If it IS ours (a Restreamer restart with no `-Action Rebaseline` after it; see `.claude/rules/stream-obs-ci.md`), fix the missing Rebaseline step |
 
 What to do:
 

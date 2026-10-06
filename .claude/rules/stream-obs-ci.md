@@ -53,9 +53,16 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
   no session id.
   - Start records when OUR session began in `$RUNNER_TEMP/obs-streaming-started-at`
     (job-scoped, rewritten by every restart).
+  - `outputDuration` is frames since the last (re)connect, and OBS zeroes it on EVERY
+    automatic reconnect (libobs `obs_output_begin_data_capture`). So any step that kills,
+    restarts or suspends Restreamer.exe while we stream must be followed by
+    `obs-stream.ps1 -Action Rebaseline` (`if: always() && env.OBS_STREAMING_STARTED_BY_CI ==
+    'true'`). That step is read-only: it waits out the reconnect, then re-records the start;
+    if the output is gone, it writes marker=false. The guard enforces this after every
+    restart chain. The YT job has one, after the crash gates. While OBS reconnects, its
+    output stays active, so no second session can start meanwhile.
   - Before StopStream, Stop-OurStream refuses an active session whose `outputDuration` is under
-    half our run (after the first 60 s). Duration counts frames, so OBS reconnect stalls
-    (the crash gates) make ours lag.
+    half the time since that record (after the first 60 s).
   - While waiting for idle, it refuses a session whose duration dropped below the
     pre-stop value: camera-box took OBS in the gap.
   - In both cases it writes the marker false and exits 1, never stopping the newer session.
@@ -64,7 +71,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
   obs-stream.ps1 `Start-OurStream`, and StopStream only in `Stop-OurStream`.
 - **`tests/ci/test_obs_stream.py`** (ci.yml job `obs-scripts-test`, windows-latest = PowerShell
   5.1, part of the Rust CI Gate) runs every action against a stdlib mock obs-websocket, a mock
-  lease and a fake `obs64` process, in 34 scenarios. It asserts:
+  lease and a fake `obs64` process, in 39 scenarios. It asserts:
   - the exit codes and the marker sequence;
   - that only allowlisted requests were sent (the list is read from the guard);
   - that StopStream is sent only by stop/republish;
@@ -82,7 +89,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
 - `python3 scripts/ci/verify_no_obs_mutation.py` scans every SELF-HOSTED job in every workflow
   (run/with/env/uses/name, plus the job env) and every file under `scripts/`. A hosted job cannot
   reach OBS, so it is skipped; that is why a test-integrity grep pattern never self-matches.
-- `--self-test` applies 79 known-bad mutations to a temp copy, and each must go red for its own
+- `--self-test` applies 83 known-bad mutations to a temp copy, and each must go red for its own
   reason. When you add a guard rule, add its mutation there.
 - `requestType` is fail-closed. Only `requestType = "<Literal>"` (or the JSON
   `"requestType":"<Literal>"`) passes, plus `requestType = $requestType` inside

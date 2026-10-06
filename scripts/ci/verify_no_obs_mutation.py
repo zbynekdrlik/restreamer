@@ -60,9 +60,14 @@ PS = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/"
 START_RUN = PS + "obs-stream.ps1 -Action Start"
 STOP_RUN = PS + "obs-stream.ps1 -Action Stop"
 ASSERT_RUN = PS + "obs-stream.ps1 -Action AssertNotStreaming"
+REBASELINE_RUN = PS + "obs-stream.ps1 -Action Rebaseline"
+# A step that kills / restarts / suspends Restreamer.exe while OBS streams into it:
+# OBS reconnects and zeroes outputDuration, so the next step must be a Rebaseline.
+RESTREAMER_RESTART = re.compile(
+    r"taskkill[^\n]*restreamer|stop-process[^\n]*restreamer|restreamergui|ntsuspendprocess", re.I)
 READINESS_RUN = PS + "obs-readiness-check.ps1"
 REPUBLISH_LINE = re.compile(r"&\s*" + re.escape(PS + "obs-stream.ps1 -Action Republish -GapSeconds") + r" \d+")
-WHOLE_RUNS = {START_RUN, STOP_RUN, ASSERT_RUN, READINESS_RUN}
+WHOLE_RUNS = {START_RUN, STOP_RUN, ASSERT_RUN, READINESS_RUN, REBASELINE_RUN}
 TEARDOWN_IF = f"always() && env.{MARKER} == 'true'"
 SUCCESS_ONLY = {"", "success()"}
 
@@ -148,7 +153,7 @@ HOSTED_LABEL = re.compile(r"^(ubuntu|windows|macos)-[\w.]+$")
 DYNAMIC_DISPATCH = re.compile(
     r"set-alias|new-alias|\$\{function:|get-command|invoke-expression|\biex\b|&\s*\$", re.I)
 # Any obs-stream action word or a computed -File path in a stream-box job must be canonical.
-ACTION_WORD = re.compile(r"-Action\b\W*(?:Start|Stop|Republish|AssertNotStreaming)\b|-File\s+\$", re.I)
+ACTION_WORD = re.compile(r"-Action\b\W*(?:Start|Stop|Republish|Rebaseline|AssertNotStreaming)\b|-File\s+\$", re.I)
 # obs-stream.ps1's dispatcher, pinned: only these arms may call Start-/Stop-OurStream.
 DISPATCH = """switch ($Action) {
 "Start" { Start-OurStream $true }
@@ -162,11 +167,12 @@ Start-Sleep -Seconds $GapSeconds
 Start-OurStream $false
 Write-Host "Measured dead air (stopped -> streaming again): $([math]::Round($deadAir.Elapsed.TotalSeconds, 1)) s"
 }
+"Rebaseline" { Invoke-Rebaseline }
 "AssertNotStreaming" { Invoke-AssertNotStreaming }
 }"""
 # word -> occurrences in obs-stream.ps1 code: the definition + the pinned uses.
-PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker": 6,
-                 "Test-OurStream": 2, "Set-StartedAt": 2, "Get-StartedAtFile": 3}
+PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker": 7,
+                 "Test-OurStream": 2, "Set-StartedAt": 4, "Get-StartedAtFile": 4}
 MOCK_TEST = "python tests/ci/test_obs_stream.py"
 SKIP_DIRS = {"__pycache__"}
 
@@ -330,6 +336,7 @@ def check_job(wf_name: str, job_name: str, job: dict) -> list[str]:
         if MARKER in env_text:
             errors.append(f"{where}: {MARKER} may not be set in an env: map")
     started = False
+    owe_rebaseline: str | None = None
     for i, step in enumerate(job.get("steps") or []):
         name = str(step.get("name", ""))
         uses = str(step.get("uses") or "")
@@ -351,6 +358,19 @@ def check_job(wf_name: str, job_name: str, job: dict) -> list[str]:
                 errors.append(f"{label}: step name describes an OBS mutation")
         run = code.strip()
         republish = any(REPUBLISH_LINE.fullmatch(l.strip()) for l in code.splitlines())
+        restarts = bool(RESTREAMER_RESTART.search(code))
+        if owe_rebaseline and not restarts:
+            if run != REBASELINE_RUN:
+                errors.append(f"{where} / {owe_rebaseline}: kills/restarts Restreamer.exe while OBS streams; the next "
+                              f"step must be `{REBASELINE_RUN}` (OBS reconnects and zeroes outputDuration)")
+            owe_rebaseline = None
+        if started and restarts:
+            owe_rebaseline = name or f"step {i}"
+        if run == REBASELINE_RUN:
+            if not started:
+                errors.append(f"{label}: Rebaseline before this job started OBS streaming")
+            if cond != TEARDOWN_IF:
+                errors.append(f"{label}: the Rebaseline step needs exactly `if: {TEARDOWN_IF}` (got `{cond}`)")
         if run == START_RUN:
             if started:
                 errors.append(f"{label}: a second OBS Start in one job")
@@ -364,6 +384,9 @@ def check_job(wf_name: str, job_name: str, job: dict) -> list[str]:
             errors.append(f"{label}: the OBS stop teardown needs exactly `if: {TEARDOWN_IF}` (got `{cond}`)")
         if republish and (cond not in SUCCESS_ONLY or step.get("continue-on-error")):
             errors.append(f"{label}: an OBS republish must run only on success (no always()/continue-on-error)")
+    if owe_rebaseline:
+        errors.append(f"{where} / {owe_rebaseline}: kills/restarts Restreamer.exe while OBS streams; the next step "
+                      f"must be `{REBASELINE_RUN}`")
     return errors
 
 
@@ -446,6 +469,10 @@ def check_obs_stream_shape(root: Path) -> list[str]:
         errs.append(f"{OBS_STREAM}: Stop-OurStream must refuse (marker false, exit) a stream that is not ours before StopStream")
     if not re.search(r"\[double\]\$data\.outputDuration -lt \$before - 1000\) \{\s*\n\s*Set-StartedMarker \"false\"", stop):
         errs.append(f"{OBS_STREAM}: Stop-OurStream must refuse a newer session that appears while ours stops")
+    reb = body_of(code, "Invoke-Rebaseline") or ""
+    if not re.search(r'if \(-not \(Get-ObsActive "GetStreamStatus" \$data\)\) \{\s*\n\s*Set-StartedMarker "false"', reb) \
+            or "if (-not $data.outputReconnecting) {" not in reb or "StopStream" in reb or "StartStream" in reb:
+        errs.append(f"{OBS_STREAM}: Rebaseline must wait out the reconnect, re-anchor, and mark a gone stream false (read-only)")
     if "Set-StartedAt $active" not in (body_of(code, "Start-OurStream") or ""):
         errs.append(f"{OBS_STREAM}: Start-OurStream must record when our stream began")
     if not re.search(r'"Republish"\s*\{\s*\n\s*Stop-OurStream\s*\n\s*Set-StartedMarker "false"', code):
@@ -589,6 +616,21 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "        mutation-testing,\n      ]", "rust-ci-gate must need obs-scripts-test"),
     ("the mock obs-websocket job stops running the test", "        run: python tests/ci/test_obs_stream.py",
      "        run: echo skipped", "must run `python tests/ci/test_obs_stream.py`"),
+    ("the Rebaseline after the Restreamer restarts is dropped",
+     '      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"\n'
+     "        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'\n        shell: powershell\n        timeout-minutes: 3\n"
+     f"        run: {PS}obs-stream.ps1 -Action Rebaseline\n",
+     "", "the next step must be"),
+    ("the Rebaseline after the Restreamer restarts runs only on success",
+     '      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"\n'
+     "        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'",
+     '      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"\n        if: success()',
+     "the Rebaseline step needs exactly"),
+    ("a new Restreamer kill after the Rebaseline",
+     '      - name: "GATE: Second YouTube health check after resilience tests"\n',
+     '      - name: evil restart\n        shell: powershell\n        run: taskkill /F /IM Restreamer.exe\n\n'
+     '      - name: "GATE: Second YouTube health check after resilience tests"\n',
+     "the next step must be"),
     ("the guard moved onto the stream box", "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
      "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
      "may only run in a GitHub-hosted job"),
@@ -620,6 +662,8 @@ STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Stop-OurStream ignores a session that replaced ours", "      if ([double]$data.outputDuration -lt $before - 1000) {",
      "      if ($false) {", "refuse a newer session"),
     ("Start forgets when our stream began", "    Set-StartedAt $active\n", "", "must record when our stream began"),
+    ("Rebaseline anchors without waiting out the reconnect", "      if (-not $data.outputReconnecting) {",
+     "      if ($true) {", "Rebaseline must wait out the reconnect"),
     ("Republish keeps the marker true across the gap", '      Stop-OurStream\n      Set-StartedMarker "false"\n',
      "      Stop-OurStream\n", "Republish must write the marker false"),
     ("AssertNotStreaming stops a foreign stream",
