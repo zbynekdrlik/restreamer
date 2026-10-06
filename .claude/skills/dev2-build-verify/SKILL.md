@@ -39,6 +39,12 @@ The `# airuleset:deploy-dirty-ok` marker is REQUIRED — the clean-tree hook
 blocks any rsync/scp from a dirty tree, and you sync UNCOMMITTED work here on
 purpose (you verify BEFORE committing). Re-run the rsync after EVERY local edit.
 
+**From a worktree lane, give rsync the ABSOLUTE worktree path and no
+`--exclude '.claude/'`.** `block-vault-store-read.sh` reads a `./` source or a
+`.claude/` operand as a recursive sweep of the credential store's parent and
+refuses the whole command (#368 lane b). Syncing the repo's own `.claude/rules`
+is harmless.
+
 **The `--exclude '*.png'` above breaks `trunk build` on a fresh/bootstrapped
 checkout.** `leptos-ui/index.html` references `icon-192.png` / `icon-512.png`;
 trunk fails with `error getting canonical path for ".../icon-192.png": No such
@@ -196,6 +202,12 @@ ssh newlevel@dev2 'source ~/.cargo/env; export SQLX_OFFLINE=true
   cd ~/restreamer-buildcheck/src-tauri && cargo check'
 ```
 
+- A lane checkout has no `src-tauri/target` (src-tauri is its own cargo root).
+  Seed it warm with `cp -al ~/restreamer-bc-<lane built with +1.99.0>/src-tauri/target
+  ~/restreamer-bc-<you>/src-tauri/target` (check `.rustc_info.json` for the
+  rustc version); then `cargo +1.99.0 check --all-targets` is ~10 s. Use
+  `check`, not `clippy -D warnings`: clippy fails on the pre-existing
+  `build.rs:18` `let_and_return`, which CI never lints.
 - Without the GTK/webkit dev libs: `The system library gdk-3.0 required by crate
   gdk-sys was not found` (a `gdk-sys` build-script failure, nothing to do with
   your code).
