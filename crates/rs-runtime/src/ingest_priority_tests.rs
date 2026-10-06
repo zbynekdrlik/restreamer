@@ -503,6 +503,108 @@ fn a_refused_level_raise_warns() {
 }
 
 #[test]
+fn process_levels_name_their_values_and_their_normal() {
+    assert_eq!(ProcessLevel::Memory.label(), "memory priority");
+    assert_eq!(ProcessLevel::Io.label(), "I/O priority");
+    assert_eq!(ProcessLevel::Memory.normal(), MEMORY_PRIORITY_NORMAL);
+    assert_eq!(ProcessLevel::Io.normal(), IO_PRIORITY_NORMAL);
+    let memory: Vec<_> = (0..=6)
+        .map(|v| ProcessLevel::Memory.value_name(v))
+        .collect();
+    assert_eq!(
+        memory,
+        [
+            "unknown",
+            "very_low",
+            "low",
+            "medium",
+            "below_normal",
+            "normal",
+            "unknown"
+        ]
+    );
+    let io: Vec<_> = (0..=5).map(|v| ProcessLevel::Io.value_name(v)).collect();
+    assert_eq!(
+        io,
+        ["very_low", "low", "normal", "high", "critical", "unknown"]
+    );
+}
+
+/// The raise decision at its boundaries, for both levels.
+#[test]
+fn a_level_is_raised_only_from_a_known_value_below_normal() {
+    use ClassAction::{Keep, RaiseToNormal};
+    let memory: Vec<_> = (0..=6).map(|v| ProcessLevel::Memory.action(v)).collect();
+    assert_eq!(
+        memory,
+        [
+            Keep,
+            RaiseToNormal,
+            RaiseToNormal,
+            RaiseToNormal,
+            RaiseToNormal,
+            Keep,
+            Keep
+        ]
+    );
+    let io: Vec<_> = (0..=5).map(|v| ProcessLevel::Io.action(v)).collect();
+    assert_eq!(io, [RaiseToNormal, RaiseToNormal, Keep, Keep, Keep, Keep]);
+}
+
+/// A raise must reach Normal: a refused set, or a set that did not stick
+/// (read back below Normal), makes the line a warning, even when the other
+/// half looks fine.
+#[test]
+fn a_level_raise_that_fails_or_does_not_stick_is_a_failure() {
+    let raised = |set: OsCall<()>, now: OsCall<u32>| LevelReport {
+        level: ProcessLevel::Memory,
+        before: OsCall::Done(MEMORY_PRIORITY_LOW),
+        action: ClassAction::RaiseToNormal,
+        raise: Some((set, now)),
+    };
+    assert!(!raised(OsCall::Done(()), OsCall::Done(MEMORY_PRIORITY_NORMAL)).failed());
+    assert!(raised(OsCall::Done(()), OsCall::Done(MEMORY_PRIORITY_LOW)).failed());
+    assert!(raised(OsCall::Done(()), OsCall::Failed("gone".into())).failed());
+    assert!(
+        raised(
+            OsCall::Failed("denied".into()),
+            OsCall::Done(MEMORY_PRIORITY_NORMAL)
+        )
+        .failed()
+    );
+    let not_stuck = raised(OsCall::Done(()), OsCall::Done(MEMORY_PRIORITY_MEDIUM));
+    assert_eq!(
+        not_stuck.summary(),
+        "memory priority low (2), raise to normal: ok, now medium (3)"
+    );
+
+    let kept = LevelReport {
+        level: ProcessLevel::Io,
+        before: OsCall::Done(IO_PRIORITY_NORMAL),
+        action: ClassAction::Keep,
+        raise: None,
+    };
+    assert!(!kept.failed());
+    assert_eq!(kept.summary(), "I/O priority normal (2), kept");
+    let unreadable = LevelReport {
+        before: OsCall::Failed("gone".into()),
+        ..kept
+    };
+    assert!(unreadable.failed());
+}
+
+/// A process level that did not stick makes the whole startup line a
+/// warning.
+#[test]
+fn a_level_that_does_not_stick_makes_the_startup_line_a_warning() {
+    let os = FakeOs::task_priority_7();
+    let mut report = apply_process_priority(&os);
+    assert_eq!(report.level(), log::Level::Info);
+    report.io.raise = Some((OsCall::Done(()), OsCall::Done(IO_PRIORITY_LOW)));
+    assert_eq!(report.level(), log::Level::Warn);
+}
+
+#[test]
 fn the_ingest_thread_is_raised_to_highest_and_read_back() {
     let os = FakeOs::at(NORMAL_PRIORITY_CLASS);
     let report = raise_ingest_thread(&os);

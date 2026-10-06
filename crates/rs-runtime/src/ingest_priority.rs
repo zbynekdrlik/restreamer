@@ -7,7 +7,10 @@
 //!
 //! - The process runs at Normal. `install.ps1` and the CI deploy register the
 //!   task with `-Priority 4`; [`apply_process_priority`] raises a process
-//!   that still starts below Normal (a task registered before #368).
+//!   that still starts below Normal (a task registered before #368, which
+//!   the in-app updater never re-registers): its CPU class, its memory
+//!   priority and its I/O priority, each only from a known value below
+//!   Normal and only to Normal.
 //! - The process is opted out of EcoQoS power throttling.
 //! - The one ingest thread runs at `THREAD_PRIORITY_HIGHEST`. Its work is tiny
 //!   (socket read, parse, hand-off), so it cannot starve stream OBS.
@@ -60,6 +63,71 @@ pub enum ProcessLevel {
     Io,
 }
 
+/// The memory priorities, lowest first.
+const MEMORY_LEVELS: [(u32, &str); 5] = [
+    (MEMORY_PRIORITY_VERY_LOW, "very_low"),
+    (MEMORY_PRIORITY_LOW, "low"),
+    (MEMORY_PRIORITY_MEDIUM, "medium"),
+    (MEMORY_PRIORITY_BELOW_NORMAL, "below_normal"),
+    (MEMORY_PRIORITY_NORMAL, "normal"),
+];
+
+/// The I/O priorities, lowest first.
+const IO_LEVELS: [(u32, &str); 5] = [
+    (IO_PRIORITY_VERY_LOW, "very_low"),
+    (IO_PRIORITY_LOW, "low"),
+    (IO_PRIORITY_NORMAL, "normal"),
+    (IO_PRIORITY_HIGH, "high"),
+    (IO_PRIORITY_CRITICAL, "critical"),
+];
+
+impl ProcessLevel {
+    /// Its name in the log line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Memory => "memory priority",
+            Self::Io => "I/O priority",
+        }
+    }
+
+    /// Its Normal value, the one restreamer raises it to.
+    pub fn normal(self) -> u32 {
+        match self {
+            Self::Memory => MEMORY_PRIORITY_NORMAL,
+            Self::Io => IO_PRIORITY_NORMAL,
+        }
+    }
+
+    /// The known values with their names. The numbers grow with the
+    /// priority for both.
+    fn levels(self) -> &'static [(u32, &'static str)] {
+        match self {
+            Self::Memory => &MEMORY_LEVELS,
+            Self::Io => &IO_LEVELS,
+        }
+    }
+
+    /// Readable name of `value`.
+    pub fn value_name(self, value: u32) -> &'static str {
+        self.levels()
+            .iter()
+            .find(|(v, _)| *v == value)
+            .map_or("unknown", |(_, name)| name)
+    }
+
+    /// Raise a known value below Normal to Normal. Normal and above (I/O
+    /// High, Critical) and unknown values are kept: restreamer never lowers
+    /// a priority and never raises one above Normal.
+    pub fn action(self, current: u32) -> ClassAction {
+        let known = self.levels().iter().any(|(v, _)| *v == current);
+        if known && current < self.normal() {
+            ClassAction::RaiseToNormal
+        } else {
+            ClassAction::Keep
+        }
+    }
+}
+
 /// The priority classes in scheduling order, lowest first (the raw values
 /// are not ordered).
 const CLASS_ORDER: [(u32, &str); 6] = [
@@ -84,7 +152,8 @@ pub fn class_name(class: u32) -> &'static str {
         .map_or("unknown", |(_, name)| name)
 }
 
-/// What to do with the process priority class read at startup.
+/// What to do with a priority read at startup: the CPU class, or the memory
+/// or I/O priority ([`ProcessLevel::action`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassAction {
     /// Below Normal (Idle, BelowNormal): raise to Normal.
@@ -194,6 +263,67 @@ impl PriorityOs for SystemPriorityOs {
     }
 }
 
+/// What [`apply_level`] found and did to the memory or I/O priority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelReport {
+    pub level: ProcessLevel,
+    pub before: OsCall<u32>,
+    pub action: ClassAction,
+    /// The set to Normal and the value read back after it; `None` when the
+    /// level was kept.
+    pub raise: Option<(OsCall<()>, OsCall<u32>)>,
+}
+
+/// Raise the memory or I/O priority to Normal when it is a known value below
+/// Normal, and read it back.
+pub fn apply_level(os: &impl PriorityOs, level: ProcessLevel) -> LevelReport {
+    let before = os.process_level(level);
+    let action = match &before {
+        OsCall::Done(value) => level.action(*value),
+        OsCall::Unsupported | OsCall::Failed(_) => ClassAction::Keep,
+    };
+    let raise = (action == ClassAction::RaiseToNormal).then(|| {
+        let set = os.set_process_level(level, level.normal());
+        (set, os.process_level(level))
+    });
+    LevelReport {
+        level,
+        before,
+        action,
+        raise,
+    }
+}
+
+impl LevelReport {
+    /// A read value for the log line: its name and its number.
+    fn value_text(&self, value: &OsCall<u32>) -> String {
+        value.text(|v| format!("{} ({v})", self.level.value_name(*v)))
+    }
+
+    /// Its part of the log line, before and after.
+    pub fn summary(&self) -> String {
+        let label = self.level.label();
+        let before = self.value_text(&self.before);
+        match &self.raise {
+            None => format!("{label} {before}, kept"),
+            Some((set, now)) => format!(
+                "{label} {before}, raise to normal: {}, now {}",
+                set.text(ok),
+                self.value_text(now)
+            ),
+        }
+    }
+
+    /// A call failed, or the raise did not reach Normal.
+    pub fn failed(&self) -> bool {
+        let raise_failed = self
+            .raise
+            .as_ref()
+            .is_some_and(|(set, now)| set.failed() || *now != OsCall::Done(self.level.normal()));
+        self.before.failed() || raise_failed
+    }
+}
+
 /// What [`apply_process_priority`] found and did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessPriorityReport {
@@ -201,11 +331,14 @@ pub struct ProcessPriorityReport {
     pub action: ClassAction,
     /// The `SetPriorityClass(NORMAL)` outcome; `None` when the class was kept.
     pub raise: Option<OsCall<()>>,
+    pub memory: LevelReport,
+    pub io: LevelReport,
     pub ecoqos_off: OsCall<()>,
 }
 
 /// Process-wide, once at startup: raise a below-Normal process to Normal
-/// and switch EcoQoS throttling off.
+/// (CPU class, memory priority, I/O priority) and switch EcoQoS throttling
+/// off.
 pub fn apply_process_priority(os: &impl PriorityOs) -> ProcessPriorityReport {
     let class_before = os.priority_class();
     let action = match &class_before {
@@ -214,11 +347,15 @@ pub fn apply_process_priority(os: &impl PriorityOs) -> ProcessPriorityReport {
     };
     let raise = (action == ClassAction::RaiseToNormal)
         .then(|| os.set_priority_class(NORMAL_PRIORITY_CLASS));
+    let memory = apply_level(os, ProcessLevel::Memory);
+    let io = apply_level(os, ProcessLevel::Io);
     let ecoqos_off = os.set_power_throttling(ecoqos_off());
     ProcessPriorityReport {
         class_before,
         action,
         raise,
+        memory,
+        io,
         ecoqos_off,
     }
 }
@@ -231,17 +368,22 @@ impl ProcessPriorityReport {
             None => "class kept".to_string(),
         };
         format!(
-            "process priority class {}; {raise}; EcoQoS throttling off: {}",
+            "process priority class {}; {raise}; {}; {}; EcoQoS throttling off: {}",
             self.class_before
                 .text(|class| class_name(*class).to_string()),
+            self.memory.summary(),
+            self.io.summary(),
             self.ecoqos_off.text(ok),
         )
     }
 
-    /// `Warn` when a Windows call failed, `Info` otherwise.
+    /// `Warn` when a Windows call failed or a raise did not stick, `Info`
+    /// otherwise.
     pub fn level(&self) -> log::Level {
         let failed = self.class_before.failed()
             || self.raise.as_ref().is_some_and(OsCall::failed)
+            || self.memory.failed()
+            || self.io.failed()
             || self.ecoqos_off.failed();
         if failed {
             log::Level::Warn
