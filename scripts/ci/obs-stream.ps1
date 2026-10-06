@@ -23,6 +23,16 @@
 # scripts/ci/verify_no_obs_mutation.py allows the StartStream request only in
 # Start-OurStream and StopStream only in Stop-OurStream, and checks their structure;
 # tests/ci/test_obs_stream.py runs every action against a mock obs-websocket.
+# The guard also pins this file's `switch ($Action)` dispatcher and how often the
+# Start-/Stop-OurStream / marker functions appear: change them together with
+# DISPATCH / PINNED_COUNTS in the guard (.claude/rules/stream-obs-ci.md).
+#
+# Stream identity (OBS outputs carry no session id): Start records when OUR stream
+# began in $env:RUNNER_TEMP\obs-streaming-started-at (job-scoped, survives steps,
+# updated by every restart). Before StopStream, and while waiting for idle, the
+# active stream counts as ours only if its outputDuration fits that start; a
+# younger session (camera-box started streaming after ours dropped) is never
+# stopped: marker=false and exit 1.
 
 param(
   [Parameter(Mandatory = $true)]
@@ -39,6 +49,34 @@ $Marker = "OBS_STREAMING_STARTED_BY_CI"
 function Set-StartedMarker([string]$value) {
   if (-not $env:GITHUB_ENV) { throw "GITHUB_ENV is not set; cannot record $Marker" }
   "$Marker=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+}
+
+function Get-NowEpoch { return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0 }
+
+function Get-StartedAtFile {
+  if (-not $env:RUNNER_TEMP) { throw "RUNNER_TEMP is not set; cannot record when our stream started" }
+  return (Join-Path $env:RUNNER_TEMP "obs-streaming-started-at")
+}
+
+# Records when the active stream (ours, just started) began.
+function Set-StartedAt($data) {
+  $began = (Get-NowEpoch) - ([double]$data.outputDuration / 1000.0)
+  "$began" | Out-File -FilePath (Get-StartedAtFile) -Encoding ascii
+}
+
+# Is the active output (GetStreamStatus data) the session we started? Its
+# outputDuration counts only frames sent, so OBS reconnect stalls (the crash
+# gates) make it lag the wall clock; it must still cover half our run. A
+# session younger than that began after ours: not ours. No record (the start
+# step died between StartStream and the record) -> ours.
+function Test-OurStream($data) {
+  $file = Get-StartedAtFile
+  if (-not (Test-Path -LiteralPath $file)) { return $true }
+  $ours = (Get-Content -LiteralPath $file -Raw).Trim() -as [double]
+  if ($null -eq $ours) { return $true }
+  $elapsed = (Get-NowEpoch) - $ours
+  $duration = [double]$data.outputDuration / 1000.0
+  return -not ($elapsed -gt 60 -and $duration -lt 0.5 * $elapsed)
 }
 
 function Wait-StreamActive([bool]$want, [int]$seconds) {
@@ -69,6 +107,7 @@ function Start-OurStream([bool]$sampleBitrate) {
     }
     $active = Wait-StreamActive $true 30
     if ($null -eq $active) { throw "OBS did not report streaming within 30 s after StartStream" }
+    Set-StartedAt $active
     if ($sampleBitrate) {
       # Read-only bitrate sample: the YouTube health gates run on whatever encoder
       # camera-box's TEST mode sets, so log what OBS actually sends.
@@ -89,13 +128,33 @@ function Start-OurStream([bool]$sampleBitrate) {
 function Stop-OurStream {
   Connect-Obs
   try {
+    $now = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
+    if ((Get-ObsActive "GetStreamStatus" $now) -and -not (Test-OurStream $now)) {
+      Set-StartedMarker "false"
+      Write-Host "::error::the active stream is newer than ours -- not ours, not touching it"
+      exit 1
+    }
     $resp = Invoke-ObsRequest "StopStream"
     # 501 = OutputNotRunning: already stopped, nothing left of ours.
     if (-not $resp.requestStatus.result -and $resp.requestStatus.code -ne 501) {
       throw "StopStream failed: code $($resp.requestStatus.code) $($resp.requestStatus.comment)"
     }
-    if ($null -eq (Wait-StreamActive $false 20)) { throw "OBS still streaming 20 s after StopStream" }
-    Write-Host "OBS stream stopped (the one this job started)"
+    $before = [double]$now.outputDuration
+    for ($i = 0; $i -lt 20; $i++) {
+      $data = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
+      if (-not (Get-ObsActive "GetStreamStatus" $data)) {
+        Write-Host "OBS stream stopped (the one this job started)"
+        return
+      }
+      # A shorter duration than just before our stop = a new session took OBS.
+      if ([double]$data.outputDuration -lt $before - 1000) {
+        Set-StartedMarker "false"
+        Write-Host "::error::a newer stream replaced ours while it stopped -- not ours, not touching it"
+        exit 1
+      }
+      Start-Sleep -Seconds 1
+    }
+    throw "OBS still streaming 20 s after StopStream"
   } finally {
     Close-Obs
   }

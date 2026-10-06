@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -75,6 +76,9 @@ class ObsState:
     emit_events: bool = False          # an op 5 event before every op 7 response
     foreign_stream_after_stop: bool = False   # camera-box starts streaming in the gap
     foreign_record_after_stop: bool = False   # camera-box starts recording in the gap
+    stream_age_s: float = 300.0       # how long the initially active stream has run
+    foreign_delay_s: float = 0.3       # camera-box's takeover delay after our stop
+    stream_started: float = 0.0
     requests: list[str] = field(default_factory=list)
     unexpected: list[str] = field(default_factory=list)
     output_bytes: int = 0
@@ -137,7 +141,8 @@ def _respond(state: ObsState, req: dict) -> dict:
         if state.streaming:
             state.output_bytes += 1_500_000
         data = {"outputActive": state.streaming, "outputTimecode": "00:00:01.000",
-                "outputBytes": state.output_bytes}
+                "outputBytes": state.output_bytes,
+                "outputDuration": int((time.time() - state.stream_started) * 1000) if state.streaming else 0}
         if state.omit_output_active:
             del data["outputActive"]
     elif rtype == "GetRecordStatus":
@@ -151,16 +156,21 @@ def _respond(state: ObsState, req: dict) -> dict:
             ok = {"result": False, "code": 500, "comment": "mock refuses the start"}
         else:
             state.streaming = True
+            state.stream_started = time.time()
     elif rtype == "StopStream":
         if not state.streaming:
             ok = {"result": False, "code": 501, "comment": "output not running"}
         elif state.stop_takes_effect:
+            def foreign_start() -> None:
+                state.stream_started = time.time()
+                state.streaming = True
+
             def stopped() -> None:
                 state.streaming = False
                 if state.foreign_stream_after_stop:
-                    threading.Timer(0.3, lambda: setattr(state, "streaming", True)).start()
+                    threading.Timer(state.foreign_delay_s, foreign_start).start()
                 if state.foreign_record_after_stop:
-                    threading.Timer(0.3, lambda: setattr(state, "recording", True)).start()
+                    threading.Timer(state.foreign_delay_s, lambda: setattr(state, "recording", True)).start()
             if state.stop_delay_s:
                 threading.Timer(state.stop_delay_s, stopped).start()
             else:
@@ -311,6 +321,7 @@ class Case:
     may_stop: bool = False          # only stop:* / republish:* may send StopStream
     may_change_state: bool = False  # only a successful start / stop / republish may change OBS
     max_stops: int = 1
+    ours_age_s: float | None = None  # our recorded start, seconds ago (None = no record)
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
@@ -359,6 +370,12 @@ CASES = [
     Case("stop: already stopped (501) -> ok", OS_, STOP, ObsState(), 0, "OBS stream stopped", [], may_stop=True),
     Case("stop: OBS keeps streaming -> fail loudly", OS_, STOP, ObsState(streaming=True, stop_takes_effect=False), 1,
          "still streaming 20 s after StopStream", [], may_stop=True),
+    Case("stop: ours lagged by reconnect stalls (duration 60% of our run) -> stopped", OS_, STOP,
+         ObsState(streaming=True, stream_age_s=360), 0, "OBS stream stopped", [], may_stop=True, may_change_state=True,
+         ours_age_s=600, require_requests={"StopStream"}),
+    Case("stop: a newer stream is active (camera-box, 5 s old) -> refused, kept", OS_, STOP,
+         ObsState(streaming=True, stream_age_s=5), 1, "newer than ours -- not ours, not touching it", ["false"],
+         may_stop=True, ours_age_s=600, forbid_requests={"StopStream"}),
     Case("assert: not streaming -> ok", OS_, ASSERT, ObsState(), 0, "not streaming - good", [],
          forbid_requests={"StopStream", "StartStream"}),
     Case("assert: streaming -> fail, never stopped", OS_, ASSERT, ObsState(streaming=True), 1, "already streaming", [],
@@ -376,6 +393,9 @@ CASES = [
     Case("republish: camera-box streams in the gap -> no restart, marker false, its stream kept", OS_, REPUBLISH,
          ObsState(streaming=True, foreign_stream_after_stop=True), 1, "OBS is already streaming", ["false"],
          lease=FREE, forbid_requests={"StartStream"}, may_stop=True),
+    Case("republish: camera-box takes OBS 50 ms after our output stops -> refused, kept", OS_, REPUBLISH,
+         ObsState(streaming=True, foreign_stream_after_stop=True, foreign_delay_s=0.05, stop_delay_s=1.0), 1,
+         "not touching it", ["false"], lease=FREE, forbid_requests={"StartStream"}, may_stop=True),
     Case("republish: camera-box records in the gap -> no restart, marker false", OS_, REPUBLISH,
          ObsState(streaming=True, foreign_record_after_stop=True), 1, "stream OBS is recording", ["false"],
          lease=FREE, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
@@ -405,6 +425,8 @@ def markers(path: Path) -> list[str]:
 def run_case(case: Case) -> list[str]:
     problems: list[str] = []
     before = (case.state.streaming, case.state.recording)
+    if case.state.streaming:
+        case.state.stream_started = time.time() - case.state.stream_age_s
     with tempfile.TemporaryDirectory() as tmp_s:
         tmp = Path(tmp_s)
         obs = None if case.obs_down else MockObs(case.state)
@@ -412,6 +434,10 @@ def run_case(case: Case) -> list[str]:
         fake = FakeObs64(tmp, case.obs64) if case.obs64 else None
         env_file = tmp / "github_env"
         env_file.write_text("", encoding="utf-8")
+        ours = case.ours_age_s if case.ours_age_s is not None else (
+            case.state.stream_age_s if case.state.streaming else None)
+        if ours is not None:
+            (tmp / "obs-streaming-started-at").write_text(str(time.time() - ours), encoding="ascii")
         env = dict(os.environ)
         env.update({
             "OBS_WS_HOST": "127.0.0.1",
@@ -419,6 +445,7 @@ def run_case(case: Case) -> list[str]:
             "OBS_WS_PASSWORD": case.password,
             "RIG_LEASE_URL": lease.url if lease else f"http://127.0.0.1:{_closed_port()}/rig-lease.json",
             "GITHUB_ENV": str(env_file),
+            "RUNNER_TEMP": str(tmp),
         })
         try:
             proc = subprocess.run(

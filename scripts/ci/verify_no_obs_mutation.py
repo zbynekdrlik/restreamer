@@ -165,7 +165,8 @@ Write-Host "Measured dead air (stopped -> streaming again): $([math]::Round($dea
 "AssertNotStreaming" { Invoke-AssertNotStreaming }
 }"""
 # word -> occurrences in obs-stream.ps1 code: the definition + the pinned uses.
-PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker": 4}
+PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker": 6,
+                 "Test-OurStream": 2, "Set-StartedAt": 2, "Get-StartedAtFile": 3}
 MOCK_TEST = "python tests/ci/test_obs_stream.py"
 SKIP_DIRS = {"__pycache__"}
 
@@ -341,8 +342,8 @@ def check_job(wf_name: str, job_name: str, job: dict) -> list[str]:
         for line in strip_comments(text).splitlines():
             if CLIENT_INTERNALS.search(line):
                 errors.append(f"{label}: inline obs-websocket client in a workflow; use scripts/ci/obs-stream.ps1: {line.strip()}")
-        if MARKER in text:
-            errors.append(f"{label}: {MARKER} may only be written by {OBS_STREAM}")
+        if MARKER in text or "obs-streaming-started-at" in text:
+            errors.append(f"{label}: {MARKER} / the started-at record may only be written by {OBS_STREAM}")
         if re.search(OBS_WORD, uses, re.I):
             errors.append(f"{label}: uses an OBS action: {uses}")
         for rx in BAD_STEP_NAME:
@@ -400,7 +401,7 @@ def script_errors(rel: Path, text: str) -> list[str]:
         errors.append(f"{rel}: only scripts/ci may load the OBS client")
     if rel != OBS_STREAM and re.search(r"obs-stream\.ps1|Start-OurStream|Stop-OurStream", code, re.I):
         errors.append(f"{rel}: only workflows may run obs-stream.ps1 (and only it defines Start-/Stop-OurStream)")
-    if rel != OBS_STREAM and (MARKER in code or "Set-StartedMarker" in code):
+    if rel != OBS_STREAM and (MARKER in code or "Set-StartedMarker" in code or "obs-streaming-started-at" in code):
         errors.append(f"{rel}: {MARKER} may only be written by {OBS_STREAM}")
     spans = function_spans(code)
     for req, fn in CONFINED_REQUESTS.items():
@@ -438,6 +439,15 @@ def check_obs_stream_shape(root: Path) -> list[str]:
     for rx, why in START_SHAPE:
         if not re.search(rx, start):
             errs.append(f"{OBS_STREAM}: {why}")
+    stop = body_of(code, "Stop-OurStream") or ""
+    ident = stop.find('-and -not (Test-OurStream $now)) {')
+    first_stop = stop.find('Invoke-ObsRequest "StopStream"')
+    if ident < 0 or first_stop < 0 or ident > first_stop or "Set-StartedMarker \"false\"" not in stop[ident:first_stop]:
+        errs.append(f"{OBS_STREAM}: Stop-OurStream must refuse (marker false, exit) a stream that is not ours before StopStream")
+    if not re.search(r"\[double\]\$data\.outputDuration -lt \$before - 1000\) \{\s*\n\s*Set-StartedMarker \"false\"", stop):
+        errs.append(f"{OBS_STREAM}: Stop-OurStream must refuse a newer session that appears while ours stops")
+    if "Set-StartedAt $active" not in (body_of(code, "Start-OurStream") or ""):
+        errs.append(f"{OBS_STREAM}: Start-OurStream must record when our stream began")
     if not re.search(r'"Republish"\s*\{\s*\n\s*Stop-OurStream\s*\n\s*Set-StartedMarker "false"', code):
         errs.append(f"{OBS_STREAM}: Republish must write the marker false right after stopping our stream")
     flat = "\n".join(l.strip() for l in code.splitlines() if l.strip())
@@ -604,6 +614,12 @@ STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
      "Set-Alias halt Stop-OurStream\nfunction Invoke-AssertNotStreaming {", "dynamic dispatch"),
     ("Republish forces the marker true", '      Start-OurStream $false\n',
      '      Set-StartedMarker "true"\n      Start-OurStream $false\n', "dispatcher differs"),
+    ("Stop-OurStream stops any active stream (no identity check)",
+     "    if ((Get-ObsActive \"GetStreamStatus\" $now) -and -not (Test-OurStream $now)) {",
+     "    if ($false) {", "refuse (marker false, exit) a stream that is not ours"),
+    ("Stop-OurStream ignores a session that replaced ours", "      if ([double]$data.outputDuration -lt $before - 1000) {",
+     "      if ($false) {", "refuse a newer session"),
+    ("Start forgets when our stream began", "    Set-StartedAt $active\n", "", "must record when our stream began"),
     ("Republish keeps the marker true across the gap", '      Stop-OurStream\n      Set-StartedMarker "false"\n',
      "      Stop-OurStream\n", "Republish must write the marker false"),
     ("AssertNotStreaming stops a foreign stream",

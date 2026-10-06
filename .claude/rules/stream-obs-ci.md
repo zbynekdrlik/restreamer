@@ -49,12 +49,22 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
     unreachable.
 - **Teardown**: `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`, exactly. Otherwise a
   readiness failure on "already streaming" would be followed by stopping camera-box's stream.
+- **Stream identity.** The marker only says "this job started a stream once"; OBS outputs carry
+  no session id.
+  - Start records when OUR session began in `$RUNNER_TEMP/obs-streaming-started-at`
+    (job-scoped, rewritten by every restart).
+  - Before StopStream, Stop-OurStream refuses an active session whose `outputDuration` is under
+    half our run (after the first 60 s). Duration counts frames, so OBS reconnect stalls
+    (the crash gates) make ours lag.
+  - While waiting for idle, it refuses a session whose duration dropped below the
+    pre-stop value: camera-box took OBS in the gap.
+  - In both cases it writes the marker false and exits 1, never stopping the newer session.
 - **No inline websocket client in any workflow.** `ClientWebSocket`, `ws://` and `requestType`
   are allowed only in `scripts/ci/obs-ws.ps1`. The StartStream request is allowed only in
   obs-stream.ps1 `Start-OurStream`, and StopStream only in `Stop-OurStream`.
 - **`tests/ci/test_obs_stream.py`** (ci.yml job `obs-scripts-test`, windows-latest = PowerShell
   5.1, part of the Rust CI Gate) runs every action against a stdlib mock obs-websocket, a mock
-  lease and a fake `obs64` process, in 31 scenarios. It asserts:
+  lease and a fake `obs64` process, in 34 scenarios. It asserts:
   - the exit codes and the marker sequence;
   - that only allowlisted requests were sent (the list is read from the guard);
   - that StopStream is sent only by stop/republish;
@@ -72,7 +82,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
 - `python3 scripts/ci/verify_no_obs_mutation.py` scans every SELF-HOSTED job in every workflow
   (run/with/env/uses/name, plus the job env) and every file under `scripts/`. A hosted job cannot
   reach OBS, so it is skipped; that is why a test-integrity grep pattern never self-matches.
-- `--self-test` applies 76 known-bad mutations to a temp copy, and each must go red for its own
+- `--self-test` applies 79 known-bad mutations to a temp copy, and each must go red for its own
   reason. When you add a guard rule, add its mutation there.
 - `requestType` is fail-closed. Only `requestType = "<Literal>"` (or the JSON
   `"requestType":"<Literal>"`) passes, plus `requestType = $requestType` inside
@@ -82,8 +92,9 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
 - The `switch ($Action)` dispatcher is pinned verbatim (`DISPATCH`), and so is the number of
   `Start-OurStream`/`Stop-OurStream`/`Set-StartedMarker` occurrences: only the Start/Stop/Republish
   arms may call them. Changing the dispatcher means updating `DISPATCH` in the guard, on purpose.
-- No other script may name obs-stream.ps1, Start-/Stop-OurStream or the marker. scripts/ci bans
-  aliases, Get-Command, Invoke-Expression and `& $var`. Workflows may use an obs-stream
+- No other script may name obs-stream.ps1, Start-/Stop-OurStream, the marker or the started-at
+  record. scripts/ci bans aliases, Get-Command, Invoke-Expression and `& $var` (so a scripts/ci
+  helper cannot call a native tool through a variable; spell the exe out). Workflows may use an obs-stream
   `-Action` word or a computed `-File $x` only in the canonical forms.
 - The guard also requires the `obs-scripts-test` job (windows, runs the mock test) and its
   Rust CI Gate wiring.
