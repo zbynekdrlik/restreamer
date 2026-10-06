@@ -207,6 +207,9 @@ pub(crate) struct TestSeam {
     pub api_base: String,
     pub token_uri: String,
     pub timings: AvGateTimings,
+    /// Replaces the process-wide project bucket, so a test cannot drain the
+    /// one every other test shares.
+    pub quota_bucket: Option<&'static rs_youtube::quota::QuotaTracker>,
 }
 
 /// The CI event a session activates.
@@ -251,6 +254,8 @@ pub trait AvGateRig: Send + Sync {
     async fn start_event(&self, event_id: i64) -> Result<(), StartEventError>;
     async fn delivery(&self, event_id: i64) -> Result<RigDelivery, String>;
     async fn stop_event(&self, event_id: i64) -> Result<(), String>;
+    /// The event is receiving or delivering right now.
+    async fn event_active(&self, event_id: i64) -> Result<bool, String>;
     /// Hetzner servers still existing for this box's `event_id`.
     async fn server_count(&self, event_id: i64) -> Result<usize, String>;
 }

@@ -46,6 +46,29 @@ pub mod units {
     pub const TRANSITION: u32 = 50;
 }
 
+/// What a call costs, and whether the shared project bucket may refuse it.
+/// Completing a live broadcast (and reading its life cycle for that) is
+/// `forced`: the bucket goes into debt rather than leave a broadcast on air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cost {
+    units: u32,
+    forced: bool,
+}
+
+const fn admit(units: u32) -> Cost {
+    Cost {
+        units,
+        forced: false,
+    }
+}
+
+const fn forced(units: u32) -> Cost {
+    Cost {
+        units,
+        forced: true,
+    }
+}
+
 /// A cached access token is refreshed this long before Google says it expires.
 const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// Pagination cap for the stream lookup (same bound as `streams.rs`, #200).
@@ -280,13 +303,16 @@ impl ManageClient {
         path: &str,
         query: &[(&str, &str)],
         body: Option<&Value>,
-        cost: u32,
+        cost: Cost,
     ) -> Result<(u16, String)> {
-        if let Some(q) = self.quota {
-            q.acquire(cost)
-                .map_err(|e| YouTubeError::Other(e.to_string()))?;
+        match self.quota {
+            Some(q) if cost.forced => q.charge(cost.units),
+            Some(q) => q
+                .acquire(cost.units)
+                .map_err(|e| YouTubeError::Other(e.to_string()))?,
+            None => {}
         }
-        self.units.fetch_add(cost, Ordering::Relaxed);
+        self.units.fetch_add(cost.units, Ordering::Relaxed);
         let token = self.access_token().await?;
         let mut req = self
             .http
@@ -309,7 +335,7 @@ impl ManageClient {
         path: &str,
         query: &[(&str, &str)],
         body: Option<&Value>,
-        cost: u32,
+        cost: Cost,
     ) -> Result<Value> {
         let mut sent = self.send_once(&method, path, query, body, cost).await?;
         if sent.0 == 401 {
@@ -339,7 +365,7 @@ impl ManageClient {
                 query.push(("pageToken", page_token.as_str()));
             }
             let page = self
-                .call(Method::GET, "liveStreams", &query, None, units::LIST)
+                .call(Method::GET, "liveStreams", &query, None, admit(units::LIST))
                 .await?;
             let items = page["items"].as_array().cloned().unwrap_or_default();
             if let Some(s) = items.iter().find(|s| s["snippet"]["title"] == title) {
@@ -369,7 +395,7 @@ impl ManageClient {
                 "liveStreams",
                 &[("part", "status"), ("id", stream_id)],
                 None,
-                units::LIST,
+                admit(units::LIST),
             )
             .await?;
         Ok(v["items"][0]["status"]["streamStatus"]
@@ -396,7 +422,7 @@ impl ManageClient {
                 "liveBroadcasts",
                 &[("part", "id,snippet,status,contentDetails")],
                 Some(&body),
-                units::INSERT,
+                admit(units::INSERT),
             )
             .await?;
         v["id"]
@@ -417,19 +443,23 @@ impl ManageClient {
                 ("streamId", stream_id),
             ],
             None,
-            units::BIND,
+            admit(units::BIND),
         )
         .await
         .map(|_| ())
     }
 
     /// Transition the broadcast. A transition to the state it is already in
-    /// counts as success.
+    /// counts as success. `Complete` is never refused by the project bucket.
     pub async fn transition_broadcast(
         &self,
         broadcast_id: &str,
         to: BroadcastTransition,
     ) -> Result<()> {
+        let cost = match to {
+            BroadcastTransition::Live => admit(units::TRANSITION),
+            BroadcastTransition::Complete => forced(units::TRANSITION),
+        };
         match self
             .call(
                 Method::POST,
@@ -440,7 +470,7 @@ impl ManageClient {
                     ("broadcastStatus", to.as_str()),
                 ],
                 None,
-                units::TRANSITION,
+                cost,
             )
             .await
         {
@@ -450,6 +480,7 @@ impl ManageClient {
     }
 
     /// `status.lifeCycleStatus` of one broadcast, or `None` if it is gone.
+    /// Never refused by the project bucket: the teardown needs it to complete.
     pub async fn broadcast_life_cycle(&self, broadcast_id: &str) -> Result<Option<String>> {
         let v = self
             .call(
@@ -457,7 +488,7 @@ impl ManageClient {
                 "liveBroadcasts",
                 &[("part", "status"), ("id", broadcast_id)],
                 None,
-                units::LIST,
+                forced(units::LIST),
             )
             .await?;
         Ok(v["items"][0]["status"]["lifeCycleStatus"]
@@ -473,7 +504,7 @@ impl ManageClient {
                 "videos",
                 &[("part", "processingDetails,status"), ("id", video_id)],
                 None,
-                units::LIST,
+                admit(units::LIST),
             )
             .await?;
         let item = &v["items"][0];

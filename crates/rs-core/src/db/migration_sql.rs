@@ -172,7 +172,9 @@ CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
 /// `starting`/`ready` still owns a live broadcast and a delivery VPS, and must
 /// be torn down. `cleanup_pending` marks a session whose teardown failed (a
 /// broadcast possibly still live, a VPS possibly still billing): it is retried
-/// until clean, and no new session starts meanwhile. `quota_units` backs the
+/// until clean, and no new session starts meanwhile. `broadcast_done` and
+/// `event_done` record which half of the teardown already succeeded, so a
+/// retry never repeats it (a repeated event stop could hit another run). `quota_units` backs the
 /// rolling-24h quota guard.
 pub(crate) const MIGRATION_V30_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS av_gate_sessions (
@@ -185,6 +187,8 @@ CREATE TABLE IF NOT EXISTS av_gate_sessions (
     event_id          INTEGER,
     went_live         INTEGER NOT NULL DEFAULT 0,
     cleanup_pending   INTEGER NOT NULL DEFAULT 0,
+    broadcast_done    INTEGER NOT NULL DEFAULT 0,
+    event_done        INTEGER NOT NULL DEFAULT 0,
     vod_id            TEXT,
     reason            TEXT,
     quota_units       INTEGER NOT NULL DEFAULT 0,

@@ -120,6 +120,8 @@ fn the_view_carries_every_row_field() {
         event_id: Some(1),
         went_live: true,
         cleanup_pending: true,
+        broadcast_done: true,
+        event_done: false,
         vod_id: Some("v".to_string()),
         reason: Some("why".to_string()),
         quota_units: 9,

@@ -4,6 +4,9 @@
 //!   `{session_id, broadcast_id}`
 //! - `GET  /api/v1/av-gate/session/{id}` -> the [`SessionView`]
 //! - `POST /api/v1/av-gate/session/{id}/stop` -> 202
+//! - `GET  /api/v1/av-gate/status` -> reconciled, holder, pending cleanups
+//! - `POST /api/v1/av-gate/session/{id}/clear-cleanup` -> the operator's
+//!   force-clear of a cleanup that can never succeed
 //!
 //! Auth, on top of the router-wide access gate: the request must come from the
 //! LAN (a tunneled request is refused even with a valid Cloudflare Access
@@ -32,7 +35,9 @@ use tracing::warn;
 
 use crate::access::{Origin, classify};
 use crate::av_gate::{SESSION_QUOTA_ESTIMATE, SessionState, SessionView, validate_request};
-use crate::av_gate_driver::{CreateOutcome, spawn_create};
+use crate::av_gate_driver::{
+    ClearOutcome, CreateOutcome, clear_cleanup, gate_status, spawn_create,
+};
 use crate::av_gate_rig::{manage_client, session_ctx};
 use crate::state::AppState;
 
@@ -209,6 +214,15 @@ pub async fn create(
             })),
         )
             .into_response(),
+        CreateOutcome::ProjectQuotaLow { remaining } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": "project_quota",
+                "remaining": remaining,
+                "estimate": SESSION_QUOTA_ESTIMATE,
+            })),
+        )
+            .into_response(),
         CreateOutcome::StartFailed { session_id, reason } => (
             StatusCode::BAD_GATEWAY,
             Json(json!({
@@ -271,6 +285,38 @@ pub async fn stop(
         Json(json!({ "session_id": id, "state": row.state })),
     )
         .into_response()
+}
+
+/// `GET /api/v1/av-gate/status`: whether sessions can start, and why not.
+pub async fn status(State(state): State<AppState>, peer: Peer, headers: HeaderMap) -> Response {
+    if let Err(denied) = authorize(&state, &peer, &headers).await {
+        return denied.into_response();
+    }
+    match gate_status(&session_ctx(&state)).await {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
+    }
+}
+
+/// `POST /api/v1/av-gate/session/{id}/clear-cleanup`: drop a pending cleanup
+/// WITHOUT retrying it (audited). 200 cleared, 409 nothing pending, 404.
+pub async fn clear(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    if let Err(denied) = authorize(&state, &peer, &headers).await {
+        return denied.into_response();
+    }
+    match clear_cleanup(&session_ctx(&state), &id).await {
+        Ok(ClearOutcome::Cleared) => {
+            Json(json!({ "session_id": id, "cleanup_pending": false })).into_response()
+        }
+        Ok(ClearOutcome::NotPending) => error(StatusCode::CONFLICT, "not_pending", id),
+        Ok(ClearOutcome::NotFound) => error(StatusCode::NOT_FOUND, "not_found", id),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
+    }
 }
 
 #[cfg(test)]

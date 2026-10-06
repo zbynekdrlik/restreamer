@@ -20,6 +20,8 @@ fn full_row(id: &str, created_at: &str, state: &str, units: i64) -> AvGateSessio
         event_id: Some(9278),
         went_live: true,
         cleanup_pending: true,
+        broadcast_done: true,
+        event_done: true,
         vod_id: Some("bc-1".to_string()),
         reason: Some("why".to_string()),
         quota_units: units,
@@ -46,6 +48,7 @@ async fn new_starting_row_round_trips_with_empty_optionals() {
     assert_eq!(row.state, "starting");
     assert!(!row.went_live);
     assert!(!row.cleanup_pending);
+    assert!(!row.broadcast_done && !row.event_done);
     assert_eq!(row.quota_units, 0);
     save(&p, &row).await.unwrap();
     assert_eq!(get(&p, "s2").await.unwrap(), Some(row));
@@ -58,6 +61,9 @@ async fn save_overwrites_an_existing_row() {
     save(&p, &row).await.unwrap();
     row.state = "ready".to_string();
     row.went_live = true;
+    row.cleanup_pending = true;
+    row.broadcast_done = true;
+    row.event_done = true;
     row.quota_units = 151;
     row.broadcast_id = Some("bc".to_string());
     save(&p, &row).await.unwrap();

@@ -51,6 +51,7 @@ async fn api_with(rig: FakeRig, timings: AvGateTimings, access_mode: &str) -> Ap
         api_base: format!("{}/yt", server.uri()),
         token_uri: format!("{}/token", server.uri()),
         timings,
+        quota_bucket: None,
     });
     Api {
         state,
@@ -401,4 +402,101 @@ async fn create_is_409_while_a_failed_teardown_is_pending() {
     );
     let (_, view) = send(&a.state, authed("GET", "/api/v1/av-gate/session/stuck", "")).await;
     assert_eq!(view["cleanup_pending"], true);
+}
+
+#[tokio::test]
+async fn status_and_clear_cleanup_through_the_router() {
+    let a = api().await;
+    let (status, body) = send(&a.state, authed("GET", "/api/v1/av-gate/status", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({"reconciled": true, "holder": null, "cleanup_pending": []})
+    );
+    let mut row = AvGateSessionRow::new_starting("stuck", "r", "t", "2026-10-06T10:00:00.000Z");
+    row.state = "failed".to_string();
+    row.cleanup_pending = true;
+    store::save(&a.state.pool, &row).await.unwrap();
+    let (_, body) = send(&a.state, authed("GET", "/api/v1/av-gate/status", "")).await;
+    assert_eq!(body["cleanup_pending"], serde_json::json!(["stuck"]));
+
+    let clear = "/api/v1/av-gate/session/stuck/clear-cleanup";
+    let (status, body) = send(&a.state, authed("POST", clear, "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({"session_id": "stuck", "cleanup_pending": false})
+    );
+    let (status, body) = send(&a.state, authed("POST", clear, "")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "not_pending");
+    let (status, _) = send(
+        &a.state,
+        authed("POST", "/api/v1/av-gate/session/nope/clear-cleanup", ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for (method, uri) in [("GET", "/api/v1/av-gate/status"), ("POST", clear)] {
+        let (status, _) = send(&a.state, request(method, uri, None, "")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
+async fn a_low_project_bucket_is_429() {
+    static LOW: std::sync::OnceLock<rs_youtube::quota::QuotaTracker> = std::sync::OnceLock::new();
+    let a = api().await;
+    a.state
+        .av_gate
+        .seam
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .quota_bucket = Some(LOW.get_or_init(|| rs_youtube::quota::QuotaTracker::new(399)));
+    let (status, body) = send(&a.state, authed("POST", "/api/v1/av-gate/session", CREATE)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "project_quota", "remaining": 399, "estimate": 400})
+    );
+}
+
+#[tokio::test]
+async fn a_client_that_disconnects_mid_create_does_not_abort_the_start() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let rig = Arc::new(rig);
+    let a = api().await;
+    {
+        let mut seam = a.state.av_gate.seam.lock().unwrap();
+        seam.as_mut().unwrap().rig = rig.clone();
+    }
+    let router = build_router(a.state.clone());
+    let request_task =
+        tokio::spawn(router.oneshot(authed("POST", "/api/v1/av-gate/session", CREATE)));
+    let started = async {
+        while !rig.called(&format!("start:{}", crate::av_gate_driver::tests::EVENT)) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), started)
+        .await
+        .unwrap();
+    // The client goes away: axum drops the handler future.
+    request_task.abort();
+    gate.notify_one();
+    let holder = async {
+        loop {
+            if let Some(h) = a.state.av_gate.registry.holder() {
+                return h.session_id;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    let id = tokio::time::timeout(Duration::from_secs(5), holder)
+        .await
+        .unwrap();
+    wait_state(&a.state, &id, "ready").await;
 }

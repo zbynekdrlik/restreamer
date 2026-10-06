@@ -232,6 +232,11 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             "/av-gate/session/{id}/stop",
             post(crate::av_gate_handlers::stop),
         )
+        .route(
+            "/av-gate/session/{id}/clear-cleanup",
+            post(crate::av_gate_handlers::clear),
+        )
+        .route("/av-gate/status", get(crate::av_gate_handlers::status))
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
         .route("/_test/s3-unblock", post(handlers::test_s3_unblock))

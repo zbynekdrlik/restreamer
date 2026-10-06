@@ -370,3 +370,39 @@ async fn the_maintenance_task_fails_a_session_left_starting_and_opens_the_api() 
         Some("Restreamer restarted during the session")
     );
 }
+
+#[tokio::test]
+async fn event_active_reads_the_event_flags() {
+    let s = state().await;
+    let idle = event(&s, "Idle", None, false).await;
+    let live = event(&s, "Live", None, true).await;
+    let rig = AppRig::new(s);
+    assert_eq!(rig.event_active(idle).await, Ok(false));
+    assert_eq!(rig.event_active(live).await, Ok(true));
+    assert_eq!(
+        rig.event_active(4242).await,
+        Ok(false),
+        "no event, not active"
+    );
+}
+
+#[tokio::test]
+async fn start_event_refuses_an_event_another_run_activated_meanwhile() {
+    let (s, _h) = hetzner_state().await;
+    let id = event(&s, "E2E-Test", None, true).await;
+    let err = AppRig::new(s).start_event(id).await.unwrap_err();
+    assert_eq!(
+        err,
+        StartEventError::Refused(format!("event {id} became active (another run took it)"))
+    );
+}
+
+#[tokio::test]
+async fn the_production_ctx_draws_from_the_shared_project_bucket() {
+    let s = state().await;
+    let ctx = session_ctx(&s);
+    assert!(std::ptr::eq(
+        ctx.quota_bucket.expect("the shared bucket"),
+        crate::delivery_status::youtube_quota_tracker()
+    ));
+}

@@ -540,3 +540,52 @@ async fn an_attached_quota_tracker_refuses_a_call_it_cannot_pay() {
     assert_eq!(c.units_used(), units::BIND, "a refused call is not charged");
     assert_eq!(bucket.remaining(), 10);
 }
+
+#[tokio::test]
+async fn completing_a_broadcast_is_never_refused_by_an_empty_bucket() {
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts/transition"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    static EMPTY: std::sync::OnceLock<crate::quota::QuotaTracker> = std::sync::OnceLock::new();
+    let bucket = EMPTY.get_or_init(|| crate::quota::QuotaTracker::new(10));
+    let c = client(&s).with_quota_tracker(bucket);
+    let err = c
+        .transition_broadcast("bc-1", BroadcastTransition::Live)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("quota exhausted"), "{err}");
+    c.transition_broadcast("bc-1", BroadcastTransition::Complete)
+        .await
+        .unwrap();
+    assert_eq!(c.broadcast_life_cycle("bc-1").await.unwrap(), None);
+    assert_eq!(c.units_used(), units::TRANSITION + units::LIST);
+    assert_eq!(bucket.remaining(), 0, "the forced calls put it into debt");
+}
+
+#[test]
+fn costs_say_whether_the_bucket_may_refuse() {
+    assert_eq!(
+        admit(3),
+        Cost {
+            units: 3,
+            forced: false
+        }
+    );
+    assert_eq!(
+        forced(4),
+        Cost {
+            units: 4,
+            forced: true
+        }
+    );
+}

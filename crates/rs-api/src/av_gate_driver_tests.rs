@@ -29,6 +29,10 @@ pub(crate) struct FakeRig {
     pub servers: StdMutex<VecDeque<Result<usize, String>>>,
     pub panic_on_delivery: AtomicBool,
     pub panic_on_start: AtomicBool,
+    /// What `event_active` answers.
+    pub active: AtomicBool,
+    /// When set, `server_count` panics once (then clears itself).
+    pub panic_on_servers: AtomicBool,
     /// When set, `start_event` waits for a notification first.
     pub start_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
 }
@@ -47,6 +51,8 @@ impl Default for FakeRig {
             servers: StdMutex::new(VecDeque::from([Ok(0)])),
             panic_on_delivery: AtomicBool::new(false),
             panic_on_start: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            panic_on_servers: AtomicBool::new(false),
             start_gate: StdMutex::new(None),
         }
     }
@@ -103,8 +109,16 @@ impl AvGateRig for FakeRig {
         self.log(format!("stop:{event_id}"));
         self.stop.lock().unwrap().clone()
     }
+    async fn event_active(&self, event_id: i64) -> Result<bool, String> {
+        self.log(format!("active:{event_id}"));
+        Ok(self.active.load(Ordering::SeqCst))
+    }
     async fn server_count(&self, event_id: i64) -> Result<usize, String> {
         self.log(format!("servers:{event_id}"));
+        assert!(
+            !self.panic_on_servers.swap(false, Ordering::SeqCst),
+            "scripted maintenance panic"
+        );
         next(&self.servers)
     }
 }
@@ -357,6 +371,7 @@ impl Harness {
             event_name: "E2E-Test".to_string(),
             stream_title: "e2e rtmp".to_string(),
             daily_quota_budget: 4_000,
+            quota_bucket: None,
         });
         Self {
             ctx,
@@ -366,6 +381,22 @@ impl Harness {
             dir: tempfile::tempdir().unwrap(),
             audit_rx,
         }
+    }
+
+    /// Another context over the same DB, rig and audit channel, with its own
+    /// registry (not reconciled) and these timings.
+    pub fn fresh_ctx(&self, timings: AvGateTimings) -> Arc<SessionCtx> {
+        Arc::new(SessionCtx {
+            pool: self.ctx.pool.clone(),
+            audit_tx: self.ctx.audit_tx.clone(),
+            registry: Arc::new(AvGateRegistry::default()),
+            rig: self.rig.clone(),
+            timings,
+            event_name: "E2E-Test".to_string(),
+            stream_title: "e2e rtmp".to_string(),
+            daily_quota_budget: 4_000,
+            quota_bucket: None,
+        })
     }
 
     pub fn yt(&self) -> Arc<ManageClient> {
@@ -440,7 +471,7 @@ impl Harness {
     }
 }
 
-fn reason(row: &AvGateSessionRow) -> String {
+pub(crate) fn reason(row: &AvGateSessionRow) -> String {
     row.reason.clone().unwrap_or_default()
 }
 
@@ -498,16 +529,6 @@ fn vod_step_reads_both_processing_and_upload_status() {
 }
 
 #[test]
-fn cleanup_retries_back_off_to_a_two_hour_cap() {
-    let base = Duration::from_secs(300);
-    assert_eq!(cleanup_retry_delay(base, 0), Duration::from_secs(300));
-    assert_eq!(cleanup_retry_delay(base, 1), Duration::from_secs(600));
-    assert_eq!(cleanup_retry_delay(base, 4), Duration::from_secs(4_800));
-    assert_eq!(cleanup_retry_delay(base, 5), Duration::from_secs(7_200));
-    assert_eq!(cleanup_retry_delay(base, 40), Duration::from_secs(7_200));
-}
-
-#[test]
 fn timestamps_are_fixed_width_utc_millis() {
     let ts = now_ts();
     assert_eq!(ts.len(), 24, "{ts}");
@@ -554,9 +575,9 @@ async fn a_session_goes_starting_ready_processing_done_and_cleans_up() {
     assert!(done.processing_at.is_some());
     assert!(done.finished_at.is_some());
     assert_eq!(done.reason, None);
-    // lookup 1 + insert 50 + bind 50 + stream 1 + live 50 + life 1, then the
-    // teardown's life 1 + complete 50, then one video poll 1.
-    assert_eq!(done.quota_units, 205);
+    // lookup 1 + insert 50 + bind 50; poll 1: life 1 + stream 1 + live 50;
+    // poll 2: life 1; the teardown's life 1 + complete 50; one VOD poll 1.
+    assert_eq!(done.quota_units, 206);
     assert_eq!(h.yt_state.transitions(), vec!["live", "complete"]);
     assert_eq!(h.ctx.registry.holder(), None);
     let calls = h.rig.calls();
@@ -622,124 +643,6 @@ async fn a_transition_still_starting_is_not_ready_yet() {
     assert_eq!(h.yt_state.transitions(), vec!["live"], "live is sent once");
 }
 
-// ---- a failure at every start step --------------------------------------------
-
-async fn start_fails(h: &Harness, id: &str) -> AvGateSessionRow {
-    match h.create(id).await {
-        CreateOutcome::StartFailed { session_id, reason } => {
-            assert_eq!(session_id, id);
-            let row = h.row(id).await;
-            assert_eq!(row.state, "failed");
-            assert_eq!(row.reason.as_deref(), Some(reason.as_str()));
-            assert!(row.finished_at.is_some());
-            assert_eq!(h.ctx.registry.holder(), None, "the slot must be free");
-            row
-        }
-        other => panic!("expected StartFailed, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn a_failed_stream_lookup_touches_nothing() {
-    let h = Harness::new().await;
-    h.yt_state.failing("lookup");
-    let row = start_fails(&h, "s1").await;
-    assert!(reason(&row).contains("stream lookup failed"), "{row:?}");
-    assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
-    assert!(h.rig.calls().is_empty());
-}
-
-#[tokio::test]
-async fn a_missing_stream_touches_nothing() {
-    let h = Harness::new().await;
-    *h.yt_state.stream_title.lock().unwrap() = "something else".to_string();
-    let row = start_fails(&h, "s1").await;
-    assert!(
-        reason(&row).contains("no YouTube stream titled \"e2e rtmp\""),
-        "{row:?}"
-    );
-    assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn a_non_reusable_stream_is_never_bound() {
-    let h = Harness::new().await;
-    h.yt_state.reusable.store(false, Ordering::SeqCst);
-    let row = start_fails(&h, "s1").await;
-    assert!(reason(&row).contains("not reusable"), "{row:?}");
-    assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
-    assert!(h.rig.calls().is_empty());
-}
-
-#[tokio::test]
-async fn a_refused_event_resolution_creates_no_broadcast() {
-    let rig = FakeRig::default();
-    *rig.resolve.lock().unwrap() = Err("another event is active (\"Sunday\")".to_string());
-    let h = Harness::with(rig, timings()).await;
-    let row = start_fails(&h, "s1").await;
-    assert!(reason(&row).contains("another event is active"), "{row:?}");
-    assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
-    assert_eq!(h.rig.calls(), vec!["resolve:E2E-Test"]);
-}
-
-#[tokio::test]
-async fn a_failed_insert_starts_no_event() {
-    let h = Harness::new().await;
-    h.yt_state.failing("insert");
-    let row = start_fails(&h, "s1").await;
-    assert!(
-        reason(&row).contains("liveBroadcasts.insert failed"),
-        "{row:?}"
-    );
-    assert_eq!(row.broadcast_id, None);
-    assert_eq!(h.rig.calls(), vec!["resolve:E2E-Test"]);
-}
-
-#[tokio::test]
-async fn a_failed_bind_leaves_the_unstarted_broadcast_alone() {
-    let h = Harness::new().await;
-    h.yt_state.failing("bind");
-    let row = start_fails(&h, "s1").await;
-    assert!(
-        reason(&row).contains("liveBroadcasts.bind failed"),
-        "{row:?}"
-    );
-    assert_eq!(row.broadcast_id.as_deref(), Some("bc-1"));
-    assert!(
-        h.yt_state.transitions().is_empty(),
-        "a never-live broadcast is not completed"
-    );
-    assert_eq!(h.rig.calls(), vec!["resolve:E2E-Test"]);
-}
-
-#[tokio::test]
-async fn a_refused_event_start_is_not_torn_down() {
-    let rig = FakeRig::default();
-    *rig.start.lock().unwrap() = Err(StartEventError::Refused("busy".to_string()));
-    let h = Harness::with(rig, timings()).await;
-    let row = start_fails(&h, "s1").await;
-    assert_eq!(reason(&row), "busy");
-    assert_eq!(row.event_id, None);
-    assert_eq!(
-        h.rig.calls(),
-        vec!["resolve:E2E-Test".to_string(), format!("start:{EVENT}")],
-        "nothing was started, so nothing may be stopped"
-    );
-}
-
-#[tokio::test]
-async fn a_failed_event_start_is_torn_down() {
-    let rig = FakeRig::default();
-    *rig.start.lock().unwrap() = Err(StartEventError::Failed("vps".to_string()));
-    let mut h = Harness::with(rig, timings()).await;
-    let row = start_fails(&h, "s1").await;
-    assert_eq!(reason(&row), "vps");
-    assert_eq!(row.event_id, Some(EVENT));
-    assert!(h.rig.called(&format!("stop:{EVENT}")));
-    assert!(h.rig.called(&format!("servers:{EVENT}")));
-    assert_eq!(h.actions(), vec![Action::AvGateSessionFailed]);
-}
-
 // ---- readiness failures --------------------------------------------------------
 
 #[tokio::test]
@@ -771,7 +674,7 @@ async fn transition_live_is_retried_then_fails_the_session() {
         reason(&row).contains("transition to live failed"),
         "{row:?}"
     );
-    assert!(!row.went_live);
+    assert!(row.went_live, "an attempted live transition counts");
     assert_eq!(h.yt_state.transitions(), vec!["live", "live", "live"]);
     assert!(h.rig.called(&format!("stop:{EVENT}")));
 }
@@ -864,166 +767,9 @@ async fn a_stop_before_ready_fails_and_cleans_up() {
     );
 }
 
-// ---- the mutex and the quota guard -------------------------------------------
-
-#[tokio::test]
-async fn a_second_session_gets_the_holder_until_the_first_is_torn_down() {
-    let h = Harness::new().await;
-    h.ready_session("s-first").await;
-    assert_eq!(
-        h.create("s-second").await,
-        CreateOutcome::Busy(Holder {
-            session_id: "s-first".to_string(),
-            requester: "camera-box".to_string(),
-        })
-    );
-    assert!(
-        store::get(&h.ctx.pool, "s-second").await.unwrap().is_none(),
-        "a refused session leaves no row"
-    );
-    assert!(h.ctx.registry.request_stop("s-first"));
-    h.wait_state("s-first", SessionState::Done).await;
-    *h.yt_state.life.lock().unwrap() = "ready".to_string();
-    h.ready_session("s-second").await;
-}
-
-async fn spend(h: &Harness, id: &str, created_at: &str, units: i64) {
-    let mut row = AvGateSessionRow::new_starting(id, "r", "t", created_at);
-    row.state = "done".to_string();
-    row.quota_units = units;
-    store::save(&h.ctx.pool, &row).await.unwrap();
-}
-
-#[tokio::test]
-async fn the_quota_guard_refuses_a_session_over_the_daily_budget() {
-    let h = Harness::new().await;
-    spend(&h, "old", "2000-01-01T00:00:00.000Z", 100_000).await;
-    spend(&h, "recent", &now_ts(), 3_601).await;
-    assert_eq!(
-        h.create("s1").await,
-        CreateOutcome::QuotaExceeded {
-            spent: 3_601,
-            budget: 4_000
-        }
-    );
-    assert_eq!(h.ctx.registry.holder(), None);
-    assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn the_quota_guard_admits_a_session_that_exactly_fits() {
-    let h = Harness::new().await;
-    spend(&h, "recent", &now_ts(), 3_600).await;
-    assert!(matches!(
-        h.create("s1").await,
-        CreateOutcome::Created { .. }
-    ));
-}
-
-#[tokio::test]
-async fn nothing_starts_before_the_boot_reconcile_ran() {
-    let h = Harness::new().await;
-    let fresh = SessionCtx {
-        pool: h.ctx.pool.clone(),
-        audit_tx: h.ctx.audit_tx.clone(),
-        registry: Arc::new(AvGateRegistry::default()),
-        rig: h.rig.clone(),
-        timings: timings(),
-        event_name: "E2E-Test".to_string(),
-        stream_title: "e2e rtmp".to_string(),
-        daily_quota_budget: 4_000,
-    };
-    let outcome = create_session(
-        Arc::new(fresh),
-        h.yt(),
-        "s1".to_string(),
-        "r".to_string(),
-        "t".to_string(),
-    )
-    .await;
-    assert_eq!(outcome, CreateOutcome::NotReady);
-    assert!(h.rig.calls().is_empty());
-}
-
-#[tokio::test]
-async fn a_dropped_create_request_still_runs_the_session_to_its_end() {
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let rig = FakeRig::default();
-    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
-    let h = Harness::with(rig, timings()).await;
-    let handle = spawn_create(
-        Arc::clone(&h.ctx),
-        h.yt(),
-        "s1".to_string(),
-        "camera-box".to_string(),
-        "t".to_string(),
-    );
-    let wait_start = async {
-        while !h.rig.called(&format!("start:{EVENT}")) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), wait_start)
-        .await
-        .unwrap();
-    // The client disconnects: axum drops the handler, and with it the handle.
-    drop(handle);
-    gate.notify_one();
-    h.wait_state("s1", SessionState::Ready).await;
-    assert_eq!(
-        h.ctx.registry.holder().map(|h| h.session_id).as_deref(),
-        Some("s1"),
-        "the session is driven (and will be reaped) even without its caller"
-    );
-}
-
-#[tokio::test]
-async fn a_start_that_panics_is_reaped() {
-    let rig = FakeRig::default();
-    rig.panic_on_start.store(true, Ordering::SeqCst);
-    let h = Harness::with(rig, timings()).await;
-    let outcome = spawn_create(
-        Arc::clone(&h.ctx),
-        h.yt(),
-        "s1".to_string(),
-        "camera-box".to_string(),
-        "t".to_string(),
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(&outcome, CreateOutcome::Internal(e) if e.contains("start died")),
-        "{outcome:?}"
-    );
-    let row = h.row("s1").await;
-    assert_eq!(row.state, "failed");
-    assert_eq!(reason(&row), "the session driver died");
-    assert_eq!(row.event_id, Some(EVENT), "recorded before the start");
-    assert!(h.rig.called(&format!("stop:{EVENT}")));
-    assert!(h.rig.called(&format!("servers:{EVENT}")));
-    assert_eq!(h.ctx.registry.holder(), None);
-}
-
-#[tokio::test]
-async fn spawn_create_returns_the_outcome() {
-    let h = Harness::new().await;
-    let outcome = spawn_create(
-        Arc::clone(&h.ctx),
-        h.yt(),
-        "s1".to_string(),
-        "camera-box".to_string(),
-        "t".to_string(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        outcome,
-        CreateOutcome::Created {
-            session_id: "s1".to_string(),
-            broadcast_id: "bc-1".to_string()
-        }
-    );
-}
-
+#[path = "av_gate_driver_cleanup_tests.rs"]
+mod cleanup_tests;
+#[path = "av_gate_driver_create_tests.rs"]
+mod create_tests;
 #[path = "av_gate_driver_stop_tests.rs"]
 mod stop_tests;

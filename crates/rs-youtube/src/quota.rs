@@ -72,6 +72,15 @@ impl QuotaTracker {
         }
     }
 
+    /// Spend `units` even when the bucket cannot pay them: it goes into debt
+    /// and refills like after any spend. For the few calls that must never be
+    /// refused, such as completing a live broadcast (#357).
+    pub fn charge(&self, units: u32) {
+        let mut s = self.state.lock().expect("quota tracker mutex poisoned");
+        self.refill_locked(&mut s);
+        s.units -= units as f64;
+    }
+
     pub fn remaining(&self) -> u32 {
         let mut s = self.state.lock().expect("quota tracker mutex poisoned");
         self.refill_locked(&mut s);

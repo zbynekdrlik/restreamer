@@ -2,10 +2,10 @@
 //! overview and the cleanup guarantee.
 //!
 //! One driver task per session owns it from creation to `done`/`failed`. Every
-//! exit path funnels through [`Session::teardown`]; a supervisor task tears the
-//! session down if its creation or its driver dies; a teardown that fails
-//! leaves `cleanup_pending` on the row, and the maintenance loop retries it
-//! (with backoff) until clean, refusing new sessions meanwhile.
+//! exit path funnels through [`Session::teardown`], which records per resource
+//! what it already released (`broadcast_done`, `event_done`); anything left
+//! sets `cleanup_pending`, and the maintenance loop (`av_gate_lifecycle.rs`)
+//! retries only the missing part until clean, refusing new sessions meanwhile.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,15 +14,14 @@ use chrono::{SecondsFormat, Utc};
 use rs_core::audit::{self, Action, AuditRow, Severity, Source};
 use rs_core::db::av_gate::{self as store, AvGateSessionRow};
 use rs_youtube::manage::{BroadcastTransition, ManageClient, VodStatus};
+use rs_youtube::quota::QuotaTracker;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::av_gate::{
-    AvGateRegistry, AvGateRig, AvGateTimings, Holder, RigDelivery, SESSION_QUOTA_ESTIMATE,
-    SessionState, StartEventError, quota_allows,
+    AvGateRegistry, AvGateRig, AvGateTimings, RigDelivery, SessionState, StartEventError,
 };
 
 /// Consecutive failed polls (YouTube or rig) before a wait gives up.
@@ -31,13 +30,6 @@ const MAX_POLL_ERRORS: u32 = 5;
 const MAX_LIVE_ATTEMPTS: u32 = 3;
 /// Attempts to complete the broadcast during a teardown.
 const COMPLETE_ATTEMPTS: u32 = 3;
-/// The cleanup retry backoff doubles up to this many times (5 min -> 160 min,
-/// then capped at 24 x the base: 2 h).
-const MAX_BACKOFF_DOUBLINGS: u32 = 5;
-
-/// Builds a fresh manage client (one per resumed session, so each row's quota
-/// spend is its own). `Err` when the oauth file is unusable.
-pub type ClientFactory = Arc<dyn Fn() -> Result<ManageClient, String> + Send + Sync>;
 
 /// Everything a session needs, shared by its driver and its supervisor.
 pub struct SessionCtx {
@@ -49,31 +41,9 @@ pub struct SessionCtx {
     pub event_name: String,
     pub stream_title: String,
     pub daily_quota_budget: u32,
-}
-
-/// What `create_session` did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CreateOutcome {
-    Created {
-        session_id: String,
-        broadcast_id: String,
-    },
-    Busy(Holder),
-    /// The boot reconcile has not finished: an unfinished session from before
-    /// the restart may still own the event.
-    NotReady,
-    /// An earlier session's teardown failed and is being retried.
-    CleanupPending(Vec<String>),
-    QuotaExceeded {
-        spent: i64,
-        budget: u32,
-    },
-    /// The start failed; the teardown already ran and the session is `failed`.
-    StartFailed {
-        session_id: String,
-        reason: String,
-    },
-    Internal(String),
+    /// The project-wide YouTube quota bucket the health polling also draws
+    /// from. Admission needs a session's estimate left in it.
+    pub quota_bucket: Option<&'static QuotaTracker>,
 }
 
 /// RFC 3339 UTC with milliseconds and `Z`: fixed width, so the quota guard
@@ -82,14 +52,17 @@ pub fn now_ts() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// The start of the quota guard's rolling 24 h window.
-fn quota_window_start() -> String {
-    (Utc::now() - chrono::Duration::hours(24)).to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
 /// True once `count` consecutive failures reached `max`.
 fn exhausted(count: u32, max: u32) -> bool {
     count >= max
+}
+
+/// `reason` with `note` appended (`"; "`-separated, no leading separator).
+fn append_reason(reason: Option<String>, note: &str) -> String {
+    match reason.filter(|r| !r.is_empty()) {
+        Some(r) => format!("{r}; {note}"),
+        None => note.to_string(),
+    }
 }
 
 /// What the teardown must do with a broadcast in `life_cycle`.
@@ -134,18 +107,11 @@ fn vod_step(status: &VodStatus) -> VodStep {
     }
 }
 
-/// The wait before the next cleanup retry after `failed_rounds` failed ones.
-fn cleanup_retry_delay(base: Duration, failed_rounds: u32) -> Duration {
-    let doubled = base * 2u32.pow(failed_rounds.min(MAX_BACKOFF_DOUBLINGS));
-    doubled.min(base * 24)
-}
-
 /// One session in flight: its durable row plus the client it spends quota on.
 pub(crate) struct Session {
     ctx: Arc<SessionCtx>,
     yt: Option<Arc<ManageClient>>,
-    /// `quota_units` already on the row before this client was built (a
-    /// session resumed after a restart keeps its earlier spend).
+    /// The row's quota spend before this client spent anything.
     base_units: i64,
     row: AvGateSessionRow,
 }
@@ -158,14 +124,24 @@ enum Wake {
 }
 
 impl Session {
+    /// A session over `row` with a client that has spent nothing for it yet.
     fn new(ctx: Arc<SessionCtx>, yt: Option<Arc<ManageClient>>, row: AvGateSessionRow) -> Self {
-        // The client may already have spent units that the row includes (the
-        // reaper reuses the session's own client): count them once.
-        let spent = yt.as_ref().map_or(0, |c| i64::from(c.units_used()));
+        let base_units = row.quota_units;
+        Self::with_base(ctx, yt, row, base_units)
+    }
+
+    /// A session whose client already spent units on top of `base_units`
+    /// (the reaper reuses the dead driver's client).
+    fn with_base(
+        ctx: Arc<SessionCtx>,
+        yt: Option<Arc<ManageClient>>,
+        row: AvGateSessionRow,
+        base_units: i64,
+    ) -> Self {
         Self {
-            base_units: row.quota_units - spent,
             ctx,
             yt,
+            base_units,
             row,
         }
     }
@@ -253,7 +229,11 @@ impl Session {
         }
     }
 
-    /// One readiness poll while `starting`. `Ok(true)` = ready.
+    /// One readiness poll while `starting`. `Ok(true)` = ready. The life cycle
+    /// is read first, so a `live` transition is only (re)sent while the
+    /// broadcast is not on air yet; `went_live` is persisted BEFORE it is
+    /// sent, so even a lost response leaves the teardown a broadcast to
+    /// complete.
     async fn readiness_step(
         &mut self,
         errors: &mut u32,
@@ -261,6 +241,8 @@ impl Session {
     ) -> Result<bool, String> {
         let event_id = self.row.event_id.ok_or("session has no event")?;
         let yt = Arc::clone(self.yt.as_ref().ok_or("no YouTube manage client")?);
+        let bid = self.row.broadcast_id.clone().unwrap_or_default();
+        let sid = self.row.stream_id.clone().unwrap_or_default();
         let probe = async {
             match self.ctx.rig.delivery(event_id).await? {
                 RigDelivery::NotRunning => {
@@ -271,31 +253,32 @@ impl Session {
                 RigDelivery::Booting => return Ok(Ok(false)),
                 RigDelivery::Delivering => {}
             }
-            let bid = self.row.broadcast_id.clone().unwrap_or_default();
-            if !self.row.went_live {
-                let sid = self.row.stream_id.clone().unwrap_or_default();
-                let status = yt.stream_status(&sid).await.map_err(|e| e.to_string())?;
-                if status.as_deref() != Some("active") {
-                    return Ok(Ok(false));
-                }
-                if let Err(e) = yt
-                    .transition_broadcast(&bid, BroadcastTransition::Live)
-                    .await
-                {
-                    *live_failures += 1;
-                    if exhausted(*live_failures, MAX_LIVE_ATTEMPTS) {
-                        return Ok(Err(format!("transition to live failed: {e}")));
-                    }
-                    warn!(session = %self.row.id, "av-gate: transition live failed, retrying: {e}");
-                    return Ok(Ok(false));
-                }
-                self.row.went_live = true;
-            }
             let life = yt
                 .broadcast_life_cycle(&bid)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok::<_, String>(Ok(life.as_deref() == Some("live")))
+            match life.as_deref() {
+                Some("live") => return Ok(Ok(true)),
+                Some("liveStarting") => return Ok(Ok(false)),
+                _ => {}
+            }
+            let status = yt.stream_status(&sid).await.map_err(|e| e.to_string())?;
+            if status.as_deref() != Some("active") {
+                return Ok(Ok(false));
+            }
+            self.row.went_live = true;
+            self.persist().await;
+            if let Err(e) = yt
+                .transition_broadcast(&bid, BroadcastTransition::Live)
+                .await
+            {
+                *live_failures += 1;
+                if exhausted(*live_failures, MAX_LIVE_ATTEMPTS) {
+                    return Ok(Err(format!("transition to live failed: {e}")));
+                }
+                warn!(session = %self.row.id, "av-gate: transition live failed, retrying: {e}");
+            }
+            Ok::<_, String>(Ok(false))
         };
         match probe.await {
             Ok(outcome) => {
@@ -397,22 +380,48 @@ impl Session {
         }
     }
 
-    /// Release everything the session took. Returns the problems; empty means
-    /// clean, anything else leaves `cleanup_pending` set for the retry loop.
-    /// Runs on EVERY exit path.
-    async fn teardown(&mut self) -> Vec<String> {
+    /// Stop the event and wait for its servers. On a RETRY the session is
+    /// long over: an active event then belongs to another run (restreamer's
+    /// own CI E2E uses it too) and must not be stopped.
+    async fn release_event(&self, event_id: i64, retry: bool) -> Result<(), String> {
+        if retry && self.ctx.rig.event_active(event_id).await? {
+            return Err(format!(
+                "event {event_id} is active again (another run?); not stopping it"
+            ));
+        }
+        self.ctx
+            .rig
+            .stop_event(event_id)
+            .await
+            .map_err(|e| format!("stopping the event failed: {e}"))?;
+        self.wait_servers_gone(event_id).await
+    }
+
+    /// Release whatever the session still holds: complete the broadcast if a
+    /// live transition was ever attempted, stop the event and wait for its
+    /// servers. Each half that succeeds is recorded and never repeated.
+    /// Returns the problems; anything left sets `cleanup_pending`. Runs on
+    /// EVERY exit path (`retry` = from the cleanup loop, after the session).
+    async fn teardown(&mut self, retry: bool) -> Vec<String> {
         let mut problems = Vec::new();
-        if let Some(bid) = self.row.broadcast_id.clone() {
-            if let Err(e) = self.complete_broadcast(&bid).await {
-                problems.push(e);
+        if !self.row.broadcast_done {
+            let outcome = match self.row.broadcast_id.clone() {
+                Some(bid) if self.row.went_live => self.complete_broadcast(&bid).await,
+                _ => Ok(()),
+            };
+            match outcome {
+                Ok(()) => self.row.broadcast_done = true,
+                Err(e) => problems.push(e),
             }
         }
-        if let Some(eid) = self.row.event_id {
-            if let Err(e) = self.ctx.rig.stop_event(eid).await {
-                problems.push(format!("stopping the event failed: {e}"));
-            }
-            if let Err(e) = self.wait_servers_gone(eid).await {
-                problems.push(e);
+        if !self.row.event_done {
+            let outcome = match self.row.event_id {
+                Some(eid) => self.release_event(eid, retry).await,
+                None => Ok(()),
+            };
+            match outcome {
+                Ok(()) => self.row.event_done = true,
+                Err(e) => problems.push(e),
             }
         }
         self.row.cleanup_pending = !problems.is_empty();
@@ -435,7 +444,7 @@ impl Session {
 
     /// Tear down, then fail with `reason` plus any teardown problem.
     async fn teardown_and_fail(&mut self, reason: String) {
-        let problems = self.teardown().await;
+        let problems = self.teardown(false).await;
         let reason = if problems.is_empty() {
             reason
         } else {
@@ -522,7 +531,7 @@ impl Session {
             json!({ "drain_secs": drain.as_secs() }),
         );
         tokio::time::sleep(drain).await;
-        let problems = self.teardown().await;
+        let problems = self.teardown(false).await;
         if !problems.is_empty() {
             return self
                 .finish_failed(format!("teardown: {}", problems.join("; ")))
@@ -554,224 +563,12 @@ impl Session {
     }
 }
 
-/// Run the driver, and tear the session down if the driver task dies.
-fn spawn_driver(session: Session, stop_rx: watch::Receiver<bool>, drain: Duration) {
-    let ctx = Arc::clone(&session.ctx);
-    let yt = session.yt.clone();
-    let id = session.row.id.clone();
-    let driver = tokio::spawn(session.drive(stop_rx, drain));
-    tokio::spawn(async move {
-        if driver.await.is_err() {
-            reap_dead_driver(ctx, yt, &id).await;
-        }
-    });
-}
-
-/// The driver (or the creation) died: clean up from the durable row.
-pub(crate) async fn reap_dead_driver(
-    ctx: Arc<SessionCtx>,
-    yt: Option<Arc<ManageClient>>,
-    session_id: &str,
-) {
-    error!(session = %session_id, "av-gate: the session task died");
-    let row = match store::get(&ctx.pool, session_id).await {
-        Ok(Some(r)) => r,
-        other => {
-            error!(session = %session_id, "av-gate: dead session's row unreadable: {other:?}");
-            ctx.registry.release(session_id);
-            return;
-        }
-    };
-    let mut s = Session::new(ctx, yt, row);
-    s.reaped("driver_died");
-    if s.row.state == SessionState::Processing.as_str() {
-        return s
-            .finish_failed("the session driver died while waiting for the VOD".to_string())
-            .await;
-    }
-    s.teardown_and_fail("the session driver died".to_string())
-        .await;
-}
-
-/// The admission checks and the start. Callers use [`spawn_create`].
-async fn create_session(
-    ctx: Arc<SessionCtx>,
-    yt: Arc<ManageClient>,
-    session_id: String,
-    requester: String,
-    title: String,
-) -> CreateOutcome {
-    if !ctx.registry.is_reconciled() {
-        return CreateOutcome::NotReady;
-    }
-    match store::list_cleanup_pending(&ctx.pool).await {
-        Ok(rows) if rows.is_empty() => {}
-        Ok(rows) => {
-            return CreateOutcome::CleanupPending(rows.into_iter().map(|r| r.id).collect());
-        }
-        Err(e) => return CreateOutcome::Internal(format!("cleanup lookup failed: {e}")),
-    }
-    let spent = match store::quota_units_since(&ctx.pool, &quota_window_start()).await {
-        Ok(v) => v,
-        Err(e) => return CreateOutcome::Internal(format!("quota lookup failed: {e}")),
-    };
-    if !quota_allows(spent, SESSION_QUOTA_ESTIMATE, ctx.daily_quota_budget) {
-        return CreateOutcome::QuotaExceeded {
-            spent,
-            budget: ctx.daily_quota_budget,
-        };
-    }
-    let stop_rx = match ctx.registry.claim(Holder {
-        session_id: session_id.clone(),
-        requester: requester.clone(),
-    }) {
-        Ok(rx) => rx,
-        Err(holder) => return CreateOutcome::Busy(holder),
-    };
-    let row = AvGateSessionRow::new_starting(&session_id, &requester, &title, &now_ts());
-    if let Err(e) = store::save(&ctx.pool, &row).await {
-        ctx.registry.release(&session_id);
-        return CreateOutcome::Internal(format!("saving the session failed: {e}"));
-    }
-    let mut s = Session::new(ctx, Some(yt), row);
-    match s.start_leg().await {
-        Ok(drain) => {
-            s.persist().await;
-            s.audit(
-                Severity::Info,
-                Action::AvGateSessionStarted,
-                json!({
-                    "requester": s.row.requester,
-                    "broadcast_id": s.row.broadcast_id,
-                    "stream_id": s.row.stream_id,
-                    "event_id": s.row.event_id,
-                }),
-            );
-            let broadcast_id = s.row.broadcast_id.clone().unwrap_or_default();
-            spawn_driver(s, stop_rx, drain);
-            CreateOutcome::Created {
-                session_id,
-                broadcast_id,
-            }
-        }
-        Err(reason) => {
-            s.teardown_and_fail(reason).await;
-            CreateOutcome::StartFailed {
-                session_id,
-                reason: s.row.reason.clone().unwrap_or_default(),
-            }
-        }
-    }
-}
-
-/// `POST /api/v1/av-gate/session`, off the request future: the start keeps
-/// going (and ends in a driver or a teardown) even if the HTTP client
-/// disconnects and the handler is dropped, and a panic in it is reaped. A
-/// caller that lost the response learns the session id from the 409 holder.
-pub fn spawn_create(
-    ctx: Arc<SessionCtx>,
-    yt: Arc<ManageClient>,
-    session_id: String,
-    requester: String,
-    title: String,
-) -> JoinHandle<CreateOutcome> {
-    tokio::spawn(async move {
-        let start = tokio::spawn(create_session(
-            Arc::clone(&ctx),
-            Arc::clone(&yt),
-            session_id.clone(),
-            requester,
-            title,
-        ));
-        match start.await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                reap_dead_driver(ctx, Some(yt), &session_id).await;
-                CreateOutcome::Internal(format!("the session start died: {e}"))
-            }
-        }
-    })
-}
-
-/// After a restart: a session left `starting`/`ready` still owns a broadcast
-/// and a delivery, so it is torn down and failed; a `processing` one resumes
-/// its VOD wait. Each row gets its own client; when the oauth file is unusable
-/// the rig is still torn down and the reason says the broadcast was not
-/// completed. Opens the API (`mark_reconciled`) only if the sessions could be
-/// listed.
-pub async fn reconcile_on_boot(ctx: &Arc<SessionCtx>, clients: &ClientFactory) {
-    let rows = match store::list_unfinished(&ctx.pool).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            error!("av-gate boot reconcile: listing sessions failed: {e}");
-            return;
-        }
-    };
-    for row in rows {
-        let yt = clients().ok().map(Arc::new);
-        let mut s = Session::new(Arc::clone(ctx), yt, row);
-        if s.row.state == SessionState::Processing.as_str() {
-            info!(session = %s.row.id, "av-gate boot reconcile: resuming the VOD wait");
-            tokio::spawn(async move { s.await_vod().await });
-            continue;
-        }
-        s.reaped("boot_reconcile");
-        s.teardown_and_fail("Restreamer restarted during the session".to_string())
-            .await;
-    }
-    ctx.registry.mark_reconciled();
-}
-
-/// Retry every failed teardown once. Returns how many are still pending.
-pub async fn retry_cleanups(ctx: &Arc<SessionCtx>, clients: &ClientFactory) -> usize {
-    let rows = match store::list_cleanup_pending(&ctx.pool).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            error!("av-gate cleanup retry: listing sessions failed: {e}");
-            return 1;
-        }
-    };
-    let mut pending = 0;
-    for row in rows {
-        let yt = clients().ok().map(Arc::new);
-        let mut s = Session::new(Arc::clone(ctx), yt, row);
-        let problems = s.teardown().await;
-        s.audit(
-            Severity::Warn,
-            Action::AvGateSessionReaped,
-            json!({ "cause": "cleanup_retry", "problems": problems }),
-        );
-        if problems.is_empty() {
-            let reason = s.row.reason.take().unwrap_or_default();
-            s.row.reason = Some(format!("{reason}; cleanup completed on a later retry"));
-        } else {
-            pending += 1;
-        }
-        s.persist().await;
-    }
-    pending
-}
-
-/// The av-gate maintenance task: the boot reconcile, then failed teardowns
-/// retried with backoff (`cleanup_retry`, doubling, capped at 24x) for as long
-/// as Restreamer runs. A failed boot reconcile is retried on the same cadence.
-pub async fn run_maintenance(ctx: Arc<SessionCtx>, clients: ClientFactory) {
-    let mut failed_rounds = 0;
-    loop {
-        if !ctx.registry.is_reconciled() {
-            reconcile_on_boot(&ctx, &clients).await;
-        }
-        failed_rounds = match retry_cleanups(&ctx, &clients).await {
-            0 => 0,
-            _ => failed_rounds + 1,
-        };
-        tokio::time::sleep(cleanup_retry_delay(
-            ctx.timings.cleanup_retry,
-            failed_rounds,
-        ))
-        .await;
-    }
-}
+// Creation, the reaper, the boot reconcile and the cleanup loop: a child
+// module (so it reaches `Session`'s private items), split out to keep this
+// file under the 1000-line cap.
+#[path = "av_gate_lifecycle.rs"]
+mod lifecycle;
+pub use lifecycle::*;
 
 #[cfg(test)]
 #[path = "av_gate_driver_tests.rs"]

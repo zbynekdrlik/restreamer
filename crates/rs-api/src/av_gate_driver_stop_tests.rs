@@ -2,16 +2,12 @@
 //! reconcile (#357). Child of `av_gate_driver_tests.rs`, reusing its harness.
 
 use super::super::*;
-use super::{EVENT, FakeRig, Harness, timings};
+use super::{EVENT, FakeRig, Harness, reason, timings};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
-use crate::av_gate::RigEvent;
+use crate::av_gate::{Holder, RigEvent};
 use rs_core::audit::Action;
-
-fn reason(row: &AvGateSessionRow) -> String {
-    row.reason.clone().unwrap_or_default()
-}
 
 async fn stop_and_wait(h: &Harness, id: &str, state: SessionState) -> AvGateSessionRow {
     assert!(h.ctx.registry.request_stop(id));
@@ -95,7 +91,7 @@ async fn a_failing_server_check_is_reported() {
 }
 
 #[tokio::test]
-async fn a_failing_event_stop_is_reported_and_servers_still_checked() {
+async fn a_failing_event_stop_is_reported_and_left_pending() {
     let rig = FakeRig::default();
     *rig.stop.lock().unwrap() = Err("HTTP 500".to_string());
     let h = Harness::with(rig, timings()).await;
@@ -105,7 +101,11 @@ async fn a_failing_event_stop_is_reported_and_servers_still_checked() {
         reason(&row),
         "teardown: stopping the event failed: HTTP 500"
     );
-    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    assert!(row.cleanup_pending && row.broadcast_done && !row.event_done);
+    assert!(
+        !h.rig.called(&format!("servers:{EVENT}")),
+        "servers are checked once the stop succeeded"
+    );
 }
 
 #[tokio::test]
@@ -292,7 +292,7 @@ async fn a_dead_driver_in_processing_is_only_marked_failed() {
     row.broadcast_id = Some("bc-1".to_string());
     row.event_id = Some(EVENT);
     store::save(&h.ctx.pool, &row).await.unwrap();
-    reap_dead_driver(Arc::clone(&h.ctx), Some(h.yt()), "s1").await;
+    reap_dead_driver(Arc::clone(&h.ctx), Some(h.yt()), 0, "s1").await;
     let row = h.row("s1").await;
     assert_eq!(row.state, "failed");
     assert_eq!(
@@ -313,7 +313,7 @@ async fn a_dead_driver_without_a_row_still_frees_the_slot() {
             requester: "r".to_string(),
         })
         .unwrap();
-    reap_dead_driver(Arc::clone(&h.ctx), None, "ghost").await;
+    reap_dead_driver(Arc::clone(&h.ctx), None, 0, "ghost").await;
     assert_eq!(h.ctx.registry.holder(), None);
 }
 
@@ -386,113 +386,6 @@ async fn boot_reconcile_leaves_finished_sessions_alone() {
     assert!(h.yt_state.transitions().is_empty());
 }
 
-// ---- failed teardowns stay pending until a retry is clean ----------------------
-
-#[tokio::test]
-async fn a_failed_teardown_blocks_new_sessions_until_a_retry_cleans_it() {
-    let rig = FakeRig::default();
-    *rig.servers.lock().unwrap() = VecDeque::from([Ok(1)]);
-    let mut h = Harness::with(rig, timings()).await;
-    h.ready_session("s1").await;
-    let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
-    assert!(row.cleanup_pending, "{row:?}");
-    assert_eq!(
-        h.create("s2").await,
-        CreateOutcome::CleanupPending(vec!["s1".to_string()])
-    );
-
-    // Still failing: stays pending.
-    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 1);
-    assert!(h.row("s1").await.cleanup_pending);
-
-    *h.rig.servers.lock().unwrap() = VecDeque::from([Ok(0)]);
-    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
-    let row = h.row("s1").await;
-    assert!(!row.cleanup_pending);
-    assert_eq!(row.state, "failed");
-    assert!(
-        reason(&row).ends_with("; cleanup completed on a later retry"),
-        "{row:?}"
-    );
-    let reaped = h
-        .actions()
-        .iter()
-        .filter(|a| **a == Action::AvGateSessionReaped)
-        .count();
-    assert_eq!(reaped, 2, "one audit row per retry");
-    *h.yt_state.life.lock().unwrap() = "ready".to_string();
-    h.ready_session("s2").await;
-}
-
-#[tokio::test]
-async fn a_clean_teardown_leaves_nothing_pending() {
-    let h = Harness::new().await;
-    h.ready_session("s1").await;
-    let row = stop_and_wait(&h, "s1", SessionState::Done).await;
-    assert!(!row.cleanup_pending);
-    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
-}
-
-#[tokio::test]
-async fn the_maintenance_loop_reconciles_then_retries_until_clean() {
-    let rig = FakeRig::default();
-    *rig.servers.lock().unwrap() = VecDeque::from([Ok(1), Ok(1), Ok(1), Ok(1), Ok(1), Ok(0)]);
-    let h = Harness::with(rig, timings()).await;
-    seed(&h, "s1", "ready", true).await;
-    let ctx = Arc::new(SessionCtx {
-        pool: h.ctx.pool.clone(),
-        audit_tx: h.ctx.audit_tx.clone(),
-        registry: Arc::new(AvGateRegistry::default()),
-        rig: h.rig.clone(),
-        timings: AvGateTimings {
-            servers_gone_timeout: Duration::from_millis(1),
-            ..timings()
-        },
-        event_name: "E2E-Test".to_string(),
-        stream_title: "e2e rtmp".to_string(),
-        daily_quota_budget: 4_000,
-    });
-    let task = tokio::spawn(run_maintenance(Arc::clone(&ctx), h.clients()));
-    let clean = async {
-        loop {
-            let row = h.row("s1").await;
-            if row.state == "failed" && !row.cleanup_pending {
-                return row;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    };
-    let row = tokio::time::timeout(Duration::from_secs(8), clean)
-        .await
-        .expect("the loop must eventually clean the session");
-    task.abort();
-    assert!(ctx.registry.is_reconciled());
-    assert!(reason(&row).starts_with("Restreamer restarted during the session"));
-    assert!(reason(&row).ends_with("cleanup completed on a later retry"));
-}
-
-#[tokio::test]
-async fn a_boot_reconcile_that_cannot_list_keeps_the_api_closed() {
-    let h = Harness::new().await;
-    let ctx = Arc::new(SessionCtx {
-        pool: h.ctx.pool.clone(),
-        audit_tx: h.ctx.audit_tx.clone(),
-        registry: Arc::new(AvGateRegistry::default()),
-        rig: h.rig.clone(),
-        timings: timings(),
-        event_name: "E2E-Test".to_string(),
-        stream_title: "e2e rtmp".to_string(),
-        daily_quota_budget: 4_000,
-    });
-    sqlx::query("ALTER TABLE av_gate_sessions RENAME TO av_gate_sessions_gone")
-        .execute(&h.ctx.pool)
-        .await
-        .unwrap();
-    reconcile_on_boot(&ctx, &h.clients()).await;
-    assert!(!ctx.registry.is_reconciled());
-    assert_eq!(retry_cleanups(&ctx, &h.clients()).await, 1);
-}
-
 #[tokio::test]
 async fn a_reaped_session_counts_its_own_client_spend_once() {
     let h = Harness::new().await;
@@ -502,15 +395,23 @@ async fn a_reaped_session_counts_its_own_client_spend_once() {
     let mut row = AvGateSessionRow::new_starting("s1", "r", "t", &now_ts());
     row.state = "processing".to_string();
     row.broadcast_id = Some("bc-1".to_string());
-    row.quota_units = 10;
+    row.quota_units = 4;
     store::save(&h.ctx.pool, &row).await.unwrap();
-    reap_dead_driver(Arc::clone(&h.ctx), Some(yt), "s1").await;
-    assert_eq!(h.row("s1").await.quota_units, 10);
+    // The row is stale (4); the session's base before this client was 9.
+    reap_dead_driver(Arc::clone(&h.ctx), Some(yt), 9, "s1").await;
+    assert_eq!(h.row("s1").await.quota_units, 10, "base 9 + the client's 1");
 }
 
 #[tokio::test]
 async fn a_processing_session_persists_its_quota_spend_as_it_polls() {
-    let h = Harness::new().await;
+    let h = Harness::with(
+        FakeRig::default(),
+        AvGateTimings {
+            processing_timeout: Duration::from_secs(30),
+            ..timings()
+        },
+    )
+    .await;
     h.ready_session("s1").await;
     *h.yt_state.video.lock().unwrap() = "processing".to_string();
     let processing = stop_and_wait(&h, "s1", SessionState::Processing).await;

@@ -16,7 +16,7 @@ use rs_core::models::StreamingEvent;
 use rs_youtube::manage::{ManageClient, ManageCredentials};
 
 use crate::av_gate::{AvGateRig, AvGateTimings, RigDelivery, RigEvent, StartEventError};
-use crate::av_gate_driver::{ClientFactory, SessionCtx, run_maintenance};
+use crate::av_gate_driver::{ClientFactory, SessionCtx, supervise_maintenance};
 use crate::state::AppState;
 use crate::stream_handlers::{StartStreamQuery, start_stream, stop_stream};
 
@@ -89,6 +89,17 @@ impl AvGateRig for AppRig {
                 "delivery is not configured (no Hetzner token)".to_string(),
             ));
         }
+        // Re-checked right before the start: YouTube calls ran since
+        // `resolve_event`, and another run may have taken the event meanwhile.
+        if self
+            .event_active(event_id)
+            .await
+            .map_err(StartEventError::Refused)?
+        {
+            return Err(StartEventError::Refused(format!(
+                "event {event_id} became active (another run took it)"
+            )));
+        }
         let started = start_stream(
             State(self.state.clone()),
             UrlPath(event_id),
@@ -141,6 +152,13 @@ impl AvGateRig for AppRig {
             .map_err(|s| format!("stopping event {event_id} failed: HTTP {}", s.as_u16()))
     }
 
+    async fn event_active(&self, event_id: i64) -> Result<bool, String> {
+        db::get_streaming_event_by_id(&self.state.pool, event_id)
+            .await
+            .map_err(|e| format!("reading event {event_id} failed: {e}"))
+            .map(|e| e.as_ref().is_some_and(is_active))
+    }
+
     async fn server_count(&self, event_id: i64) -> Result<usize, String> {
         let Some(orch) = &self.state.delivery_orchestrator else {
             // No Hetzner token: this box cannot have created a server.
@@ -169,10 +187,11 @@ pub(crate) fn manage_client(state: &AppState) -> Result<ManageClient, String> {
     .map_err(|e| e.to_string())?;
     #[cfg(test)]
     if let Some(seam) = state.av_gate.seam.lock().expect("seam").clone() {
-        return Ok(
-            ManageClient::with_endpoints(creds, &seam.api_base, &seam.token_uri)
-                .with_quota_tracker(tracker),
-        );
+        let client = ManageClient::with_endpoints(creds, &seam.api_base, &seam.token_uri);
+        return Ok(match seam.quota_bucket {
+            Some(bucket) => client.with_quota_tracker(bucket),
+            None => client,
+        });
     }
     Ok(ManageClient::new(creds).with_quota_tracker(tracker))
 }
@@ -182,10 +201,11 @@ pub(crate) fn session_ctx(state: &AppState) -> Arc<SessionCtx> {
     let cfg = &state.config.av_gate;
     let rig: Arc<dyn AvGateRig> = Arc::new(AppRig::new(state.clone()));
     let timings = AvGateTimings::from_config(cfg);
+    let quota_bucket = Some(crate::delivery_status::youtube_quota_tracker());
     #[cfg(test)]
-    let (rig, timings) = match state.av_gate.seam.lock().expect("seam").clone() {
-        Some(seam) => (seam.rig, seam.timings),
-        None => (rig, timings),
+    let (rig, timings, quota_bucket) = match state.av_gate.seam.lock().expect("seam").clone() {
+        Some(seam) => (seam.rig, seam.timings, seam.quota_bucket),
+        None => (rig, timings, quota_bucket),
     };
     Arc::new(SessionCtx {
         pool: state.pool.clone(),
@@ -196,6 +216,7 @@ pub(crate) fn session_ctx(state: &AppState) -> Arc<SessionCtx> {
         event_name: cfg.event_name.clone(),
         stream_title: cfg.stream_title.clone(),
         daily_quota_budget: cfg.daily_quota_budget,
+        quota_bucket,
     })
 }
 
@@ -207,7 +228,7 @@ pub(crate) fn session_ctx(state: &AppState) -> Arc<SessionCtx> {
 pub async fn run_av_gate_maintenance(state: AppState) {
     let ctx = session_ctx(&state);
     let clients: ClientFactory = Arc::new(move || manage_client(&state));
-    run_maintenance(ctx, clients).await;
+    supervise_maintenance(ctx, clients).await;
 }
 
 #[cfg(test)]
