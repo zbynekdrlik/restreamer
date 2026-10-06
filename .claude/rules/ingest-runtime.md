@@ -7,6 +7,7 @@ paths:
   - "crates/rs-endpoint/src/disk_pressure.rs"
   - "crates/rs-inpoint/src/flv_chunker_drain_tests.rs"
   - "crates/rs-inpoint/src/media_receiver.rs"
+  - "crates/rs-inpoint/src/rtmp_server.rs"
   - "crates/rs-core/src/stable_since*.rs"
 ---
 
@@ -40,6 +41,14 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   (3.0 s in the RED test), and a session shorter than the hold was LOST,
   because the receiver subscribes only after `mark_connected` returns.
   Frames that arrive before the subscription are not buffered.
+- **A stop must never be lost before the server subscribes.** The loop
+  stops the server with `shutdown.send(())` and then `handle.await`s it.
+  `RtmpServer::new` keeps the first receiver of its shutdown channel, and
+  `serve()` uses it. Before the fix, `serve()` subscribed only after the
+  bind on the ingest runtime, so a stop sent earlier went nowhere. The await
+  then hung forever, and `stop_shuts_the_ingest_runtime_down` timed out
+  about 1 run in 12 on dev2. Never subscribe to a stop signal lazily inside
+  a task that someone else spawns and then awaits.
 - `RtmpServer::serve`'s own `flush()` runs on the ingest runtime when the
   server stops. The loop's `flush()` afterwards (main runtime) finds the
   buffer empty.
