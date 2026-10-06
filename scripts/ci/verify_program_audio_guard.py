@@ -7,7 +7,8 @@ in scripts/ci/program-audio-guard.ps1 (tested by tests/ci/test_program_audio_gua
 this file pins their WIRING, which no runtime test can see:
 
   * obs-stream.ps1 dot-sources the guard, and EVERY StartStream request in it is
-    immediately preceded by `$why = Test-ProgramAudio` + an exit on its verdict
+    immediately preceded by `$why = Test-ProgramAudio -BeforeStart` (which also
+    refuses after an earlier breach or a dead watchdog) + an exit on its verdict
     (only the started marker may sit between them). The #374 guard
     (verify_no_obs_mutation.py) already confines StartStream to obs-stream.ps1
     Start-OurStream and bans the start-stream API, so this covers every start site:
@@ -15,9 +16,10 @@ this file pins their WIRING, which no runtime test can see:
   * in every workflow job that runs `obs-stream.ps1 -Action Start`:
       - the very next step starts the watchdog, under
         `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`;
-      - every LONG streaming step (timeout-minutes >= 10, or named in LONG_UNTIMED)
-        is followed by a breach check before the next long step and before the
-        OBS stop;
+      - every LONG streaming step (timeout-minutes >= 10, or NO timeout-minutes: it
+        may run to the job limit) is followed by a breach check before the next
+        long step and before the OBS stop. `if: always()` cleanup steps are not
+        streaming steps; the always() teardown assert covers them;
       - after the OBS stop, an `if: always()` teardown stops the watchdog and then
         asserts no breach;
       - no watchdog / check / teardown step is continue-on-error;
@@ -40,6 +42,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from verify_no_obs_mutation import norm_if, strip_comments  # noqa: E402  (the #374 guard's helpers)
+
 WORKFLOWS = Path(".github/workflows")
 CI = WORKFLOWS / "ci.yml"
 SCRIPTS = Path("scripts")
@@ -53,30 +58,12 @@ STOP_RUN = PS + "obs-stream.ps1 -Action Stop"
 STARTED_IF = "always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
 DOT_SOURCE = ". scripts/ci/program-audio-guard.ps1"
 LONG_MINUTES = 10
-# Long streaming steps with no timeout-minutes (a name prefix per job). A renamed one
-# fails this guard ("missing"), so a rename cannot silently drop its breach check.
-LONG_UNTIMED = {
-    "e2e-fb-push-stream-lan": [
-        "STRICT: 30-min sustained soak",
-        "GATE: FB-side ingest_streams.stream_health",
-    ],
-}
 GUARD_FUNCS = ["Test-ProgramAudio", "Start-ProgramAudioWatchdog", "Assert-NoProgramAudioBreach",
                "Stop-ProgramAudioWatchdog"]
 GATED_START = re.compile(
-    r'\$why = Test-ProgramAudio[ \t]*\n[ \t]*if \(\$why\) \{ [^\n]*\bexit 1 \}[ \t]*\n'
+    r'\$why = Test-ProgramAudio -BeforeStart[ \t]*\n[ \t]*if \(\$why\) \{ [^\n]*\bexit 1 \}[ \t]*\n'
     r'[ \t]*Set-StartedMarker "true"[ \t]*\n[ \t]*\$resp = Invoke-ObsRequest "StartStream"')
 START_LITERAL = re.compile(r"""["']StartStream["']""")
-
-
-def strip_comments(text: str) -> str:
-    text = re.sub(r"(?m)^\s*<#.*?#>", "", text, flags=re.S)
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-
-
-def norm_if(cond: object) -> str:
-    c = str(cond if cond is not None else "").replace("${{", " ").replace("}}", " ")
-    return re.sub(r"\s+", " ", c).strip()
 
 
 def run_lines(step: dict) -> list[str]:
@@ -115,12 +102,11 @@ def check_guard_file(root: Path) -> list[str]:
             if not re.search(rf"(?m)^function {re.escape(f)}\b", code)]
 
 
-def long_step(job_name: str, step: dict) -> bool:
+def long_step(step: dict) -> bool:
+    if "always()" in norm_if(step.get("if")):
+        return False
     t = step.get("timeout-minutes")
-    if isinstance(t, (int, float)) and t >= LONG_MINUTES:
-        return True
-    name = str(step.get("name") or "")
-    return any(name.startswith(p) for p in LONG_UNTIMED.get(job_name, []))
+    return t is None or not isinstance(t, (int, float)) or t >= LONG_MINUTES
 
 
 def check_job(job_name: str, job: dict) -> list[str]:
@@ -135,9 +121,6 @@ def check_job(job_name: str, job: dict) -> list[str]:
     stop = stops[-1] if stops else len(steps)
     if not stops:
         errs.append(f"{where}: streams OBS but has no OBS stop step (anchor missing)")
-    for prefix in LONG_UNTIMED.get(job_name, []):
-        if not any(str(s.get("name") or "").startswith(prefix) for s in steps):
-            errs.append(f"{where}: pinned long step `{prefix}` is missing (renamed? update LONG_UNTIMED)")
     nxt = steps[start + 1] if start + 1 < len(steps) else {}
     if not is_call(nxt, "Start-ProgramAudioWatchdog"):
         errs.append(f"{where}: the step right after the OBS start must start the program-audio watchdog")
@@ -150,7 +133,7 @@ def check_job(job_name: str, job: dict) -> list[str]:
         if is_call(s, "Assert-NoProgramAudioBreach"):
             pending = None
             continue
-        if long_step(job_name, s):
+        if long_step(s):
             if pending:
                 errs.append(f"{where}: long streaming step `{pending}` has no program-audio breach check before `{name}`")
             pending = name
@@ -221,11 +204,12 @@ CHECK_STEP = ('      - name: "Program-audio breach check (#379)"\n        shell:
               '        run: |\n          . scripts/ci/program-audio-guard.ps1\n          Assert-NoProgramAudioBreach\n\n')
 WD_IF = "      - name: \"Program-audio watchdog: start (#379)\"\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
 TEARDOWN = '      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"\n        if: always()'
-FB_SOAK = '      - name: "STRICT: 30-min sustained soak'
-GATED = '    $why = Test-ProgramAudio\n    if ($why) { Write-ProgramAudioError "not starting OBS streaming" $why; exit 1 }\n'
+GATED = '    $why = Test-ProgramAudio -BeforeStart\n    if ($why) { Write-ProgramAudioError "not starting OBS streaming" $why; exit 1 }\n'
 
 STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Start drops the program-audio check", GATED, "", "not immediately preceded"),
+    ("Start ignores an earlier breach (no -BeforeStart)", "    $why = Test-ProgramAudio -BeforeStart\n",
+     "    $why = Test-ProgramAudio\n", "not immediately preceded"),
     ("Start ignores the verdict", '    if ($why) { Write-ProgramAudioError "not starting OBS streaming" $why; exit 1 }\n',
      "", "not immediately preceded"),
     ("the verdict only warns", "$why; exit 1 }\n    Set-StartedMarker", "$why }\n    Set-StartedMarker", "not immediately preceded"),
@@ -255,7 +239,11 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("a new 30-min streaming step without a breach check", YT_SUSTAINED,
      "      - name: evil long soak\n        timeout-minutes: 30\n        run: echo soak\n\n" + YT_SUSTAINED,
      "`evil long soak` has no program-audio breach check"),
-    ("the FB soak is renamed", FB_SOAK, '      - name: "STRICT: half-hour soak', "pinned long step"),
+    ("a new UNTIMED streaming step without a breach check", YT_SUSTAINED,
+     "      - name: evil untimed soak\n        run: echo soak\n\n" + YT_SUSTAINED,
+     "`evil untimed soak` has no program-audio breach check"),
+    ("an always() cleanup step is not a streaming step", YT_SUSTAINED,
+     "      - name: evil cleanup\n        if: always()\n        run: echo cleanup\n\n" + YT_SUSTAINED, None),
     ("YT teardown only on success", TEARDOWN, TEARDOWN.replace("always()", "success()"), "needs exactly `if: always()`"),
     ("YT teardown asserts before stopping", "          Stop-ProgramAudioWatchdog\n          Assert-NoProgramAudioBreach",
      "          Assert-NoProgramAudioBreach\n          Stop-ProgramAudioWatchdog", "THEN assert"),
@@ -298,9 +286,9 @@ def self_test(root: Path) -> int:
             errs = check(t)
         if expect is None:
             if errs:
-                failures.append(f"clean copy: expected PASS, got: {errs[:3]}")
+                failures.append(f"{desc}: expected PASS, got: {errs[:3]}")
             else:
-                print("  ok   clean copy passes")
+                print(f"  ok   GREEN {desc}")
             return
         count += 1
         hit = [e for e in errs if expect in e]

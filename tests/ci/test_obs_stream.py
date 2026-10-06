@@ -270,6 +270,31 @@ class MockLease:
         self.server.shutdown()
 
 
+class MockRestreamerApi:
+    """Counts POSTs to Restreamer's stop-stream API: obs-stream.ps1 must never use it."""
+
+    def __init__(self) -> None:
+        self.posts = 0
+        api = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 (http.server API)
+                api.posts += 1
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:
+                return
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/v1/obs/stop-stream"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+
+
 def _closed_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -330,6 +355,7 @@ class Case:
     host: bool = False                # a fake Restreamer.exe (just restarted) for Rebaseline
     rebaseline_window_s: float | None = None
     audio: dict | None = field(default_factory=lambda: dict(AUDIO_OK))  # #379 sampler; None = down
+    audio_breach: bool = False        # #379: the watchdog already recorded a breach in this job
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
@@ -447,6 +473,9 @@ CASES = [
     Case("republish: music at the restart -> stopped, marker false, no restart", OS_, REPUBLISH,
          ObsState(streaming=True), 1, "not starting OBS streaming -- FOREIGN", ["false"], lease=FREE,
          audio=AUDIO_FOREIGN, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
+    Case("republish after a program-audio breach -> stopped, no restart even on a clean verdict", OS_, REPUBLISH,
+         ObsState(streaming=True), 1, "not starting OBS streaming -- earlier in this job:", ["false"], lease=FREE,
+         audio_breach=True, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
 ]
 
 
@@ -482,6 +511,10 @@ def run_case(case: Case) -> list[str]:
         obs = None if case.obs_down else MockObs(case.state)
         lease = MockLease(case.lease) if case.lease else None
         audio = MockLease(case.audio) if case.audio is not None else None
+        api = MockRestreamerApi()
+        if case.audio_breach:
+            (tmp / "program-audio-breach.txt").write_text("2026-10-07T10:00:00Z BREACH: FOREIGN: test\n",
+                                                          encoding="ascii")
         fake = FakeObs64(tmp, case.obs64) if case.obs64 else None
         host = FakeObs64(tmp, 1, "Restreamer") if case.host else None
         env_file = tmp / "github_env"
@@ -501,8 +534,8 @@ def run_case(case: Case) -> list[str]:
             "OBS_REBASELINE_WINDOW_S": str(case.rebaseline_window_s or ""),
             "PROGRAM_AUDIO_URL": (audio.url.replace("rig-lease.json", "program-audio.json") if audio
                                   else f"http://127.0.0.1:{_closed_port()}/program-audio.json"),
-            # Start never stops anything through the API; a closed port proves it.
-            "PROGRAM_AUDIO_STOP_URL": f"http://127.0.0.1:{_closed_port()}/api/v1/obs/stop-stream",
+            # obs-stream.ps1 never stops through Restreamer's API (asserted: 0 POSTs).
+            "PROGRAM_AUDIO_STOP_URL": api.url,
         })
         try:
             pre_out = ""
@@ -529,12 +562,19 @@ def run_case(case: Case) -> list[str]:
                 lease.close()
             if audio:
                 audio.close()
+            api.close()
         out = pre_out + proc.stdout + proc.stderr
         got = markers(env_file)
+        owned_file = tmp / "program-audio-stream-owned"
+        owned = owned_file.read_text(encoding="ascii").strip() if owned_file.exists() else None
     if proc.returncode != case.expect_exit:
         problems.append(f"exit {proc.returncode}, expected {case.expect_exit}")
     if case.expect_text not in out:
         problems.append(f"output lacks {case.expect_text!r}")
+    if api.posts:
+        problems.append(f"POSTed Restreamer's stop-stream API {api.posts}x (only the #379 watchdog may)")
+    if (owned or None) != (got[-1] if got else None):
+        problems.append(f"the #379 stream-owned record is {owned!r}, the last marker {got[-1] if got else None!r}")
     if got != case.expect_markers:
         problems.append(f"markers {got}, expected {case.expect_markers}")
     sent = set(case.state.requests)

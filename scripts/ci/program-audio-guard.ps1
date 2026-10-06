@@ -9,20 +9,29 @@
 #
 # Dot-source it (". scripts/ci/program-audio-guard.ps1"), then:
 #
-#   Test-ProgramAudio            one read of the verdict. Returns $null when the
-#                                program carries MEASUREMENT or SILENT and the sample
-#                                is fresh (age_s <= 10), otherwise a one-line reason:
-#                                FOREIGN / UNKNOWN / stale / unreachable / malformed.
-#                                FAIL-CLOSED: no verdict = no stream. obs-stream.ps1
-#                                Start-OurStream runs it right before every StartStream
-#                                (the initial start and every republish).
+#   Test-ProgramAudio [-BeforeStart]
+#                                one read of the verdict. Returns $null when the
+#                                program carries MEASUREMENT or SILENT, the sample is
+#                                fresh (0 <= age_s <= 10) and no FOREIGN was seen in the
+#                                last 15 s; otherwise a one-line reason: FOREIGN /
+#                                UNKNOWN / stale / unreachable / malformed. FAIL-CLOSED.
+#                                obs-stream.ps1 Start-OurStream runs it with -BeforeStart
+#                                right before every StartStream (the start and every
+#                                republish): that also refuses after an earlier breach
+#                                or a dead watchdog in this job.
+#   Set-ProgramAudioStreamOwned  obs-stream.ps1 Set-StartedMarker mirrors its marker
+#                                here: the watchdog stops only OUR stream (#374: a
+#                                session that is not ours is never stopped).
 #   Start-ProgramAudioWatchdog   right after the OBS start step: launches a detached
 #                                PowerShell (it must outlive the step; a Start-Job dies
 #                                with the step's process) that re-reads the verdict
-#                                every 10 s. On a breach it writes the breach marker
-#                                FIRST, then asks Restreamer to stop OBS streaming
-#                                (POST /api/v1/obs/stop-stream, retried while Restreamer
-#                                restarts) and exits.
+#                                every 10 s while our stream is live. On a breach it
+#                                writes the breach marker FIRST, then asks Restreamer to
+#                                stop OBS streaming (POST /api/v1/obs/stop-stream) and
+#                                re-asks until Restreamer's GET /api/v1/obs/status
+#                                CONFIRMS OBS is not streaming (the POST only queues the
+#                                command). It never gives up while our stream is live;
+#                                the teardown (or the job end) ends it.
 #   Assert-NoProgramAudioBreach  fails the step (::error:: + job summary) when the
 #                                breach marker exists, or when the watchdog died or hung
 #                                (an unguarded stream is a failure too).
@@ -33,18 +42,18 @@
 # its records), so the steps of one job share it and the next job starts clean.
 # The runner reaps the detached watchdog at job end even if the teardown never ran.
 #
-# Knobs (env, for tests; ci.yml may not set them -- verify_program_audio_guard.py):
+# Knobs (env, for tests; no workflow may set them -- verify_program_audio_guard.py):
 #   PROGRAM_AUDIO_URL               default http://dev1:8890/program-audio.json
 #   PROGRAM_AUDIO_MAX_AGE_S         default 10   (freshness of camera-box's sample)
 #   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 15   (a FOREIGN seen between two polls)
 #   PROGRAM_AUDIO_HTTP_TIMEOUT_S    default 5
 #   PROGRAM_AUDIO_POLL_S            default 10
 #   PROGRAM_AUDIO_STOP_URL          default Restreamer's stop-stream API on 127.0.0.1:8910
-#   PROGRAM_AUDIO_STOP_BUDGET_S     default 60   (retry the stop while Restreamer restarts)
+#   PROGRAM_AUDIO_OBS_STATUS_URL    default http://127.0.0.1:8910/api/v1/obs/status
 #
 # The stop-stream call lives ONLY in Invoke-ProgramAudioStop: the #374 guard
 # (verify_no_obs_mutation.py) bans that API everywhere else.
-# Tests: tests/ci/test_program_audio_guard.py (mock sampler + mock stop endpoint).
+# Tests: tests/ci/test_program_audio_guard.py (mock sampler + mock Restreamer API).
 
 param([switch]$RunWatchdog)
 
@@ -70,6 +79,7 @@ function Get-ProgramAudioPaths {
     Breach    = Join-Path $env:RUNNER_TEMP "program-audio-breach.txt"
     Pid       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.pid"
     Heartbeat = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.heartbeat"
+    Owned     = Join-Path $env:RUNNER_TEMP "program-audio-stream-owned"
     Log       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.log"
     Out       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.out"
     Err       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.err"
@@ -80,8 +90,38 @@ function Get-ProgramAudioNow { return [DateTimeOffset]::UtcNow.ToUnixTimeMillise
 
 function Get-ProgramAudioStamp { return [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") }
 
+# A small state file, rewritten in place. Not a rename-over: on Windows that fails
+# while a reader holds the file open. A concurrent read can briefly see it empty, so
+# Read-ProgramAudioFile retries; a sharing violation here is retried too.
+function Write-ProgramAudioFile([string]$path, [string]$text) {
+  for ($i = 0; ; $i++) {
+    try {
+      [System.IO.File]::WriteAllText($path, $text)
+      return
+    } catch {
+      if ($i -ge 9) { throw }
+      Start-Sleep -Milliseconds 100
+    }
+  }
+}
+
+# The trimmed content, or "" when the file is missing (or stays empty for ~1 s).
+function Read-ProgramAudioFile([string]$path) {
+  for ($i = 0; $i -lt 10; $i++) {
+    if (-not (Test-Path -LiteralPath $path)) { return "" }
+    $text = ([string](Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue)).Trim()
+    if ($text) { return $text }
+    Start-Sleep -Milliseconds 100
+  }
+  return ""
+}
+
 # One read of camera-box's verdict. $null = OK to stream; otherwise the reason.
-function Test-ProgramAudio {
+function Test-ProgramAudio([switch]$BeforeStart) {
+  if ($BeforeStart) {
+    $prior = Get-ProgramAudioGuardFailure
+    if ($prior) { return "earlier in this job: $prior" }
+  }
   $url = Get-ProgramAudioUrl
   $maxAge = Get-ProgramAudioKnob "PROGRAM_AUDIO_MAX_AGE_S" 10
   $foreignWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FOREIGN_WINDOW_S" 15
@@ -104,8 +144,8 @@ function Test-ProgramAudio {
   }
   $verdict = [string]$j.verdict
   $age = $j.age_s -as [double]
-  if (-not $verdict -or $null -eq $j.age_s -or $null -eq $age) {
-    return "malformed: $url has no verdict / numeric age_s"
+  if (-not $verdict -or $null -eq $j.age_s -or $j.age_s -is [bool] -or $null -eq $age -or $age -lt 0) {
+    return "malformed: $url has no verdict / non-negative numeric age_s"
   }
   $line = "verdict=$verdict age_s=$age rms_dbfs=$($j.rms_dbfs) outside_band_pct=$($j.outside_band_pct) source=$($j.source)"
   if ($age -gt $maxAge) { return "stale: sample is ${age}s old (max ${maxAge}s) -- $line" }
@@ -132,34 +172,84 @@ function Write-ProgramAudioError([string]$context, [string]$why) {
   }
 }
 
+# obs-stream.ps1 Set-StartedMarker mirrors OBS_STREAMING_STARTED_BY_CI here.
+function Set-ProgramAudioStreamOwned([bool]$owned) {
+  $p = Get-ProgramAudioPaths
+  Write-ProgramAudioFile $p.Owned ($(if ($owned) { "true" } else { "false" }))
+}
+
+# Is the live OBS stream ours? Only an explicit "false" says no: with no record the
+# watchdog errs on the side of stopping (music on a platform is the worse outcome).
+function Test-ProgramAudioStreamOwned {
+  $p = Get-ProgramAudioPaths
+  return ((Read-ProgramAudioFile $p.Owned) -ne "false")
+}
+
 # The ONE call to Restreamer's stop-stream API (the #374 guard confines it here).
-# Retried until it answers 2xx or the budget ends: the breach can land while a
-# crash gate has Restreamer.exe down.
+# Returns "" when Restreamer accepted the command (it only QUEUES it), else the error.
 function Invoke-ProgramAudioStop {
   $stopUrl = $env:PROGRAM_AUDIO_STOP_URL
   if (-not $stopUrl) { $stopUrl = "http://127.0.0.1:8910/api/v1/obs/stop-stream" }
-  $budget = Get-ProgramAudioKnob "PROGRAM_AUDIO_STOP_BUDGET_S" 60
-  $deadline = (Get-ProgramAudioNow) + $budget
-  $attempt = 0
-  $last = ""
-  while ($true) {
-    $attempt++
-    try {
-      $r = Invoke-WebRequest -Uri $stopUrl -Method POST -UseBasicParsing -TimeoutSec 5 -Body ""
-      return "stop-stream OK (HTTP $($r.StatusCode), attempt $attempt)"
-    } catch {
-      $last = $_.Exception.Message
-    }
-    if ((Get-ProgramAudioNow) -ge $deadline) {
-      return "stop-stream FAILED after $attempt attempts / ${budget}s: $last"
-    }
-    Start-Sleep -Seconds ([Math]::Min(5, $budget))
+  try {
+    $null = Invoke-WebRequest -Uri $stopUrl -Method POST -UseBasicParsing -TimeoutSec 5 -Body ""
+    return ""
+  } catch {
+    return $_.Exception.Message
   }
+}
+
+# Restreamer's read of OBS: $true / $false, or $null when it cannot tell (Restreamer
+# down, its OBS client not connected, no answer).
+function Get-ProgramAudioObsStreaming {
+  $url = $env:PROGRAM_AUDIO_OBS_STATUS_URL
+  if (-not $url) { $url = "http://127.0.0.1:8910/api/v1/obs/status" }
+  try {
+    $s = Invoke-RestMethod -Uri $url -Method GET -TimeoutSec 5
+  } catch {
+    return $null
+  }
+  if ($null -eq $s -or $s.connected -ne $true -or $s.streaming -isnot [bool]) { return $null }
+  return $s.streaming
 }
 
 function Write-ProgramAudioLog([string]$text) {
   $p = Get-ProgramAudioPaths
   "$(Get-ProgramAudioStamp) $text" | Out-File -FilePath $p.Log -Encoding ascii -Append
+}
+
+function Add-ProgramAudioBreachLine([string]$text) {
+  $p = Get-ProgramAudioPaths
+  "$(Get-ProgramAudioStamp) $text" | Out-File -FilePath $p.Breach -Encoding ascii -Append
+  Write-ProgramAudioLog $text
+}
+
+# After a breach: ask for the stop until Restreamer CONFIRMS OBS stopped. Never gives
+# up while our stream is live; the heartbeat keeps proving the watchdog is alive.
+function Invoke-ProgramAudioBreachStop {
+  $p = Get-ProgramAudioPaths
+  $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
+  $attempt = 0
+  while ($true) {
+    Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
+    if (-not (Test-ProgramAudioStreamOwned)) {
+      Add-ProgramAudioBreachLine "our stream already ended (marker false) -- not stopping a session that is not ours"
+      return
+    }
+    $attempt++
+    $err = Invoke-ProgramAudioStop
+    if ($err) { Write-ProgramAudioLog "stop-stream attempt $attempt failed: $err" }
+    for ($i = 0; $i -lt 5; $i++) {
+      Start-Sleep -Seconds 1
+      if ((Get-ProgramAudioObsStreaming) -eq $false) {
+        Add-ProgramAudioBreachLine "stop CONFIRMED: Restreamer reports OBS not streaming (stop-stream attempt $attempt)"
+        return
+      }
+    }
+    if ($attempt -eq 1 -or $attempt % 10 -eq 0) {
+      Add-ProgramAudioBreachLine "stop NOT confirmed yet after $attempt attempt(s) -- still asking"
+    }
+    Start-Sleep -Seconds ([Math]::Min(5, $poll))
+  }
 }
 
 # The detached watchdog's body (program-audio-guard.ps1 -RunWatchdog).
@@ -169,23 +259,26 @@ function Invoke-ProgramAudioWatchdogLoop {
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
   Write-ProgramAudioLog "watchdog up (pid $PID, poll ${poll}s, $(Get-ProgramAudioUrl))"
   while ($true) {
-    "$(Get-ProgramAudioNow)" | Out-File -FilePath $p.Heartbeat -Encoding ascii
+    Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     $why = Test-ProgramAudio
     if ($why -and (Test-ProgramAudioTransportFailure $why)) {
       Write-ProgramAudioLog "re-reading once after: $why"
       Start-Sleep -Seconds 2
       $why = Test-ProgramAudio
     }
-    if ($why) {
+    if ($why -and -not (Test-ProgramAudioStreamOwned)) {
+      # Not our stream (a republish gap, a refused restart, after our stop): nothing of
+      # ours is on a platform, and a session that is not ours is never stopped. The
+      # next start re-checks the verdict itself.
+      Write-ProgramAudioLog "not our stream, nothing to stop: $why"
+    } elseif ($why) {
       # Marker first: whatever happens to the stop, the job fails on it.
-      "$(Get-ProgramAudioStamp) BREACH: $why" | Out-File -FilePath $p.Breach -Encoding ascii
-      Write-ProgramAudioLog "BREACH: $why"
-      $stopped = Invoke-ProgramAudioStop
-      "$(Get-ProgramAudioStamp) $stopped" | Out-File -FilePath $p.Breach -Encoding ascii -Append
-      Write-ProgramAudioLog $stopped
+      Add-ProgramAudioBreachLine "BREACH: $why"
+      Invoke-ProgramAudioBreachStop
       return
+    } else {
+      Write-ProgramAudioLog "ok"
     }
-    Write-ProgramAudioLog "ok"
     Start-Sleep -Seconds $poll
   }
 }
@@ -193,10 +286,12 @@ function Invoke-ProgramAudioWatchdogLoop {
 # The live watchdog process recorded in the pid file, or $null (gone / pid reused).
 function Get-ProgramAudioWatchdogProcess {
   $p = Get-ProgramAudioPaths
-  if (-not (Test-Path -LiteralPath $p.Pid)) { return $null }
-  $rec = ((Get-Content -LiteralPath $p.Pid -Raw).Trim()) -split " ", 2
+  $text = Read-ProgramAudioFile $p.Pid
+  if (-not $text) { return $null }
+  $rec = $text -split " ", 2
+  # "" -as [int] is 0, and pid 0 exists on Windows (Idle): require a real pid.
   $wdId = $rec[0] -as [int]
-  if ($null -eq $wdId) { return $null }
+  if ($null -eq $wdId -or $wdId -le 0) { return $null }
   $proc = Get-Process -Id $wdId -ErrorAction SilentlyContinue
   if ($null -eq $proc) { return $null }
   # Same pid AND start time (within 2 s: the clock reads differ slightly) = not a reused pid.
@@ -208,8 +303,9 @@ function Get-ProgramAudioWatchdogProcess {
 
 function Get-ProgramAudioHeartbeatAge {
   $p = Get-ProgramAudioPaths
-  if (-not (Test-Path -LiteralPath $p.Heartbeat)) { return $null }
-  $beat = (Get-Content -LiteralPath $p.Heartbeat -Raw).Trim() -as [double]
+  $text = Read-ProgramAudioFile $p.Heartbeat
+  if (-not $text) { return $null }   # "" -as [double] would be 0, i.e. "beat in 1970"
+  $beat = $text -as [double]
   if ($null -eq $beat) { return $null }
   return [math]::Round((Get-ProgramAudioNow) - $beat, 1)
 }
@@ -230,7 +326,7 @@ function Start-ProgramAudioWatchdog {
   } else {
     $wd = Start-Process -FilePath $hostExe -ArgumentList $argLine -RedirectStandardOutput $p.Out -RedirectStandardError $p.Err -PassThru
   }
-  "$($wd.Id) $($wd.StartTime.ToUniversalTime().Ticks)" | Out-File -FilePath $p.Pid -Encoding ascii
+  Write-ProgramAudioFile $p.Pid "$($wd.Id) $($wd.StartTime.ToUniversalTime().Ticks)"
   for ($i = 0; $i -lt 30; $i++) {
     if (Test-Path -LiteralPath $p.Heartbeat) {
       Write-Host "[program-audio] watchdog running (pid $($wd.Id), polls $(Get-ProgramAudioUrl))"

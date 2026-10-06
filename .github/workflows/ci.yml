@@ -3791,6 +3791,13 @@ jobs:
             Write-Host "  - $($ep.alias) ($($ep.service_type))"
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: Wait for delivery server ready
         shell: powershell
         timeout-minutes: 15
@@ -3903,6 +3910,13 @@ jobs:
           }
           Write-Host "=== Init latency GATE PASSED: $delaySecs s ==="
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: chunks_processed > 0 within 200s of init"
         shell: powershell
         run: |
@@ -3950,6 +3964,13 @@ jobs:
             throw "FAILED: chunks_processed stayed 0 for 200s after init. VPS warmup is stuck (start_chunk_id sanity / OBS not producing / consumer wedged -- see issues #146, #174)."
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: "Assert fast-endpoint audit (#192)"
         shell: powershell
@@ -4052,6 +4073,13 @@ jobs:
             throw "FAILED (#192): the VPS TEST_FILE sink received no new bytes in 60 s -- 'e2e fast' is not delivering"
           }
           Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Verify delivery progression
         shell: powershell
@@ -4987,6 +5015,13 @@ jobs:
             }
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: OBS republish A/V-alignment gate (av_skew_ms)
         if: success()
@@ -6450,6 +6485,13 @@ jobs:
           }
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "Delivery started for event $($ev.id)"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: "GATE: e2e fb endpoint registers (slow-VPS-boot tolerant, dead-VPS fast-fail)"
         # #222 named-step GATE pattern; #227 slow-vs-dead robustness.
