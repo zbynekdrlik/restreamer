@@ -72,6 +72,26 @@ impl RecordingClock {
         }
     }
 
+    /// Bounded wait for the first clock read after `from`.
+    fn first_call_after(&self, from: Instant, what: &str) -> Instant {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(at) = self
+                .calls()
+                .into_iter()
+                .map(|(at, _)| at)
+                .find(|at| *at > from)
+            {
+                return at;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what}: the chunker processed no frame in 15 s"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// The longest stretch inside `[from, to]` with no clock read, counting
     /// the window's edges.
     fn max_gap(&self, from: Instant, to: Instant) -> Duration {
@@ -184,6 +204,12 @@ fn start_inpoint() -> Harness {
 
 /// `start_inpoint` with the chunker reading `clock`.
 fn start_inpoint_with(clock: RecordingClock) -> Harness {
+    start_inpoint_with_state(clock, InpointState::new())
+}
+
+/// `start_inpoint_with` sharing `inpoint_state` with the inpoint, wired the
+/// way the orchestrator wires it.
+fn start_inpoint_with_state(clock: RecordingClock, inpoint_state: InpointState) -> Harness {
     let main_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -204,7 +230,7 @@ fn start_inpoint_with(clock: RecordingClock) -> Harness {
             bind: "127.0.0.1".into(),
             port,
             flv_chunk_sink: Arc::clone(&flv_chunk_sink),
-            inpoint_state: InpointState::new(),
+            inpoint_state,
             ws_tx,
             restart_rx,
             shutdown_rx,
@@ -395,4 +421,78 @@ fn stop_still_reports_a_chunk_that_is_being_written() {
         reported.contains(&0),
         "the chunk still being written at stop must be reported, got chunk indexes {reported:?}"
     );
+}
+
+/// How long the API-side task holds the publisher-stable cell in
+/// `ingest_never_waits_for_an_api_task_holding_the_stable_since_cell`.
+const API_HOLD: Duration = Duration::from_secs(3);
+/// The longest a connecting publisher may wait for its first processed
+/// frame. Far below `API_HOLD`, so a session start that waited for the API
+/// task fails by seconds; far above a loopback RTMP handshake on a loaded
+/// runner.
+const MAX_SESSION_START: Duration = Duration::from_secs(1);
+
+/// The API side of the publisher-stable cell, as a task on the main runtime:
+/// it takes the cell and keeps it for `hold`, across an await. A `/status`,
+/// `POST /delivery/start` or tray handler does exactly that when its runtime
+/// stalls after it was handed the lock. Returns once the task holds the cell.
+fn api_task_holds(
+    main_rt: &tokio::runtime::Runtime,
+    cell: &Arc<tokio::sync::Mutex<Option<Instant>>>,
+    hold: Duration,
+) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let cell = Arc::clone(cell);
+    main_rt.spawn(async move {
+        let _guard = cell.lock().await;
+        let _ = held_tx.send(());
+        tokio::time::sleep(hold).await;
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the API task takes the cell");
+}
+
+/// #368 (ROZHODNUTÉ issuecomment-6013075985 item 2). The publisher-stable
+/// cell (`rtmp_stable_since`) is shared by the ingest thread, which sets it
+/// when OBS connects and clears it when OBS leaves, and the API handlers on
+/// the main runtime (`/status`, `POST /delivery/start`, the tray). The ingest
+/// path must never wait for the API side: while an API task holds the cell,
+/// a publisher that connects must have its frames processed at once.
+#[test]
+fn ingest_never_waits_for_an_api_task_holding_the_stable_since_cell() {
+    let stable_since = Arc::new(tokio::sync::Mutex::new(None));
+    let mut h = start_inpoint_with_state(
+        RecordingClock::default(),
+        InpointState::new().with_stable_since(Arc::clone(&stable_since)),
+    );
+    // A first session proves the server is up and warm, so the measured
+    // session pays only its own handshake. Then let its end settle, so no
+    // read of its last chunk can land in the measured window.
+    spawn_publisher(h.port, Duration::from_millis(500))
+        .join()
+        .expect("publisher thread")
+        .expect("warm-up publish");
+    h.clock.wait_for_calls(3, "the warm-up session");
+    std::thread::sleep(Duration::from_millis(500));
+
+    api_task_holds(&h.main_rt, &stable_since, API_HOLD);
+    let connect = Instant::now();
+    // The session outlasts the hold, so a start that waited for the API task
+    // shows up as a measured wait, not only as a lost session.
+    let publisher = spawn_publisher(h.port, API_HOLD + Duration::from_secs(2));
+    let first_frame = h
+        .clock
+        .first_call_after(connect, "the session during the API hold");
+    let waited = first_frame.duration_since(connect);
+
+    let published = publisher.join().expect("publisher thread");
+    h.stop();
+    assert!(
+        waited < MAX_SESSION_START,
+        "a publisher that connected while an API task held the publisher-stable cell \
+         waited {waited:?} for its first processed frame (limit {MAX_SESSION_START:?}): \
+         the ingest path must never wait for a lock the API side can hold (#368)"
+    );
+    published.expect("the publisher streamed its session");
 }
