@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::ingest_priority::{OsCall, PowerThrottling, THREAD_PRIORITY_HIGHEST};
+use crate::ingest_priority::{OsCall, PowerThrottling, ProcessLevel, THREAD_PRIORITY_HIGHEST};
 
 /// Await `fut` from the test thread on a throwaway runtime.
 fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
@@ -34,6 +34,12 @@ impl PriorityOs for ThreadOs {
         OsCall::Unsupported
     }
     fn set_priority_class(&self, _class: u32) -> OsCall<()> {
+        OsCall::Unsupported
+    }
+    fn process_level(&self, _which: ProcessLevel) -> OsCall<u32> {
+        OsCall::Unsupported
+    }
+    fn set_process_level(&self, _which: ProcessLevel, _value: u32) -> OsCall<()> {
         OsCall::Unsupported
     }
     fn set_power_throttling(&self, _state: PowerThrottling) -> OsCall<()> {

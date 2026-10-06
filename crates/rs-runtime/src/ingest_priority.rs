@@ -30,6 +30,35 @@ pub const THREAD_PRIORITY_HIGHEST: i32 = 2;
 /// `PROCESS_POWER_THROTTLING_STATE` constants.
 pub const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
 pub const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 1;
+/// Memory priorities (`MEMORY_PRIORITY_INFORMATION.MemoryPriority`). A
+/// process the Task Scheduler starts at task priority 7 gets LOW.
+pub const MEMORY_PRIORITY_VERY_LOW: u32 = 1;
+pub const MEMORY_PRIORITY_LOW: u32 = 2;
+pub const MEMORY_PRIORITY_MEDIUM: u32 = 3;
+pub const MEMORY_PRIORITY_BELOW_NORMAL: u32 = 4;
+pub const MEMORY_PRIORITY_NORMAL: u32 = 5;
+/// I/O priority hints (`IO_PRIORITY_HINT`). Task priority 7 gives LOW.
+pub const IO_PRIORITY_VERY_LOW: u32 = 0;
+pub const IO_PRIORITY_LOW: u32 = 1;
+pub const IO_PRIORITY_NORMAL: u32 = 2;
+pub const IO_PRIORITY_HIGH: u32 = 3;
+pub const IO_PRIORITY_CRITICAL: u32 = 4;
+/// `PROCESSINFOCLASS::ProcessIoPriority`, for `NtQueryInformationProcess` /
+/// `NtSetInformationProcess` (windows-sys has no `NtSetInformationProcess`).
+pub const PROCESS_IO_PRIORITY_CLASS: i32 = 33;
+
+/// The two process priorities a level number describes, next to the CPU
+/// class. Task Scheduler priority 7 lowers both (#368
+/// issuecomment-6012351712), and a box upgraded without re-registering the
+/// task keeps them low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessLevel {
+    /// The memory priority: how early this process's pages are trimmed
+    /// under memory pressure.
+    Memory,
+    /// The I/O priority: the chunk writes and the database.
+    Io,
+}
 
 /// The priority classes in scheduling order, lowest first (the raw values
 /// are not ordered).
@@ -123,6 +152,9 @@ fn ok<T>(_: &T) -> String {
 pub trait PriorityOs {
     fn priority_class(&self) -> OsCall<u32>;
     fn set_priority_class(&self, class: u32) -> OsCall<()>;
+    /// The process's memory or I/O priority.
+    fn process_level(&self, which: ProcessLevel) -> OsCall<u32>;
+    fn set_process_level(&self, which: ProcessLevel, value: u32) -> OsCall<()>;
     fn set_power_throttling(&self, state: PowerThrottling) -> OsCall<()>;
     fn set_current_thread_priority(&self, priority: i32) -> OsCall<()>;
     fn current_thread_priority(&self) -> OsCall<i32>;
@@ -143,6 +175,12 @@ impl PriorityOs for SystemPriorityOs {
         OsCall::Unsupported
     }
     fn set_priority_class(&self, _class: u32) -> OsCall<()> {
+        OsCall::Unsupported
+    }
+    fn process_level(&self, _which: ProcessLevel) -> OsCall<u32> {
+        OsCall::Unsupported
+    }
+    fn set_process_level(&self, _which: ProcessLevel, _value: u32) -> OsCall<()> {
         OsCall::Unsupported
     }
     fn set_power_throttling(&self, _state: PowerThrottling) -> OsCall<()> {

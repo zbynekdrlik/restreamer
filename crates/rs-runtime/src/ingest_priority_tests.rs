@@ -4,10 +4,16 @@ use super::*;
 
 use std::sync::Mutex;
 
-/// A fake Windows: answers from its fields and records every call.
+/// A fake Windows: answers from its fields and records every call. The
+/// memory and I/O priorities are state: a successful set changes what the
+/// next read returns, as on Windows.
 struct FakeOs {
     class: OsCall<u32>,
     set_class: OsCall<()>,
+    memory: Mutex<OsCall<u32>>,
+    set_memory: OsCall<()>,
+    io: Mutex<OsCall<u32>>,
+    set_io: OsCall<()>,
     throttling: OsCall<()>,
     set_thread: OsCall<()>,
     thread_now: OsCall<i32>,
@@ -15,14 +21,28 @@ struct FakeOs {
 }
 
 impl FakeOs {
+    /// A process at `class`, with Normal memory and I/O priority.
     fn at(class: u32) -> Self {
         Self {
             class: OsCall::Done(class),
             set_class: OsCall::Done(()),
+            memory: Mutex::new(OsCall::Done(MEMORY_PRIORITY_NORMAL)),
+            set_memory: OsCall::Done(()),
+            io: Mutex::new(OsCall::Done(IO_PRIORITY_NORMAL)),
+            set_io: OsCall::Done(()),
             throttling: OsCall::Done(()),
             set_thread: OsCall::Done(()),
             thread_now: OsCall::Done(THREAD_PRIORITY_HIGHEST),
             calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The cell and the set outcome of one process level, and its name in
+    /// the call log.
+    fn level(&self, which: ProcessLevel) -> (&Mutex<OsCall<u32>>, &OsCall<()>, &'static str) {
+        match which {
+            ProcessLevel::Memory => (&self.memory, &self.set_memory, "memory"),
+            ProcessLevel::Io => (&self.io, &self.set_io, "io"),
         }
     }
 
@@ -43,6 +63,19 @@ impl PriorityOs for FakeOs {
     fn set_priority_class(&self, class: u32) -> OsCall<()> {
         self.record(format!("set_class {class:#x}"));
         self.set_class.clone()
+    }
+    fn process_level(&self, which: ProcessLevel) -> OsCall<u32> {
+        let (cell, _, name) = self.level(which);
+        self.record(format!("get_{name}"));
+        cell.lock().unwrap().clone()
+    }
+    fn set_process_level(&self, which: ProcessLevel, value: u32) -> OsCall<()> {
+        let (cell, outcome, name) = self.level(which);
+        self.record(format!("set_{name} {value}"));
+        if *outcome == OsCall::Done(()) {
+            *cell.lock().unwrap() = OsCall::Done(value);
+        }
+        outcome.clone()
     }
     fn set_power_throttling(&self, state: PowerThrottling) -> OsCall<()> {
         self.record(format!(
@@ -92,6 +125,48 @@ fn constants_are_the_windows_values() {
     assert_eq!(HIGH_PRIORITY_CLASS, 128);
     assert_eq!(REALTIME_PRIORITY_CLASS, 256);
     assert_eq!(THREAD_PRIORITY_HIGHEST, 2);
+}
+
+/// The memory and I/O priority values (`MEMORY_PRIORITY_*`,
+/// `IO_PRIORITY_HINT`, `ProcessIoPriority`), lowest first.
+#[test]
+fn level_constants_are_the_windows_values() {
+    assert_eq!(
+        [
+            MEMORY_PRIORITY_VERY_LOW,
+            MEMORY_PRIORITY_LOW,
+            MEMORY_PRIORITY_MEDIUM,
+            MEMORY_PRIORITY_BELOW_NORMAL,
+            MEMORY_PRIORITY_NORMAL,
+        ],
+        [1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        [
+            IO_PRIORITY_VERY_LOW,
+            IO_PRIORITY_LOW,
+            IO_PRIORITY_NORMAL,
+            IO_PRIORITY_HIGH,
+            IO_PRIORITY_CRITICAL,
+        ],
+        [0, 1, 2, 3, 4]
+    );
+    assert_eq!(PROCESS_IO_PRIORITY_CLASS, 33);
+}
+
+/// The memory priorities are the windows-sys ones.
+#[cfg(windows)]
+#[test]
+fn memory_constants_match_windows_sys() {
+    use windows_sys::Win32::System::Threading as w;
+    assert_eq!(MEMORY_PRIORITY_VERY_LOW, w::MEMORY_PRIORITY_VERY_LOW);
+    assert_eq!(MEMORY_PRIORITY_LOW, w::MEMORY_PRIORITY_LOW);
+    assert_eq!(MEMORY_PRIORITY_MEDIUM, w::MEMORY_PRIORITY_MEDIUM);
+    assert_eq!(
+        MEMORY_PRIORITY_BELOW_NORMAL,
+        w::MEMORY_PRIORITY_BELOW_NORMAL
+    );
+    assert_eq!(MEMORY_PRIORITY_NORMAL, w::MEMORY_PRIORITY_NORMAL);
 }
 
 /// Below Normal is raised to Normal; Normal and above are never touched, so
@@ -284,6 +359,10 @@ fn system_os_off_windows_supports_nothing() {
     assert_eq!(os.set_power_throttling(ecoqos_off()), OsCall::Unsupported);
     assert_eq!(os.set_current_thread_priority(2), OsCall::Unsupported);
     assert_eq!(os.current_thread_priority(), OsCall::Unsupported);
+    for level in [ProcessLevel::Memory, ProcessLevel::Io] {
+        assert_eq!(os.process_level(level), OsCall::Unsupported);
+        assert_eq!(os.set_process_level(level, 5), OsCall::Unsupported);
+    }
 }
 
 /// The real OS on Windows (the windows-latest Test job): the calls work, a
@@ -304,4 +383,31 @@ fn system_os_on_windows_raises_a_thread_and_reads_the_class() {
         SystemPriorityOs.set_power_throttling(ecoqos_off()),
         OsCall::Done(())
     );
+}
+
+/// The real OS on Windows (the windows-latest Test job): the memory and I/O
+/// priorities read back, and setting them to Normal (which a process may
+/// always do for itself) sticks.
+#[cfg(windows)]
+#[test]
+fn system_os_on_windows_reads_and_sets_memory_and_io_priority() {
+    for (level, normal) in [
+        (ProcessLevel::Memory, MEMORY_PRIORITY_NORMAL),
+        (ProcessLevel::Io, IO_PRIORITY_NORMAL),
+    ] {
+        match SystemPriorityOs.process_level(level) {
+            OsCall::Done(_) => {}
+            other => panic!("{level:?}: {other:?}"),
+        }
+        assert_eq!(
+            SystemPriorityOs.set_process_level(level, normal),
+            OsCall::Done(()),
+            "{level:?}"
+        );
+        assert_eq!(
+            SystemPriorityOs.process_level(level),
+            OsCall::Done(normal),
+            "{level:?}"
+        );
+    }
 }
