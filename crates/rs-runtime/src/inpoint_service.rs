@@ -105,7 +105,11 @@ impl InpointService {
         // written would never be reported, so never reach the DB/uploader.
         if let Some(sink) = self.sink.take() {
             let pending = sink.wait_for_writes(INGEST_SHUTDOWN_TIMEOUT).await;
-            log::info!("inpoint stop: chunk writes still running after the drain: {pending}");
+            log::log!(
+                drain_log_level(pending),
+                "inpoint stop: chunk writes still running after the drain: {pending} \
+                 (cancelled with the ingest runtime: no DB row, no upload)"
+            );
         }
         if let Some(mut ingest) = self.ingest.take() {
             // Joining the thread blocks: never on an async worker.
@@ -115,6 +119,16 @@ impl InpointService {
             }
         }
         supervised
+    }
+}
+
+/// A chunk write still running after the drain is about to be cancelled,
+/// and its chunk lost to the uploader: that is a warning, none is info.
+fn drain_log_level(pending: u32) -> log::Level {
+    if pending == 0 {
+        log::Level::Info
+    } else {
+        log::Level::Warn
     }
 }
 

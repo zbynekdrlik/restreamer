@@ -43,8 +43,10 @@ async fn gives_up_after_the_limit() {
 }
 
 /// A wall clock frozen at one instant, so chunk file names are known.
+#[cfg(unix)]
 struct FixedClock;
 
+#[cfg(unix)]
 impl WallClock for FixedClock {
     fn now_ms(&self) -> i64 {
         1_000

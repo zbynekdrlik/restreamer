@@ -170,7 +170,9 @@ struct Harness {
     restart_tx: mpsc::Sender<()>,
     shutdown_tx: broadcast::Sender<()>,
     port: u16,
+    #[cfg_attr(not(unix), allow(dead_code))]
     sink: Arc<FlvChunkSink>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     chunk_dir: tempfile::TempDir,
 }
 
@@ -365,6 +367,14 @@ fn stop_still_reports_a_chunk_that_is_being_written() {
         .expect("publisher thread")
         .expect("publish");
     h.clock.wait_for_calls(6, "chunks were cut");
+    // Opening the FIFO blocks until a writer opens it: fail here, rather
+    // than hang below, if chunk 0 is not being written to it.
+    assert_eq!(
+        h.main_rt
+            .block_on(h.sink.wait_for_writes(Duration::from_millis(100))),
+        1,
+        "chunk 0's write must be blocked on the FIFO"
+    );
 
     let reader = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(500));

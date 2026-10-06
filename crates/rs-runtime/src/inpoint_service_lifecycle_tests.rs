@@ -41,6 +41,12 @@ fn stop(main_rt: &tokio::runtime::Runtime, service: &mut InpointService) {
         .expect("the supervision loop must not panic");
 }
 
+#[test]
+fn a_chunk_write_lost_at_stop_is_a_warning() {
+    assert_eq!(drain_log_level(0), log::Level::Info);
+    assert_eq!(drain_log_level(1), log::Level::Warn);
+}
+
 /// `stop` shuts the ingest runtime down AND waits for its thread: a
 /// blocking task still running on it is finished by the time `stop`
 /// returns, and the runtime takes no more work.

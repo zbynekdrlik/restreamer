@@ -32,7 +32,8 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   the `rtmp_stable_since` tokio `Mutex` that API handlers also lock. A starved
   main-runtime waiter can hold up the receiver at a session start or end.
   Frames are safe, because xiu's channels are unbounded. The type is shared
-  with rs-api and src-tauri (#234).
+  with rs-api's `AppState` and the Tauri tray state (since #234), so changing
+  it is a follow-up of its own.
 - `RtmpServer::serve`'s own `flush()` runs on the ingest runtime when the
   server stops. The loop's `flush()` afterwards (main runtime) finds the
   buffer empty.
@@ -46,8 +47,10 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
      joining a thread must never block an async worker.
 - Dropping an `IngestRuntime` also stops it (its stop sender drops).
 - `IngestRuntime::shutdown` waits at most 15 s for the thread and returns
-  whether it joined. A thread wedged by a blocking task must not hang the
-  app's exit.
+  whether it joined. A wedged thread does not hang THAT join. But `stop()`
+  first awaits the supervision loop, which awaits the server task without a
+  limit, so a wedge while the server runs still holds `stop()`. The tray's
+  quit calls `exit(0)` after 500 ms anyway.
 - If the ingest runtime cannot start, `InpointService::start` runs the
   server on the app runtime and logs an error. The service stays up
   (#106: degraded beats dead).
@@ -61,6 +64,10 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   below Normal (a task registered before #368, e.g. a box upgraded by the
   in-app updater) and switches EcoQoS throttling off. It NEVER raises above
   Normal: stream OBS runs BelowNormal (camera-box's domain).
+- It restores the CPU class ONLY. Task priority 7 also sets memory priority
+  2 and I/O priority Low (measured on stream.lan, #368
+  issuecomment-6012351712). Those stay low until the task is re-registered
+  with `-Priority 4` (install.ps1 or the CI deploy).
 - Only the `restreamer-ingest` thread gets `THREAD_PRIORITY_HIGHEST`. It is
   raised ON that thread (`SetThreadPriority(GetCurrentThread())`), before
   its runtime is built.

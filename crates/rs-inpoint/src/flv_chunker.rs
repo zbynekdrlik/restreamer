@@ -574,7 +574,9 @@ impl FlvChunkSink {
         let pending_counter = Arc::clone(&self.pending_writes);
         tokio::spawn(async move {
             Self::do_write_and_notify(pending, chunk_tx).await;
-            pending_counter.fetch_sub(1, Ordering::Relaxed);
+            // Release: a `wait_for_writes` that reads 0 (Acquire) also
+            // sees this write's chunk report, sent just before.
+            pending_counter.fetch_sub(1, Ordering::Release);
         });
         true
     }
@@ -641,12 +643,12 @@ impl FlvChunkSink {
     /// chunk would never reach the DB, so it would never be uploaded).
     pub async fn wait_for_writes(&self, limit: Duration) -> u32 {
         let _ = tokio::time::timeout(limit, async {
-            while self.pending_writes.load(Ordering::Relaxed) > 0 {
+            while self.pending_writes.load(Ordering::Acquire) > 0 {
                 tokio::time::sleep(WRITE_DRAIN_POLL).await;
             }
         })
         .await;
-        self.pending_writes.load(Ordering::Relaxed)
+        self.pending_writes.load(Ordering::Acquire)
     }
 }
 
