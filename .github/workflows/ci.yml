@@ -1040,9 +1040,11 @@ jobs:
           # 2026-08-30: restreamer CI may only Start/Stop OBS streaming -- no
           # kill/relaunch/scheduled task, no scene/profile/bitrate/stream-service
           # change or restore, no recording control (StopRecord included, #374).
-          # The guard scans ci.yml steps + scripts/ and also requires the
-          # read-only readiness check right before every StartStream and a
-          # started-by-CI condition on every always() StopStream. Its patterns
+          # The guard scans every workflow's self-hosted steps + scripts/. It
+          # also requires the first start in a job to be scripts/ci/obs-stream.ps1
+          # -Action Start (rig lease + readiness + checked StartStream in one
+          # session) and every StopStream to come after it, a teardown one only
+          # under the started-by-CI condition. Its patterns
           # live only in the guard file (skipped by path), so this step cannot
           # self-match (#325). --self-test proves it red on regressed copies.
           python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
@@ -1060,7 +1062,7 @@ jobs:
           check_job() {
             block="$2"
             lease_ln=$(echo "$block" | grep -nE -- '-File scripts/ci/rig-lease-wait\.ps1' | head -1 | cut -d: -f1)
-            start_ln=$(echo "$block" | grep -nE 'requestType = "StartStream"|/api/v1/obs/start-stream' | head -1 | cut -d: -f1)
+            start_ln=$(echo "$block" | grep -nE 'obs-stream\.ps1 -Action Start|requestType = "StartStream"|/api/v1/obs/start-stream' | head -1 | cut -d: -f1)
             if [ -z "$lease_ln" ]; then
               echo "ERROR: $1 has no rig-lease-wait.ps1 step (#349)."
               exit 1
@@ -2072,6 +2074,8 @@ jobs:
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       - name: Verify Restreamer is running
         shell: powershell
         run: |
@@ -2094,63 +2098,18 @@ jobs:
             Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
           }
 
+      # OBS streaming into the inpoint would keep the global rtmp_connected flag
+      # true, so the ffmpeg disconnect check could never see it false. #374: stream
+      # OBS is camera-box's; CI never stops a stream it did not start. Read-only:
+      # streaming -> FAIL with the reason; OBS unreachable -> warning (streams nothing).
       - name: "Ensure stream OBS is not streaming (read-only, #374)"
         shell: powershell
-        run: |
-          # OBS streaming into the inpoint would keep the global rtmp_connected
-          # flag true, so the ffmpeg disconnect check could never see it false.
-          # #374: stream OBS is camera-box's; CI never stops a stream it did not
-          # start. Read GetStreamStatus only: streaming -> FAIL with the reason;
-          # OBS unreachable -> proceed (this ffmpeg test does not need OBS).
-          $streaming = $false
-          try {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $uri = [Uri]"ws://127.0.0.1:4455"
-            $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter(5000)
-            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-            function Send-OBSMsg($ws, $msg) {
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
-              $seg = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-              $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(5000)
-              $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $c.Token).GetAwaiter().GetResult()
-            }
-            function Recv-OBSMsg($ws) {
-              $buf = New-Object byte[] 65536; $r = ""
-              do {
-                $seg = [ArraySegment[byte]]::new($buf, 0, $buf.Length)
-                $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(5000)
-                $recv = $ws.ReceiveAsync($seg, $c.Token).GetAwaiter().GetResult()
-                $r += [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count)
-              } while (-not $recv.EndOfMessage)
-              return $r | ConvertFrom-Json
-            }
-
-            $hello = Recv-OBSMsg $ws
-            $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } } | ConvertTo-Json -Depth 5
-            Send-OBSMsg $ws $identify
-            $identified = Recv-OBSMsg $ws
-
-            $req = @{ op = 6; d = @{ requestType = "GetStreamStatus"; requestId = "check-stream" } } | ConvertTo-Json -Depth 5
-            Send-OBSMsg $ws $req
-            $resp = $null
-            for ($i = 0; $i -lt 20; $i++) {
-              $msg = Recv-OBSMsg $ws
-              if ($msg.op -eq 7 -and $msg.d.requestId -eq "check-stream") { $resp = $msg; break }
-            }
-            if ($null -eq $resp) { throw "no GetStreamStatus response" }
-            $streaming = [bool]$resp.d.responseData.outputActive
-
-            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
-          } catch {
-            Write-Host "OBS WebSocket check failed (OBS may not be running): $_"
-            Write-Host "Proceeding - the ffmpeg test does not require OBS"
-          }
-          if ($streaming) {
-            throw "stream OBS is already streaming -- camera-box owns it, not touching it (the ffmpeg disconnect check needs the inpoint free)"
-          }
-          Write-Host "Stream OBS is not streaming - good"
+        timeout-minutes: 2
+        env:
+          OBS_WS_HOST: "127.0.0.1"
+          OBS_WS_PORT: "4455"
+          OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action AssertNotStreaming
 
       - name: Verify API is responding
         shell: powershell
@@ -3472,162 +3431,15 @@ jobs:
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
 
+      # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
+      # rig lease free + readiness (scene Development, inpoint service, not streaming,
+      # not recording), then StartStream with its response checked. Writes
+      # OBS_STREAMING_STARTED_BY_CI=true before the start (=false when OBS refuses),
+      # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
         shell: powershell
-        run: |
-          # #374: mark BEFORE the start, so the always() teardown stops only a
-          # stream this job started -- never camera-box's.
-          "OBS_STREAMING_STARTED_BY_CI=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # Send StartStream via OBS WebSocket, then disconnect.
-          # We verify stream status separately to avoid event message noise.
-          $ws = New-Object System.Net.WebSockets.ClientWebSocket
-          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-          $cts = New-Object System.Threading.CancellationTokenSource
-          $cts.CancelAfter(10000)
-          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-          function Send-OBSMessage($ws, $message) {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-            $cts2 = New-Object System.Threading.CancellationTokenSource
-            $cts2.CancelAfter(10000)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-          }
-
-          function Receive-OBSMessage($ws) {
-            $buffer = New-Object byte[] 65536
-            $result = ""
-            do {
-              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-              $cts3 = New-Object System.Threading.CancellationTokenSource
-              $cts3.CancelAfter(10000)
-              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-            } while (-not $recv.EndOfMessage)
-            return $result | ConvertFrom-Json
-          }
-
-          # Receive Hello + Identify
-          $hello = Receive-OBSMessage $ws
-          $authRequired = $hello.d.authentication
-          if ($authRequired) {
-            $sha256 = [System.Security.Cryptography.SHA256]::Create()
-            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-          } else {
-            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-          }
-          Send-OBSMessage $ws $identify
-          $identified = Receive-OBSMessage $ws
-
-          # Send StartStream request
-          $startStream = @{
-            op = 6
-            d = @{
-              requestType = "StartStream"
-              requestId = "start-stream-1"
-            }
-          } | ConvertTo-Json -Depth 5
-
-          Send-OBSMessage $ws $startStream
-          # Read response - skip any event messages (op=5) that arrive before the response (op=7)
-          for ($r = 0; $r -lt 5; $r++) {
-            $startResp = Receive-OBSMessage $ws
-            Write-Host "Received message: op=$($startResp.op)"
-            if ($startResp.op -eq 7) { break }
-          }
-
-          $ws.CloseOutputAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
-          $ws.Dispose()
-          Write-Host "StartStream sent, waiting for OBS to connect to RTMP..."
-
-      - name: Verify OBS is streaming
-        shell: powershell
-        run: |
-          # Reconnect to check stream status (avoids event noise from StartStream)
-          Start-Sleep -Seconds 5
-
-          $maxRetries = 6
-          for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-            $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter(10000)
-            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-            function Send-OBSMessage($ws, $message) {
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-              $cts2 = New-Object System.Threading.CancellationTokenSource
-              $cts2.CancelAfter(10000)
-              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-            }
-
-            function Receive-OBSMessage($ws) {
-              $buffer = New-Object byte[] 65536
-              $result = ""
-              do {
-                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-                $cts3 = New-Object System.Threading.CancellationTokenSource
-                $cts3.CancelAfter(10000)
-                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-              } while (-not $recv.EndOfMessage)
-              return $result | ConvertFrom-Json
-            }
-
-            $hello = Receive-OBSMessage $ws
-            $authRequired = $hello.d.authentication
-            if ($authRequired) {
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-            } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-            }
-            Send-OBSMessage $ws $identify
-            $identified = Receive-OBSMessage $ws
-
-            $getStatus = @{
-              op = 6
-              d = @{
-                requestType = "GetStreamStatus"
-                requestId = "get-status-$attempt"
-              }
-            } | ConvertTo-Json -Depth 5
-
-            Send-OBSMessage $ws $getStatus
-
-            # Read responses, skip events (op=5)
-            $statusResp = $null
-            for ($r = 0; $r -lt 5; $r++) {
-              $msg = Receive-OBSMessage $ws
-              if ($msg.op -eq 7) {
-                $statusResp = $msg
-                break
-              }
-              Write-Host "Skipping event: op=$($msg.op)"
-            }
-
-            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
-
-            if ($statusResp -and $statusResp.d.responseData.outputActive) {
-              Write-Host "OBS is streaming (attempt ${attempt}/${maxRetries})"
-              Write-Host "OBS is now streaming to Restreamer RTMP"
-              return
-            }
-
-            Write-Host "OBS not streaming yet (attempt ${attempt}/${maxRetries}), waiting..."
-            Start-Sleep -Seconds 5
-          }
-
-          throw "FAILED: OBS stream did not start after $maxRetries attempts"
+        timeout-minutes: 3
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
       - name: Wait for chunks and verify upload
         shell: powershell
@@ -5977,66 +5789,8 @@ jobs:
       - name: Stop OBS stream
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
         shell: powershell
-        run: |
-          try {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-            $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter(10000)
-            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-            function Send-OBSMessage($ws, $message) {
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-              $cts2 = New-Object System.Threading.CancellationTokenSource
-              $cts2.CancelAfter(10000)
-              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-            }
-
-            function Receive-OBSMessage($ws) {
-              $buffer = New-Object byte[] 65536
-              $result = ""
-              do {
-                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-                $cts3 = New-Object System.Threading.CancellationTokenSource
-                $cts3.CancelAfter(10000)
-                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-              } while (-not $recv.EndOfMessage)
-              return $result | ConvertFrom-Json
-            }
-
-            $hello = Receive-OBSMessage $ws
-            $authRequired = $hello.d.authentication
-            if ($authRequired) {
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-            } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-            }
-            Send-OBSMessage $ws $identify
-            $identified = Receive-OBSMessage $ws
-
-            $stopStream = @{
-              op = 6
-              d = @{
-                requestType = "StopStream"
-                requestId = "stop-stream-1"
-              }
-            } | ConvertTo-Json -Depth 5
-
-            Send-OBSMessage $ws $stopStream
-            $stopResp = Receive-OBSMessage $ws
-            Write-Host "OBS stream stopped"
-
-            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
-          } catch {
-            Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
-          }
+        timeout-minutes: 2
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
 
       - name: Verify RTMP disconnected after OBS stream stop
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
@@ -6589,15 +6343,21 @@ jobs:
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
 
-      - name: Start OBS stream + delivery
+      # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
+      # rig lease free + readiness (scene Development, inpoint service, not streaming,
+      # not recording), then StartStream with its response checked. Writes
+      # OBS_STREAMING_STARTED_BY_CI=true before the start (=false when OBS refuses),
+      # which gates the always() teardown below: it never stops camera-box's stream.
+      - name: Start OBS stream
+        shell: powershell
+        timeout-minutes: 3
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
+
+      - name: Start delivery
         shell: powershell
         run: |
-          # #374: mark BEFORE the start, so the always() teardown stops only a
-          # stream this job started -- never camera-box's.
-          "OBS_STREAMING_STARTED_BY_CI=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-stream" -Method POST -TimeoutSec 30
           # delivery_start enforces 15s RTMP-stable gate (RTMP_STABLE_REQUIRED_SECS).
           # Wait 20s so the publisher is unambiguously stable before spinning a VPS.
           Start-Sleep -Seconds 20
@@ -6620,7 +6380,7 @@ jobs:
             }
           }
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
-          Write-Host "OBS streaming + delivery started for event $($ev.id)"
+          Write-Host "Delivery started for event $($ev.id)"
 
       - name: "GATE: e2e fb endpoint registers (slow-VPS-boot tolerant, dead-VPS fast-fail)"
         # #222 named-step GATE pattern; #227 slow-vs-dead robustness.
@@ -7096,57 +6856,8 @@ jobs:
       - name: "Stop OBS stream (only the one this job started, #374)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
         shell: powershell
-        run: |
-          # #221 left OBS streaming after the job; stop the stream we started.
-          # #374: nothing else -- the stream service, scene and recording are
-          # camera-box's, never changed or "restored" here.
-          try {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-            $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter(10000)
-            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-            function Send-OBSMessage($ws, $message) {
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-              $cts2 = New-Object System.Threading.CancellationTokenSource
-              $cts2.CancelAfter(10000)
-              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-            }
-            function Receive-OBSMessage($ws) {
-              $buffer = New-Object byte[] 65536
-              $result = ""
-              do {
-                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-                $cts3 = New-Object System.Threading.CancellationTokenSource
-                $cts3.CancelAfter(10000)
-                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-              } while (-not $recv.EndOfMessage)
-              return $result | ConvertFrom-Json
-            }
-            $hello = Receive-OBSMessage $ws
-            $authRequired = $hello.d.authentication
-            if ($authRequired) {
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-            } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-            }
-            Send-OBSMessage $ws $identify
-            $null = Receive-OBSMessage $ws
-            $stopStream = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "fb-stop-1" } } | ConvertTo-Json -Depth 5
-            Send-OBSMessage $ws $stopStream
-            $null = Receive-OBSMessage $ws
-            Write-Host "OBS stream stopped"
-            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
-          } catch {
-            Write-Host "OBS stop failed (non-fatal on teardown): $_"
-          }
+        timeout-minutes: 2
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
 
   e2e-gate:
     name: E2E Gate
