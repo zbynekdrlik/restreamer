@@ -1,0 +1,96 @@
+# cargo-mutants configuration (read automatically from .cargo/mutants.toml).
+#
+# The PR gate in .github/workflows/ci.yml (job `mutation-testing`) and every
+# local dev2 run use this file, so a local `cargo mutants --in-diff pr.diff`
+# tests exactly what CI tests. Rules: .claude/rules/ci-mutation-gate.md.
+
+# Speed levers (#367, 2026-10-06). The gate ran > 3 h on one runner (run
+# 37371702109) before it was sharded and given these:
+# - `[profile.mutants]` in the root Cargo.toml (inherits "test", no debuginfo):
+#   smaller objects, faster links, same test semantics.
+profile = "mutants"
+# - nextest runs each test binary's tests in parallel processes and does not
+#   compile or run doctests (a doctest is a separate binary per mutant).
+test_tool = "nextest"
+# - Only the tests of the MUTATED package run for each mutant. Never set
+#   `test_workspace = true`: every mutant would re-run all 12 crates' suites.
+test_workspace = false
+
+# Functions excluded from mutation (moved verbatim from the ci.yml step,
+# #367). They are network / S3 / Hetzner / ffmpeg / process / RTMP-socket I/O,
+# long-running service loops, or exercised only by the stream.lan E2E jobs;
+# each was added with its reason in the commit that introduced it (#99 and
+# later; `git log -S"<pattern>" -- .github/workflows/ci.yml`).
+#
+# rs-rtmp-push MUST stay in the mutation-testing matrix per spec 7.6 of
+# docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md. Do NOT add
+# an exclude_re for rs_rtmp_push:: or rs-rtmp-push, or an exclude_globs entry
+# for crates/rs-rtmp-push (a test-integrity step enforces this).
+exclude_re = [
+    "impl ChunkFetcher for S3Fetcher",
+    "S3Fetcher::fetch_chunk_with_meta",
+    "S3Fetcher::head_chunk_duration",
+    "producer_task",
+    "consumer_task",
+    "endpoint_loop",
+    "S3Client::upload_chunk",
+    "S3Client::delete_event_chunks",
+    "S3Client::measure_prefix",
+    "S3Client::list_event_prefixes",
+    "delete_event_by_id",
+    "clear_event_s3_chunks",
+    "get_s3_usage",
+    "get_template_endpoints",
+    "ServiceCore::run_with_signal",
+    "DeliveryOrchestrator::stop_delivery",
+    "DeliveryOrchestrator::get_delivery_status",
+    "delivery_logs",
+    "upload_rescue_video",
+    "tail_lines",
+    "S3Client::upload_public_object",
+    "FfmpegProcess::stderr_tail",
+    "last_stderr_line",
+    "DeliveryOrchestrator::monitor_delivery_health",
+    "MAX_INPUT_BYTES",
+    "MAX_FLV_BYTES",
+    "write_countdown_file",
+    "cleanup_countdown_file",
+    "format_countdown_text",
+    "countdown_file_path",
+    "FlvStreamNormalizer::normalize",
+    "DeliveryOrchestrator::poll_and_init",
+    "DeliveryOrchestrator::poll_delivery_metrics",
+    "delivery_broadcast_loop",
+    "run_worker",
+    "ChunkUploader::run",
+    "handle_rust_push",
+    "handle_ffmpeg_death",
+    "Session::connect",
+    "Session::send_audio_tag",
+    "Session::send_video_tag",
+    "Session::send_tag",
+    "Session::close",
+    "wait_for_publish_start",
+    "wait_for_create_stream_result",
+    "wait_for_result",
+    "negotiate",
+    "read_loop",
+    "RtmpPusher::push_flv_bytes",
+    "RtmpPusher::close",
+    "<impl Pushable for RtmpPusher>",
+]
+
+# Whole files excluded from mutation (moved verbatim from the ci.yml `-e` list,
+# plus rtmp_bind_windows.rs, #367). The `*_windows.rs` files are
+# `#[cfg(windows)]` glue: cargo-mutants does not evaluate cfg, so their mutants
+# would be generated on Linux, never compiled, and reported MISSED. They hold
+# only raw OS calls; every decision is a tested cross-platform helper.
+exclude_globs = [
+    "crates/rs-api/src/template_handlers.rs",
+    "crates/rs-api/src/s3_handlers.rs",
+    "crates/rs-delivery/src/flv_normalizer.rs",
+    "crates/rs-endpoint/src/bin/bench_s3_upload.rs",
+    "crates/rs-endpoint/src/metrics.rs",
+    "crates/rs-runtime/src/stall_resources_windows.rs",
+    "crates/rs-runtime/src/rtmp_bind_windows.rs",
+]

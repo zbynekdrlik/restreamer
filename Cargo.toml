@@ -121,3 +121,11 @@ opt-level = 3
 
 [profile.test.package.num-bigint-dig]
 opt-level = 3
+
+# cargo-mutants builds every mutant with this profile (.cargo/mutants.toml
+# `profile = "mutants"`, #367). It is the test profile without debuginfo:
+# the same code and tests, but smaller objects and much faster links, which is
+# most of each mutant's rebuild. Never used for release or for `cargo test`.
+[profile.mutants]
+inherits = "test"
+debug = "none"

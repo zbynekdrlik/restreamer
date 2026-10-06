@@ -232,23 +232,103 @@ jobs:
       - name: Run coverage
         run: cargo tarpaulin --workspace --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300
 
-  mutation-testing:
-    name: Mutation Testing
+  # Mutation testing: do the tests VERIFY the code this PR changes?
+  # (.claude/rules/ci-mutation-gate.md, .cargo/mutants.toml). Two jobs, #367:
+  # `mutation-plan` counts the diff's mutants and sizes the shard matrix;
+  # `mutation-testing` runs one consecutive slice of them per github-hosted
+  # runner. Before #367 this was ONE job with no timeout: PR #365's first real
+  # run (37371702109) tested 898 mutants serially in 2 h 27 min, retried, and
+  # was cancelled after 3 h. A shard that cannot finish inside its
+  # timeout-minutes is a SETUP bug: lower MUTANTS_PER_SHARD or add a speed
+  # lever. Never raise a timeout, never wait it out.
+  mutation-plan:
+    name: Mutation plan
     if: github.event_name == 'pull_request'
     needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total: ${{ steps.plan.outputs.total }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      # Prebuilt and pinned (same version as the shards). `cargo install
+      # cargo-mutants` floated to a release that rejected the step's flags,
+      # which made the old gate fake-green (#367).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Count the diff's mutants and size the shard matrix
+        id: plan
+        run: |
+          git diff origin/main...HEAD > pr.diff
+          cargo mutants --list --in-diff pr.diff > mutants.list
+          COUNT=$(wc -l < mutants.list)
+          echo "Mutants in this PR's diff: $COUNT"
+          cut -d: -f1 mutants.list | cut -d/ -f1-2 | sort | uniq -c
+          # MUTANTS_PER_SHARD bounds each shard's runtime: a shard costs its
+          # own cold build (~2.5 min for rs-api or rs-delivery) plus this many
+          # mutants, and must stay under ~15 min. Measured on dev2 at runner
+          # size (4 CPUs, #367): a MISSED mutant costs a rebuild (~8 s) plus
+          # its package's whole suite (rs-delivery ~28 s, rs-api ~20 s); a
+          # caught one stops at its first failing test. 20 all-MISSED
+          # rs-delivery mutants then still fit the cap.
+          MUTANTS_PER_SHARD=20
+          # 64 shards x MUTANTS_PER_SHARD mutants is the most one PR may carry.
+          # A bigger diff is a dev branch that was not merged for weeks: split
+          # it, never widen the shards.
+          MAX_SHARDS=64
+          TOTAL=$(( (COUNT + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
+          if [ "$TOTAL" -lt 1 ]; then
+            TOTAL=1
+          fi
+          if [ "$TOTAL" -gt "$MAX_SHARDS" ]; then
+            echo "::error::$COUNT mutants need $TOTAL shards; the cap is $MAX_SHARDS. Split this PR."
+            exit 1
+          fi
+          SHARDS=$(python3 -c 'import json, sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$TOTAL")
+          echo "Shards: $TOTAL (at most $MUTANTS_PER_SHARD mutants each): $SHARDS"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+
+  mutation-testing:
+    name: Mutation Testing (shard ${{ matrix.shard }})
+    if: github.event_name == 'pull_request'
+    needs: [mutation-plan]
+    runs-on: ubuntu-latest
+    # HARD CAP per shard (mutation-testing policy, #367). See the header above.
+    timeout-minutes: 20
+    strategy:
+      # Every shard finishes and reports its own MISSED list, so one CI cycle
+      # shows all of them. The Rust CI Gate still requires every shard.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mutation-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      # Registry and git deps only. Each shard builds its own one or two
+      # packages from scratch (about 2.5 min for rs-api), which keeps a shard's
+      # runtime predictable; a shared target cache would come from whichever
+      # shard saved it first and would not match the others' packages.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants
+          # openssl-sys needs libssl-dev; the rs-inpoint, rs-delivery and
+          # rs-api tests spawn ffmpeg. No GTK/webkit: src-tauri is not a
+          # workspace member.
+          sudo apt-get install -y libssl-dev ffmpeg
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: "Mutation testing: zero survivors in changed code"
         run: |
           echo "=== Resources before mutation ==="
@@ -256,121 +336,57 @@ jobs:
           free -h
           echo "================================="
           git diff origin/main...HEAD > pr.diff
-          if [ ! -s pr.diff ]; then
-            echo "No Rust source changes in diff -- skipping"
-            exit 0
-          fi
-          # GH ubuntu-latest runners have intermittently lost communication
-          # at ~11 min into mutation runs. Investigation: the first mutant's
-          # build was taking ~8-10 min from scratch because cargo-mutants
-          # by default creates a separate copy of the source tree per mutant
-          # and cargo's incremental cache doesn't survive a directory move
-          # (paths are baked into rmeta files), so even --copy-target=true
-          # didn't help.
-          #
-          # Fix: --in-place mutates the workspace directly, so individual
-          # mutant builds reuse the Swatinem/rust-cache incrementally
-          # (seconds, not minutes). --in-place implies serial runs, and
-          # cargo-mutants 27 rejects an explicit --jobs next to it. Combined with
-          # --baseline=skip we fit comfortably under the runner window.
-          # Retry up to 3 times for residual transient failures.
-          # Exit codes: 0 = all caught (pass); 2 = missed mutants (fail now,
-          # deterministic, no retry); any other non-zero is retried, then fails.
-          # EXIT is read right after cargo mutants under set +e -- never after an
-          # if/fi block, where $? is always 0 (fake-green gate, see
+          # .cargo/mutants.toml holds the profile, nextest, per-package tests
+          # and every exclude (rs-rtmp-push must stay mutated, see that file).
+          # This step adds only how the shard runs:
+          # --in-place: the runner's checkout belongs to this shard alone, so
+          #   mutating it is safe, and target/ plus cargo's fingerprints stay
+          #   valid between mutants (a copied tree would rebuild cold). It
+          #   implies serial mutants; cargo-mutants 27 rejects --jobs with it.
+          # --shard k/N: the default "slice" sharding gives consecutive
+          #   mutants, so a shard compiles one or two packages, not all.
+          # --baseline=skip: the test job proves the unmutated tree green.
+          # --timeout: a hanging mutant is a TIMEOUT failure after this many
+          #   seconds of tests, ~4x the slowest package suite (rs-delivery).
+          # CARGO_INCREMENTAL=1: rust-toolchain and rust-cache export 0 for
+          #   CI, but each mutant rebuilds one edited crate, and incremental
+          #   compilation made that ~2.5x faster (rs-api 23 s -> 8 s, #367).
+          export CARGO_INCREMENTAL=1
+          # Exit codes: 0 every mutant caught or unviable; 2 MISSED; 3 TIMEOUT;
+          # 4 the tests fail with no mutation; others are tool errors. EVERY
+          # non-zero exit fails the shard at once. There is no retry: these
+          # outcomes are deterministic, and run 37371702109 spent 2.5 h
+          # retrying an exit 3.
+          # EXIT is read right after cargo mutants under set +e, never after an
+          # if/fi block, where $? is always 0 (the old fake-green gate,
           # .claude/rules/ci-mutation-gate.md).
-          ATTEMPT=0
-          MAX_ATTEMPTS=3
-          while true; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "=== Mutation attempt $ATTEMPT/$MAX_ATTEMPTS ==="
-            # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
-            # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
-            # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
-            set +e
-            cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600 --baseline=skip --output mutants-out \
-            --exclude-re 'impl ChunkFetcher for S3Fetcher' \
-            --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
-            --exclude-re 'S3Fetcher::head_chunk_duration' \
-            --exclude-re 'producer_task' \
-            --exclude-re 'consumer_task' \
-            --exclude-re 'endpoint_loop' \
-            --exclude-re 'S3Client::upload_chunk' \
-            --exclude-re 'S3Client::delete_event_chunks' \
-            --exclude-re 'S3Client::measure_prefix' \
-            --exclude-re 'S3Client::list_event_prefixes' \
-            --exclude-re 'delete_event_by_id' \
-            --exclude-re 'clear_event_s3_chunks' \
-            --exclude-re 'get_s3_usage' \
-            --exclude-re 'get_template_endpoints' \
-            --exclude-re 'ServiceCore::run_with_signal' \
-            --exclude-re 'DeliveryOrchestrator::stop_delivery' \
-            --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
-            --exclude-re 'delivery_logs' \
-            --exclude-re 'upload_rescue_video' \
-            --exclude-re 'tail_lines' \
-            --exclude-re 'S3Client::upload_public_object' \
-            --exclude-re 'FfmpegProcess::stderr_tail' \
-            --exclude-re 'last_stderr_line' \
-            --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
-            --exclude-re 'MAX_INPUT_BYTES' \
-            --exclude-re 'MAX_FLV_BYTES' \
-            --exclude-re 'write_countdown_file' \
-            --exclude-re 'cleanup_countdown_file' \
-            --exclude-re 'format_countdown_text' \
-            --exclude-re 'countdown_file_path' \
-            --exclude-re 'FlvStreamNormalizer::normalize' \
-            --exclude-re 'DeliveryOrchestrator::poll_and_init' \
-            --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
-            --exclude-re 'delivery_broadcast_loop' \
-            --exclude-re 'run_worker' \
-            --exclude-re 'ChunkUploader::run' \
-            --exclude-re 'handle_rust_push' \
-            --exclude-re 'handle_ffmpeg_death' \
-            --exclude-re 'Session::connect' \
-            --exclude-re 'Session::send_audio_tag' \
-            --exclude-re 'Session::send_video_tag' \
-            --exclude-re 'Session::send_tag' \
-            --exclude-re 'Session::close' \
-            --exclude-re 'wait_for_publish_start' \
-            --exclude-re 'wait_for_create_stream_result' \
-            --exclude-re 'wait_for_result' \
-            --exclude-re 'negotiate' \
-            --exclude-re 'read_loop' \
-            --exclude-re 'RtmpPusher::push_flv_bytes' \
-            --exclude-re 'RtmpPusher::close' \
-            --exclude-re '<impl Pushable for RtmpPusher>' \
-            -e 'crates/rs-api/src/template_handlers.rs' \
-            -e 'crates/rs-api/src/s3_handlers.rs' \
-            -e 'crates/rs-delivery/src/flv_normalizer.rs' \
-            -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
-            -e 'crates/rs-endpoint/src/metrics.rs' \
-            -e 'crates/rs-runtime/src/stall_resources_windows.rs'
-            EXIT=$?
-            set -e
-            if [ $EXIT -eq 0 ]; then
-              echo "Mutation attempt $ATTEMPT succeeded"
-              break
+          set +e
+          cargo mutants --in-diff pr.diff --in-place --baseline=skip \
+            --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }} \
+            --timeout 120 --build-timeout 600 --output mutants-out
+          EXIT=$?
+          set -e
+          for f in missed timeout; do
+            if [ -s "mutants-out/mutants.out/$f.txt" ]; then
+              echo "=== $f mutants ==="
+              cat "mutants-out/mutants.out/$f.txt"
             fi
-            if [ $EXIT -eq 2 ]; then
-              echo "Mutation testing found MISSED mutants (exit 2) -- see mutants-out/missed.txt"
-              exit 2
-            fi
-            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
-              echo "Mutation testing failed after $MAX_ATTEMPTS attempts (last exit: $EXIT)"
-              exit $EXIT
-            fi
-            echo "Attempt $ATTEMPT failed (exit $EXIT) -- likely runner hiccup, retrying after 30s"
-            sleep 30
-            rm -rf mutants-out
           done
+          case "$EXIT" in
+            0) echo "Shard ${{ matrix.shard }}: every mutant was caught or unviable." ;;
+            2) echo "::error::MISSED mutants: no test fails when this code changes. Kill them with assertions (.claude/rules/mutation-killable-code.md)." ;;
+            3) echo "::error::TIMEOUT mutants: a mutation made the tests hang." ;;
+            4) echo "::error::The tests fail with no mutation applied." ;;
+            *) echo "::error::cargo-mutants failed (exit $EXIT)." ;;
+          esac
+          exit "$EXIT"
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mutants-report
+          name: mutants-report-shard-${{ matrix.shard }}
           path: mutants-out/
 
   security:
@@ -1073,26 +1089,152 @@ jobs:
           fi
           echo "OK: both OBS-streaming E2E jobs wait on the rig lease before StartStream."
 
-      - name: "Verify mutation step reads the real cargo-mutants exit (fake-green guard)"
+      - name: "Verify the mutation gate: real exit, bounded shards, required by the gate (#367)"
         run: |
-          WORKFLOW_FILE=".github/workflows/ci.yml"
-          # The mutation gate was fake-green: EXIT=$? read after an if/fi block is
-          # always 0, and cargo-mutants 27 rejects --in-place with --jobs
-          # (.claude/rules/ci-mutation-gate.md). The sed range is the
-          # mutation-testing job only (before test-integrity), so this self-check
-          # can never self-match its own patterns (#325).
-          MUT_BLOCK=$(sed -n '/^  mutation-testing:/,/^  security:/p' "$WORKFLOW_FILE")
-          NEXT=$(echo "$MUT_BLOCK" | awk '/^ *cargo mutants /{c=1} c && !/\\$/ {getline; print; exit}')
-          if ! echo "$NEXT" | grep -qE '^\s*EXIT=\$\?\s*$'; then
-            echo "ERROR: mutation-testing must read EXIT=\$? on the line right after the cargo mutants command."
-            echo "Found: $NEXT"
-            exit 1
-          fi
-          if echo "$MUT_BLOCK" | grep -vE '^\s*#' | grep -qE -- '--jobs'; then
-            echo "ERROR: cargo-mutants 27 rejects --jobs together with --in-place."
-            exit 1
-          fi
-          echo "OK: mutation step captures the real cargo-mutants exit and passes no --jobs."
+          # The PR mutation gate failed open three ways before #367: EXIT=$?
+          # read after an if/fi block (always 0), an unpinned cargo-mutants that
+          # rejected --jobs with --in-place, and a Rust CI Gate that passed a
+          # failed mutation job with a WARN. Then, once real, it ran > 3 h on
+          # one runner (.claude/rules/ci-mutation-gate.md). This step parses
+          # the workflow and the two configs, so none of that can come back.
+          # It only reads jobs that RUN cargo-mutants (no line of this step
+          # starts with that command), so it never matches itself (#325).
+          python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
+          python3 - <<'PY'
+          import re
+          import sys
+          import tomllib
+
+          import yaml
+
+          errors = []
+          wf = yaml.safe_load(open(".github/workflows/ci.yml", encoding="utf-8"))
+          jobs = wf["jobs"]
+          CMD = re.compile(r"^\s*cargo\s+mutants\b")
+
+          def commands(job):
+              """Each cargo-mutants command line (continuations joined) + the line after it."""
+              out = []
+              for step in job.get("steps", []):
+                  lines = (step.get("run") or "").splitlines()
+                  i = 0
+                  while i < len(lines):
+                      if CMD.match(lines[i]):
+                          j = i
+                          while lines[j].rstrip().endswith("\\") and j + 1 < len(lines):
+                              j += 1
+                          cmd = " ".join(l.strip().rstrip("\\") for l in lines[i : j + 1])
+                          nxt = lines[j + 1] if j + 1 < len(lines) else ""
+                          out.append((step, cmd, nxt, "\n".join(lines[:i])))
+                          i = j + 1
+                      else:
+                          i += 1
+              return out
+
+          mut_jobs = {n: j for n, j in jobs.items() if commands(j)}
+          for name in ("mutation-plan", "mutation-testing"):
+              if name not in mut_jobs:
+                  errors.append(f"job {name} must exist and run cargo-mutants")
+
+          # 1. Every job that runs cargo-mutants is hard-capped at 20 minutes.
+          for name, job in mut_jobs.items():
+              tm = job.get("timeout-minutes")
+              if not isinstance(tm, int) or not 1 <= tm <= 20:
+                  errors.append(f"{name}: timeout-minutes must be an integer <= 20, got {tm!r}")
+
+          # 2. Plan and shards install the SAME pinned cargo-mutants, so they
+          #    compute the same mutant list.
+          pins = set()
+          for name, job in mut_jobs.items():
+              for step in job.get("steps", []):
+                  tool = (step.get("with") or {}).get("tool", "")
+                  pins.update(re.findall(r"cargo-mutants@[0-9]+\.[0-9]+\.[0-9]+", tool))
+                  if "cargo install cargo-mutants" in (step.get("run") or ""):
+                      errors.append(f"{name}: install cargo-mutants pinned via taiki-e/install-action, not cargo install")
+          if len(pins) != 1:
+              errors.append(f"plan and shards must pin ONE cargo-mutants version, found {sorted(pins)}")
+
+          # 3. The plan sizes the matrix from the diff and caps it.
+          plan = mut_jobs.get("mutation-plan", {})
+          outs = plan.get("outputs") or {}
+          if outs.get("shards") != "${{ steps.plan.outputs.shards }}" or outs.get("total") != "${{ steps.plan.outputs.total }}":
+              errors.append("mutation-plan must export shards/total from its `plan` step")
+          plan_run = "\n".join(s.get("run") or "" for s in plan.get("steps", []))
+          per = re.search(r"^\s*MUTANTS_PER_SHARD=([0-9]+)\s*$", plan_run, re.M)
+          cap = re.search(r"^\s*MAX_SHARDS=([0-9]+)\s*$", plan_run, re.M)
+          if not per or not 1 <= int(per.group(1)) <= 100:
+              errors.append("mutation-plan must set MUTANTS_PER_SHARD to an integer in 1..100")
+          if not cap or not 1 <= int(cap.group(1)) <= 256:
+              errors.append("mutation-plan must set MAX_SHARDS <= 256 (the GitHub matrix limit)")
+          if not any("--list" in c and "--in-diff pr.diff" in c for _, c, _, _ in commands(plan)):
+              errors.append("mutation-plan must count the mutants with --list --in-diff pr.diff")
+
+          # 4. The shards: matrix from the plan, every shard reported, real exit.
+          mt = mut_jobs.get("mutation-testing", {})
+          needs = mt.get("needs") or []
+          if "mutation-plan" not in (needs if isinstance(needs, list) else [needs]):
+              errors.append("mutation-testing must need mutation-plan")
+          strat = mt.get("strategy") or {}
+          if strat.get("fail-fast") is not False:
+              errors.append("mutation-testing must set strategy.fail-fast: false")
+          if (strat.get("matrix") or {}).get("shard") != "${{ fromJSON(needs.mutation-plan.outputs.shards) }}":
+              errors.append("mutation-testing matrix.shard must come from mutation-plan's shards output")
+          runs = [c for c in commands(mt) if "--list" not in c[1]]
+          if len(runs) != 1:
+              errors.append(f"mutation-testing must run cargo-mutants exactly once, found {len(runs)}")
+          for step, cmd, nxt, before in runs:
+              if "--shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}" not in cmd:
+                  errors.append("the shard must run --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}")
+              for flag in ("--in-diff pr.diff", "--baseline=skip", "--in-place"):
+                  if flag not in cmd:
+                      errors.append(f"the shard's cargo-mutants command must pass {flag}")
+              for bad in ("--jobs", " -j", "--no-config", "--config", "--exclude", " -e ", "--file", " -f ", "--examine"):
+                  if bad in cmd:
+                      errors.append(f"the shard must not pass {bad.strip()}: scope and levers live in .cargo/mutants.toml")
+              t = re.search(r"--timeout ([0-9]+)", cmd)
+              if not t or int(t.group(1)) > 300:
+                  errors.append("the shard must pass --timeout <= 300")
+              if not re.fullmatch(r"\s*EXIT=\$\?\s*", nxt):
+                  errors.append(f"EXIT=$? must be the line right after cargo mutants, found {nxt!r}")
+              if not re.search(r"^\s*set \+e\s*$", before, re.M):
+                  errors.append("cargo mutants must run under set +e so EXIT=$? sees its status")
+              if not re.search(r'^\s*exit "?\$EXIT"?\s*$', step.get("run") or "", re.M):
+                  errors.append('the step must end with exit "$EXIT" (every non-zero exit fails the shard)')
+
+          # 5. The Rust CI Gate requires the mutation result on PRs, with no WARN pass.
+          gate_run = "\n".join(s.get("run") or "" for s in jobs["rust-ci-gate"].get("steps", []))
+          if "mutation-testing" not in jobs["rust-ci-gate"].get("needs", []):
+              errors.append("rust-ci-gate must need mutation-testing")
+          if not re.search(r'MUTATION_RESULT="\$\{\{ needs\.mutation-testing\.result \}\}"', gate_run) or \
+             not re.search(r'if \[\[ "\$MUTATION_RESULT" != "success" \]\]', gate_run):
+              errors.append("rust-ci-gate must FAIL a PR whose mutation-testing result is not success")
+          if re.search(r"Allowing PR to proceed|WARN: mutation", gate_run):
+              errors.append("rust-ci-gate must not pass a failed or cancelled mutation run with a WARN")
+
+          # 6. The speed levers and the exclude list (.cargo/mutants.toml, Cargo.toml).
+          cargo = tomllib.load(open("Cargo.toml", "rb"))
+          prof = cargo.get("profile", {}).get("mutants", {})
+          if prof.get("inherits") != "test" or prof.get("debug") not in ("none", False, 0):
+              errors.append('Cargo.toml needs [profile.mutants] inherits = "test", debug = "none"')
+          mcfg = tomllib.load(open(".cargo/mutants.toml", "rb"))
+          if mcfg.get("profile") != "mutants":
+              errors.append('.cargo/mutants.toml must set profile = "mutants"')
+          if mcfg.get("test_tool") != "nextest":
+              errors.append('.cargo/mutants.toml must set test_tool = "nextest"')
+          if mcfg.get("test_workspace") is not False:
+              errors.append(".cargo/mutants.toml must set test_workspace = false (per-package tests)")
+          if mcfg.get("examine_globs") or mcfg.get("examine_re"):
+              errors.append(".cargo/mutants.toml must not narrow the scope with examine_globs/examine_re")
+          for pat in mcfg.get("exclude_re", []) + mcfg.get("exclude_globs", []):
+              if re.search(r"rs[_-]rtmp[_-]push", pat, re.I):
+                  errors.append(f"rs-rtmp-push must stay mutated (spec 7.6), found exclude {pat!r}")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}")
+              sys.exit(1)
+          print(f"OK: mutation gate is real, sharded ({sorted(mut_jobs)}), capped at 20 min, and required.")
+          PY
 
       - name: "Verify every strict-gate endpoint alias is seeded by CI (#192)"
         run: |
@@ -1185,7 +1327,7 @@ jobs:
           # (see the comment in the coverage job). Un-pinning is allowed only
           # together with this guard, after the new toolchain passes the job.
           # The coverage job precedes test-integrity, so no self-match (#325).
-          COV=$(sed -n '/^  coverage:/,/^  mutation-testing:/p' "$WORKFLOW_FILE")
+          COV=$(sed -n '/^  coverage:/,/^  mutation-plan:/p' "$WORKFLOW_FILE")
           if ! grep -qE '^\s*- uses: dtolnay/rust-toolchain@1\.98\.0\s*$' <<<"$COV"; then
             echo "ERROR: the coverage job must pin dtolnay/rust-toolchain@1.98.0 (#367)."
             exit 1
@@ -1396,18 +1538,16 @@ jobs:
             echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
           fi
 
-          # mutation-testing is required on pull_request, tolerate "cancelled"
-          # (GH runner crash/eviction — the test itself never ran, not a code failure).
+          # mutation-testing runs only on pull_request, where it is REQUIRED.
+          # It is a matrix job: its result is "success" only when EVERY shard
+          # succeeded, and "skipped" when mutation-plan failed, so anything
+          # but success fails the gate (#367). It used to pass the gate on
+          # "failure" and "cancelled" with a WARN, so even a real MISSED-mutant
+          # failure never blocked a merge.
           MUTATION_RESULT="${{ needs.mutation-testing.result }}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            if [[ "$MUTATION_RESULT" == "success" ]]; then
-              echo "mutation-testing: success"
-            elif [[ "$MUTATION_RESULT" == "cancelled" || "$MUTATION_RESULT" == "failure" ]]; then
-              echo "WARN: mutation-testing result=$MUTATION_RESULT (GH runner may have crashed)"
-              echo "  Push-event CI passed all tests including E2E. Allowing PR to proceed."
-              echo "  If this persists, investigate GH runner stability or move mutation to self-hosted."
-            else
-              echo "FAIL: mutation-testing unexpected result: $MUTATION_RESULT"
+            if [[ "$MUTATION_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-testing did not succeed on every shard (result: $MUTATION_RESULT)"
               FAILED=1
             fi
           else

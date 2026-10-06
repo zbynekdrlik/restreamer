@@ -1,0 +1,22 @@
+# cargo-nextest configuration. Only the mutation gate runs nextest
+# (.cargo/mutants.toml `test_tool = "nextest"`); the CI `test` job runs
+# `cargo test`, which is unaffected by this file.
+#
+# nextest runs EVERY test in its own process and runs the test binaries of a
+# package concurrently. `cargo test` runs the binaries one after another, with
+# each binary's tests as threads of one process. A test that relies on that
+# (an in-process lock, a fixed port) can fail under nextest with no mutation
+# applied, and then every mutant of its package reads as "caught": a
+# fake-green mutation gate (#367).
+
+# rs-delivery's test_file_sink_e2e binds the REAL 127.0.0.1:1935, and only an
+# in-process mutex keeps its tests apart. The rs-delivery bin unit tests
+# assume 1935 is REFUSED (.claude/rules/e2e-fast-endpoint.md). So each of
+# these tests takes every test slot: no other test runs while it holds 1935.
+# Without this, two of its tests fail on an unmutated tree (dev2, #367).
+# They also run FIRST: an exclusive test that becomes ready late waits for
+# every running test to drain, which took the suite from ~25 s to 38 s.
+[[profile.default.overrides]]
+filter = 'binary_id(rs-delivery::test_file_sink_e2e)'
+threads-required = 'num-test-threads'
+priority = 100
