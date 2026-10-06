@@ -587,3 +587,24 @@ runs did not reproduce a CI-only failure. Load is what exposes timing races.
   known_hosts without hardcoding it: `for b in $(seq 1 254); do ssh-keygen -F
   10.77.8.$b | grep -q <dev2 key fragment> && echo 10.77.8.$b; done`. Get the
   key fragment with `ssh-keygen -F 100.82.64.27`.
+
+## Mutation runs and CI-size timing on dev2 (#367, 2026-10-06)
+
+The gate's recipe and its traps are in `.claude/rules/ci-mutation-gate.md`.
+What matters for running it here:
+
+- **Emulate a runner with `taskset -c 0-3`.** That is the ubuntu-latest size.
+  Two lanes on `0-3` and `4-7` run in parallel. Cold builds then slow down a
+  little (memory and IO are shared), so dev2 numbers are pessimistic.
+- **A CI-faithful shard needs an empty `CARGO_TARGET_DIR`** (CI shards build
+  cold), and that dir must be deleted afterwards.
+- **An in-place run mutates its checkout.** Give it a checkout of its own,
+  rsynced fresh (`--delete`), with a `cp -al` target if you want it warm.
+  Never build or test anything else in it while the run is going.
+- **Pin the tools to CI's versions without `cargo install`.** Extract the
+  cargo-mutants and cargo-nextest release tarballs into a private `bin/`,
+  then put it first on `PATH` for the run.
+- **Launch detached and poll short.** Use `( setsid bash script.sh … >log
+  2>&1 </dev/null & ) ; echo LAUNCHED`, then poll a `.done` file. Keep each
+  poll under the Bash tool's 120 s default timeout; a longer one is moved to
+  the background.

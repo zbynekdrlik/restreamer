@@ -345,7 +345,13 @@ jobs:
           #   implies serial mutants; cargo-mutants 27 rejects --jobs with it.
           # --shard k/N: the default "slice" sharding gives consecutive
           #   mutants, so a shard compiles one or two packages, not all.
-          # --baseline=skip: the test job proves the unmutated tree green.
+          # --baseline=run: first run the shard's packages UNMUTATED, with this
+          #   runner, nextest and the mutants profile. If they fail (a test
+          #   that only passes under `cargo test`, like the 1935 e2e before
+          #   .config/nextest.toml), cargo-mutants exits 4 instead of
+          #   reading every mutant as caught. Free in practice: the baseline
+          #   build is the shard's cold build anyway (shard 19/45: 553 s run
+          #   vs 574 s skip).
           # --timeout: a hanging mutant is a TIMEOUT failure after this many
           #   seconds of tests, ~4x the slowest package suite (rs-delivery).
           # CARGO_INCREMENTAL=1: rust-toolchain and rust-cache export 0 for
@@ -361,7 +367,7 @@ jobs:
           # if/fi block, where $? is always 0 (the old fake-green gate,
           # .claude/rules/ci-mutation-gate.md).
           set +e
-          cargo mutants --in-diff pr.diff --in-place --baseline=skip \
+          cargo mutants --in-diff pr.diff --in-place --baseline=run \
             --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }} \
             --timeout 120 --build-timeout 600 --output mutants-out
           EXIT=$?
@@ -1185,7 +1191,7 @@ jobs:
           for step, cmd, nxt, before in runs:
               if "--shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}" not in cmd:
                   errors.append("the shard must run --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}")
-              for flag in ("--in-diff pr.diff", "--baseline=skip", "--in-place"):
+              for flag in ("--in-diff pr.diff", "--baseline=run", "--in-place"):
                   if flag not in cmd:
                       errors.append(f"the shard's cargo-mutants command must pass {flag}")
               for bad in ("--jobs", " -j", "--no-config", "--config", "--exclude", " -e ", "--file", " -f ", "--examine"):

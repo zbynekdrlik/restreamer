@@ -42,9 +42,37 @@ the MUTATED crate. Once it is real (integ-b3 76d9517e), any MISSED mutant
   `x >= 0` truly changes nothing, restructure (`std::mem::take` + a tested
   helper) rather than leave a survivor.
 
-Run it on dev2 before returning a lane: a lane-private copy of the warm
-checkout (`cp -al target` once), `git diff origin/main...HEAD > pr.diff`,
-the `--exclude-re`/`-e` arguments copied from the ci.yml mutation step, then
-`cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600
---baseline=skip --output <dir>`; `missed.txt` and `timeout.txt` must be
-empty. ~250 mutants take about 20 min uncontended.
+More from the 109 survivors of PR #365's diff (#367, bounded-gate lane):
+
+- **Handlers tested only from rs-service survive as `Ok(200)`.** A handler
+  replaced by `Ok(Default::default())` still answers 200. Call the handler
+  directly in its own crate and assert the side effect: the DB row, the
+  broadcast `WsEvent`, the 404 (`rs-api/src/handlers_crud_tests.rs`).
+- **`<` vs `<=` on a continuous value is an equivalent mutant at the call
+  site.** An `age < ttl` with a real `Instant` never hits equality. Move the
+  comparison into a tiny tested helper (`rs-api` `cache_ttl::is_fresh`,
+  `fast_keepalive_escalation::next_escalation_tick`, rs-cloud
+  `retry_backoff`) and assert the exact boundary there.
+- **A hand-advanced `while` counter turns `+=` into an infinite loop.** That is
+  a TIMEOUT, not a caught mutant. Use a stepped range
+  (`(first..b).step_by(n)`, rs-endpoint `throughput.rs`).
+- **An unbounded `task.await` in a paused-clock test hangs when a mutant
+  stops the task from finishing.** Wrap it in `tokio::time::timeout`, so the
+  mutant fails the test instead of timing out.
+- **Overlapping error-class flags cannot be separated with real errors.**
+  reqwest marks a refused connection both `is_connect` and `is_request`. Test
+  the decision as a pure function of the flags (rs-cloud
+  `transport_error_is_transient`).
+- **A fixed external URL needs a test override.** Follow the
+  `FB_GRAPH_API_BASE` / `YOUTUBE_API_BASE` pattern
+  (`RESTREAMER_RELEASE_BASE_URL` for the GitHub release). Take paths such as
+  the running exe as parameters (`find_bundled_binary(exe)`).
+- **A redundant guard is an equivalent mutant.** Delete the guard rather than
+  test around it: `record_bytes` checked `b > open` before a
+  `finalize_up_to` that already no-ops, and `if delta > max { max = delta }`
+  became `max.max(delta)`.
+
+Run it on dev2 before returning a lane, with the recipe in
+`.claude/rules/ci-mutation-gate.md`. The excludes and levers now live in
+`.cargo/mutants.toml`, so there is nothing to copy from ci.yml.
+`missed.txt` and `timeout.txt` must be empty.
