@@ -11,8 +11,17 @@ fn ms_(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// The tracker scenarios below are built on a 1 s probe / 5 s threshold /
+/// 1 s late grid. They test the tracker's logic, not the production values
+/// (`production_config_matches_the_design` pins those), so they keep that
+/// grid explicitly whatever the production thresholds are.
 fn cfg() -> StallDetectorConfig {
-    StallDetectorConfig::production(Path::new("/nonexistent-test-dir"))
+    StallDetectorConfig {
+        probe_interval: S,
+        stall_threshold: 5 * S,
+        tick_late_threshold: S,
+        ..StallDetectorConfig::production(Path::new("/nonexistent-test-dir"))
+    }
 }
 
 /// Drives a `StallTracker` the way the detector thread does, on a synthetic
