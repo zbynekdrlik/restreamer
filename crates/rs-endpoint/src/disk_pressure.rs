@@ -64,25 +64,72 @@ pub(crate) fn should_log_transition(prev: DiskPressure, now: DiskPressure) -> bo
 
 /// How often the volume holding the chunk dir is sampled.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+/// A volume enumeration still running after this is not waited for in this
+/// sample (#368).
+pub const VOLUME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `(used_bytes, total_bytes)` of the volume holding a path, `None` when no
 /// mounted volume holds it. Production: [`volume_usage`].
 pub(crate) type VolumeProbe = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
 
 /// Runs the volume probe for the disk monitor, every `interval`.
+///
+/// The probe (`sysinfo` disk enumeration) is a BLOCKING call, so it runs on
+/// tokio's blocking pool, never on an async worker: inline, a slow
+/// enumeration stalled every task sharing that worker, the RTMP ingest
+/// included (#368). A sample waits for it at most `timeout`. An enumeration
+/// still running then stays in flight and the NEXT sample waits for that same
+/// one: a stuck enumeration holds one blocking thread, never one per tick.
 pub(crate) struct VolumeSampler {
     probe: VolumeProbe,
     interval: Duration,
+    timeout: Duration,
+    in_flight: Option<tokio::task::JoinHandle<Option<(u64, u64)>>>,
 }
 
 impl VolumeSampler {
     pub(crate) fn new(probe: VolumeProbe, interval: Duration) -> Self {
-        Self { probe, interval }
+        Self {
+            probe,
+            interval,
+            timeout: VOLUME_PROBE_TIMEOUT,
+            in_flight: None,
+        }
     }
 
-    /// One sample of the volume holding `path`.
+    /// The same sampler with another enumeration timeout.
+    #[cfg(test)]
+    pub(crate) fn with_timeout(self, timeout: Duration) -> Self {
+        Self { timeout, ..self }
+    }
+
+    /// One sample of the volume holding `path`; `None` when no volume holds
+    /// it, or the enumeration failed or is still running.
     pub(crate) async fn sample(&mut self, path: &Path) -> Option<(u64, u64)> {
-        (self.probe)(path)
+        let mut enumeration = match self.in_flight.take() {
+            Some(running) => running,
+            None => {
+                let probe = Arc::clone(&self.probe);
+                let path = path.to_path_buf();
+                tokio::task::spawn_blocking(move || probe(&path))
+            }
+        };
+        match tokio::time::timeout(self.timeout, &mut enumeration).await {
+            Ok(Ok(usage)) => usage,
+            Ok(Err(e)) => {
+                tracing::warn!("disk monitor: the volume enumeration failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "disk monitor: the volume enumeration is still running after {:?}; \
+                     this sample is skipped and the next one waits for it",
+                    self.timeout
+                );
+                self.in_flight = Some(enumeration);
+                None
+            }
+        }
     }
 }
 
@@ -320,6 +367,94 @@ mod tests {
             "a timer task on the same runtime ran {worst_late:?} late while the volume \
              enumeration ran: the blocking call must not run on an async worker (#368)"
         );
+        shutdown_tx.send(()).expect("the monitor is listening");
+        tokio::time::timeout(Duration::from_secs(10), monitor)
+            .await
+            .expect("the monitor stops on shutdown")
+            .expect("the monitor must not panic");
+    }
+
+    fn probe_returning(usage: Option<(u64, u64)>) -> VolumeProbe {
+        Arc::new(move |_: &Path| usage)
+    }
+
+    #[tokio::test]
+    async fn a_sample_is_the_probe_result() {
+        let mut sampler = VolumeSampler::new(probe_returning(Some((3, 10))), SAMPLE_INTERVAL);
+        assert_eq!(sampler.sample(Path::new("/chunks")).await, Some((3, 10)));
+        let mut sampler = VolumeSampler::new(probe_returning(None), SAMPLE_INTERVAL);
+        assert_eq!(sampler.sample(Path::new("/chunks")).await, None);
+    }
+
+    /// #368: a stuck enumeration costs one blocking thread, never one per
+    /// tick. A sample that times out leaves it in flight, the next sample
+    /// waits for that same enumeration, and its result is used once it ends.
+    #[tokio::test]
+    async fn a_slow_enumeration_is_waited_for_again_never_duplicated() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let probe: VolumeProbe = {
+            let (calls, released) = (Arc::clone(&calls), Arc::clone(&released));
+            Arc::new(move |path: &Path| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !released.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                assert_eq!(path, Path::new("/chunks"));
+                Some((7, 9))
+            })
+        };
+        let mut sampler =
+            VolumeSampler::new(probe, SAMPLE_INTERVAL).with_timeout(Duration::from_millis(50));
+        let path = Path::new("/chunks");
+
+        assert_eq!(sampler.sample(path).await, None, "timed out");
+        assert_eq!(sampler.sample(path).await, None, "still running");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the second sample waited for the running enumeration, it did not start another"
+        );
+        released.store(true, Ordering::SeqCst);
+        assert_eq!(
+            sampler.sample(path).await,
+            Some((7, 9)),
+            "the slow enumeration's own result"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sampler.sample(path).await, Some((7, 9)));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a finished one is not reused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_enumeration_is_an_empty_sample() {
+        let mut sampler = VolumeSampler::new(
+            Arc::new(|_: &Path| -> Option<(u64, u64)> { panic!("sysinfo failed") }),
+            SAMPLE_INTERVAL,
+        );
+        assert_eq!(sampler.sample(Path::new("/chunks")).await, None);
+        assert_eq!(sampler.sample(Path::new("/chunks")).await, None);
+    }
+
+    /// The production entry point runs until shutdown, then returns.
+    #[tokio::test]
+    async fn run_disk_monitor_runs_until_shutdown() {
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let monitor = tokio::spawn(run_disk_monitor(
+            std::env::temp_dir(),
+            None,
+            None,
+            None,
+            shutdown_rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!monitor.is_finished(), "the monitor keeps sampling");
         shutdown_tx.send(()).expect("the monitor is listening");
         tokio::time::timeout(Duration::from_secs(10), monitor)
             .await
