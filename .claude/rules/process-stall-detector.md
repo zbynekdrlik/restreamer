@@ -2,6 +2,7 @@
 paths:
   - "crates/rs-runtime/src/stall_*.rs"
   - "crates/rs-runtime/tests/stall_detector_runtime.rs"
+  - "crates/rs-core/src/audit_throttle*.rs"
 ---
 
 # Process-stall detector (#367 part 2): invariants and gotchas
@@ -24,6 +25,39 @@ stall in only one names the runtime that stopped polling.
   `start_for_service` are the `main` shorthands.
 - The label is added in `Detector::write` (`stall_log::with_runtime`), so the
   record builders stay label-free.
+
+## Tiers (#368 observability lane)
+
+OBS drops frames once its send queue holds ~700 ms; the #367 grid (1 s probe,
+5 s threshold) never saw those stalls. Now (`stall_tiers.rs`,
+`config.stall_detector.*`, all readable in `CONFIG_INVENTORY`, restart to
+apply):
+
+| setting | default | meaning |
+|---|---|---|
+| `probe_interval_ms` | 100 | detector tick + probe cadence |
+| `record_threshold_ms` | 500 | `stall_threshold`: a stall opens, `stall_start`/`stall_end` in stall*.log, tier `minor` |
+| `audit_threshold_ms` | 700 | also a `ProcessStall` row, tier `major` |
+| `severe_threshold_ms` | 5000 | tier `severe` |
+| `tick_late_threshold_ms` | 250 | detector this late during a stall = `whole_process` |
+| `audit_min_interval_ms` | 10000 | at most one `ProcessStall` row per interval |
+
+- `config_from_settings` sanitises (probe in [10 ms, 1 s], record >= probe,
+  audit >= record, severe >= audit, tick_late >= 20 ms) and returns a warning
+  per adjusted value; `start_for_runtime` logs them.
+- The tier is known only at the END (`stall_end.tier`, the row's `tier`).
+- `baseline_every_ticks` is derived: one baseline per 10 s of ticks.
+- **Throttle:** `StallAuditGate` wraps `rs_core::audit_throttle::AuditThrottle`
+  (single owner, explicit instants, no lock, counts what it holds back). A
+  held-back stall still gets its stall*.log records and an info log line. The
+  next admitted row carries `held_back_before {count, max, total, unit,
+  span_ms}`; with no later stall, `apply` flushes `{aggregate: true,
+  held_back}` as its own row, but ONLY between stalls (the log pipeline may be
+  blocked mid-stall). `audit::RateLimiter` is the wrong tool here: it drops
+  without counting, locks a DashMap shard, and reads the real clock.
+- The tracker unit tests (`stall_detector_tests.rs` `cfg()`) keep an EXPLICIT
+  1 s / 5 s grid; the production values are pinned only by
+  `production_config_matches_the_design` and `stall_tiers_tests.rs`.
 
 - Every process start writes a `detector_started` line, and every detector
   exit writes `detector_stopped` with its reason. No `stall_start` between the
@@ -81,6 +115,17 @@ stall in only one names the runtime that stopped polling.
   300 ms stall). `tick_late_threshold` stays at 2 s, so CI scheduler jitter
   (Windows timer resolution is ~15 ms) can never flip `runtime_starved` into
   `whole_process`.
+- **A test that asserts NO audit row on the production tiers is racy**: the
+  stall is measured from the probe's send instant, so a 600 ms block can
+  measure 700+ ms on a loaded box. Assert the absence on a scale whose audit
+  threshold is far above the block (`a_stall_below_the_audit_threshold_...`
+  uses 1500 ms), and on the production tiers assert only that tier and row
+  AGREE with the measured duration.
+- **A block after the first one may get its probe only mid-block**: after a
+  stall closes, the grace drive answers the fresh probe, and the next one is
+  sent at the next 100 ms tick, possibly inside the block. Its stall then
+  measures up to one probe interval LESS than the block. Assert held-back
+  maxima against the audit threshold, not the block length.
 - **300 ms is only for tests that PROVOKE a stall** (a 1.5 s block). A test
   that asserts NO stall uses the 2 s `QUIET_THRESHOLD`. On a loaded box the
   OS starves a responsive process for 300 ms+, and the detector is right to
@@ -129,6 +174,10 @@ windows-sys = { version = "=0.61.2", features = ["Win32_System_ProcessStatus", "
 [target.'cfg(not(windows))'.dependencies]
 sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
 ```
+
+Give the scratch crate `rust-version = "1.85"` (the workspace MSRV). Without
+it clippy (edition 2024) demands let-chains (`collapsible_if`) that the
+workspace never asks for: a false failure (#368 lane c).
 
 Then run, on dev2:
 

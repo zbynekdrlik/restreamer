@@ -9,6 +9,10 @@ paths:
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/rtmp_server.rs"
   - "crates/rs-core/src/stable_since*.rs"
+  - "crates/rs-core/src/ingest_gaps.rs"
+  - "crates/rs-inpoint/src/ingest_gap*.rs"
+  - "crates/rs-inpoint/src/media_receiver_gap_tests.rs"
+  - "crates/rs-inpoint/clippy.toml"
 ---
 
 # The dedicated ingest runtime and the Windows priorities (#368)
@@ -112,6 +116,45 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
 `spawn_blocking` and waits at most 5 s. A timed-out enumeration stays in
 flight, and the next sample waits for that same one: one stuck blocking
 thread, never one per tick. Do the same for any new blocking call.
+
+## No blocking call can land in rs-inpoint (clippy guard)
+
+`crates/rs-inpoint/clippy.toml` bans (`disallowed-methods`) `std::thread::sleep`,
+`std::fs` sync IO, std `Mutex`/`RwLock` locks, blocking std channel receives,
+thread joins, blocking std net calls, nested `block_on`/`block_in_place`, and
+tokio's `blocking_*` methods. Clippy `-D warnings` fails on any of them.
+- Clippy reads only the NEAREST clippy.toml, no merge: the root thresholds are
+  repeated there. Change both together.
+- `#[tokio::test]` expands to `Runtime::block_on`, so every test module with a
+  tokio test trips the guard. The test modules allow it on their `mod`
+  declaration with a `reason` (flv_chunker tests + drain tests,
+  media_receiver tests and children, rtmp_server tests,
+  `tests/rtmp_server_e2e.rs`). A NEW test module with `#[tokio::test]` needs
+  the same allow; production code never gets one.
+- Proven on dev2 (#368 lane c): a scratch `std::thread::sleep` in
+  `MediaReceiver::on_frame` failed `cargo clippy -p rs-inpoint --lib -- -D
+  warnings` with `use of a disallowed method`.
+
+## Ingest frame-gap metric (#368 observability lane)
+
+`ingest_gap.rs` (rs-inpoint) measures every media frame in `on_frame`:
+- arrival gap >= 300 ms (any media frame) -> logged + counted;
+- video source-ts delta > 1.5 measured frame intervals -> OBS dropped
+  `round(delta / interval) - 1` frames before sending. The interval is the
+  median-filtered window mean until 32 deltas are counted, then the
+  cumulative mean since the subscription (cancels 29.97 fps' 33/34 ms ms
+  rounding; the exact count holds to N ~800 at 30 fps). Warm-up deltas never
+  enter the cumulative mean. A backward step or one > 30 s is a
+  discontinuity: re-based, never counted.
+- `reset_stream()` on every accepted subscription (the subscribe wait is no
+  gap, a new publisher may have another frame rate). The audit throttles
+  survive it.
+- Counters: `InpointState::ingest_gaps()` atomics (lock-free, the API reads
+  them on `/status` as `inpoint.details.ingest_gaps`). Rows: `IngestFrameGap`
+  (Warn, Inpoint), one `AuditThrottle` per kind (10 s), aggregates flushed on
+  the first frame after the interval or at `end_session`.
+- The `stream` parameter is generic `&S: Display + ?Sized`, so the per-frame
+  path never allocates; the identifier is stringified only into a row.
 
 ## Testing
 

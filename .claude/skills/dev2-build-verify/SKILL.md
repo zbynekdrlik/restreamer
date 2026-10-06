@@ -102,6 +102,14 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
   `touch` the lane's changed `.rs` files after each rsync so cargo cannot reuse
   a stale fingerprint. Do NOT use `git stash` for this: the stash stack is
   shared by every worktree and session on the box (#367 lane L1).
+- **A RED skeleton must COMPILE before you commit it.** For new behaviour the
+  RED commit is tests plus a skeleton that keeps the old behaviour (same API,
+  stub bodies), so every test fails on behaviour. A skeleton that does not
+  compile (#368 lane c: a `let mut note = None;` whose only use was stubbed
+  away, E0282) proves nothing: `cargo test` stops before running any test.
+  Run `cargo test --workspace --no-run` on the RED tree before committing,
+  and give the RED run `--no-fail-fast`, or the first failing binary hides
+  the rest.
 
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`

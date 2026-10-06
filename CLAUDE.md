@@ -37,6 +37,7 @@ auto-load on their `paths:` — you do not invoke those.
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
 - YouTube-measured A/V + frame-continuity session (manage-scope OAuth on stream.lan, Thursday trigger, camera-box roles, pass criteria) → `.claude/rules/youtube-av-measurement.md` (auto)
+- restreamer.log daily roll + 14-day retention (fixed live file name) → `.claude/rules/log-retention.md` (auto)
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure
