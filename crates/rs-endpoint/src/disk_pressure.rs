@@ -418,6 +418,9 @@ mod tests {
             "the second sample waited for the running enumeration, it did not start another"
         );
         released.store(true, Ordering::SeqCst);
+        // From here the enumeration ends at once; give it all the time a
+        // loaded runner needs.
+        sampler.timeout = Duration::from_secs(10);
         assert_eq!(
             sampler.sample(path).await,
             Some((7, 9)),
