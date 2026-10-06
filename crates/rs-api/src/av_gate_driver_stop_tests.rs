@@ -101,7 +101,8 @@ async fn a_failing_event_stop_is_reported_and_left_pending() {
         reason(&row),
         "teardown: stopping the event failed: HTTP 500"
     );
-    assert!(row.cleanup_pending && row.broadcast_done && !row.event_done);
+    assert!(row.cleanup_pending && row.broadcast_done);
+    assert!(!row.event_stopped && !row.event_done);
     assert!(
         !h.rig.called(&format!("servers:{EVENT}")),
         "servers are checked once the stop succeeded"

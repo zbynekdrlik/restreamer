@@ -283,8 +283,11 @@ pub async fn reconcile_on_boot(ctx: &Arc<SessionCtx>, clients: &ClientFactory) {
         let yt = clients().ok().map(Arc::new);
         let mut s = Session::new(Arc::clone(ctx), yt, row);
         if s.row.state == SessionState::Processing.as_str() {
-            info!(session = %s.row.id, "av-gate boot reconcile: resuming the VOD wait");
-            tokio::spawn(async move { s.await_vod().await });
+            // A maintenance loop restarted after a panic lists it again.
+            if ctx.registry.mark_resumed(&s.row.id) {
+                info!(session = %s.row.id, "av-gate boot reconcile: resuming the VOD wait");
+                tokio::spawn(async move { s.await_vod().await });
+            }
             continue;
         }
         s.reaped("boot_reconcile");
@@ -297,6 +300,8 @@ pub async fn reconcile_on_boot(ctx: &Arc<SessionCtx>, clients: &ClientFactory) {
 /// Retry every failed teardown once (only the part still missing). Returns
 /// how many are still pending.
 pub async fn retry_cleanups(ctx: &Arc<SessionCtx>, clients: &ClientFactory) -> usize {
+    // The operator's force-clear waits for (refuses during) a round.
+    let _round = ctx.registry.cleanup_round.lock().await;
     let rows = match store::list_cleanup_pending(&ctx.pool).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -376,6 +381,8 @@ pub enum ClearOutcome {
     Cleared,
     NotPending,
     NotFound,
+    /// A retry round is running; it would save its own result over the clear.
+    RetryRunning,
 }
 
 /// The operator's way out of a cleanup that can never succeed (a broken
@@ -386,6 +393,9 @@ pub async fn clear_cleanup(
     ctx: &Arc<SessionCtx>,
     session_id: &str,
 ) -> Result<ClearOutcome, String> {
+    let Ok(_round) = ctx.registry.cleanup_round.try_lock() else {
+        return Ok(ClearOutcome::RetryRunning);
+    };
     let row = match store::get(&ctx.pool, session_id)
         .await
         .map_err(|e| e.to_string())?

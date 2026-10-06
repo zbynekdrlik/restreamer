@@ -152,14 +152,19 @@ impl Session {
             .ok_or_else(|| "no YouTube manage client (oauth file unusable)".to_string())
     }
 
-    /// Write the row (with the current quota spend). A DB error is logged:
-    /// the session itself keeps going and its cleanup does not depend on it.
-    async fn persist(&mut self) {
+    /// Write the row (with the current quota spend). A DB error is logged
+    /// and returned as `false`; most callers go on, because the cleanup does
+    /// not depend on it, but a step that must be durable first checks it.
+    async fn persist(&mut self) -> bool {
         if let Some(yt) = &self.yt {
             self.row.quota_units = self.base_units + i64::from(yt.units_used());
         }
-        if let Err(e) = store::save(&self.ctx.pool, &self.row).await {
-            error!(session = %self.row.id, "av-gate: persisting the session failed: {e}");
+        match store::save(&self.ctx.pool, &self.row).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!(session = %self.row.id, "av-gate: persisting the session failed: {e}");
+                false
+            }
         }
     }
 
@@ -267,7 +272,11 @@ impl Session {
                 return Ok(Ok(false));
             }
             self.row.went_live = true;
-            self.persist().await;
+            if !self.persist().await {
+                // Never send `live` before it is durable: a crash would leave
+                // the boot reconcile a broadcast it does not know to complete.
+                return Ok(Ok(false));
+            }
             if let Err(e) = yt
                 .transition_broadcast(&bid, BroadcastTransition::Live)
                 .await
@@ -325,7 +334,9 @@ impl Session {
                         json!({ "broadcast_id": self.row.broadcast_id }),
                     );
                 }
-                Ok(false) => self.persist().await,
+                Ok(false) => {
+                    self.persist().await;
+                }
                 Err(reason) => return Wake::Failed(reason),
             }
         }
@@ -337,7 +348,7 @@ impl Session {
         let yt = self.yt()?;
         let mut last = String::new();
         for _ in 0..COMPLETE_ATTEMPTS {
-            match yt.broadcast_life_cycle(broadcast_id).await {
+            match yt.broadcast_life_cycle_for_teardown(broadcast_id).await {
                 Ok(None) => return Ok(()),
                 Ok(Some(life)) => match life_action(&life) {
                     LifeAction::Nothing => return Ok(()),
@@ -380,20 +391,28 @@ impl Session {
         }
     }
 
-    /// Stop the event and wait for its servers. On a RETRY the session is
-    /// long over: an active event then belongs to another run (restreamer's
-    /// own CI E2E uses it too) and must not be stopped.
-    async fn release_event(&self, event_id: i64, retry: bool) -> Result<(), String> {
-        if retry && self.ctx.rig.event_active(event_id).await? {
-            return Err(format!(
-                "event {event_id} is active again (another run?); not stopping it"
-            ));
+    /// Stop the event (once) and wait for its servers. A stop that never
+    /// succeeded is retried: the active event is then still this session's.
+    /// Once it did succeed, an event that is active AGAIN on a retry belongs
+    /// to another run (restreamer's own CI E2E uses it too): its servers are
+    /// not ours to wait for, and anything of ours left behind has no live
+    /// delivery row, so the orphan reaper (#352) deletes it.
+    async fn release_event(&mut self, event_id: i64, retry: bool) -> Result<(), String> {
+        if !self.row.event_stopped {
+            self.ctx
+                .rig
+                .stop_event(event_id)
+                .await
+                .map_err(|e| format!("stopping the event failed: {e}"))?;
+            self.row.event_stopped = true;
+        } else if retry && self.ctx.rig.event_active(event_id).await? {
+            warn!(
+                session = %self.row.id,
+                "av-gate: event {event_id} is in use by another run; leaving any server of \
+                 ours to the orphan reaper"
+            );
+            return Ok(());
         }
-        self.ctx
-            .rig
-            .stop_event(event_id)
-            .await
-            .map_err(|e| format!("stopping the event failed: {e}"))?;
         self.wait_servers_gone(event_id).await
     }
 

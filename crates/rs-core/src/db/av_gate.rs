@@ -29,6 +29,8 @@ pub struct AvGateSessionRow {
     pub cleanup_pending: bool,
     /// Teardown progress: the broadcast is completed (or never went live).
     pub broadcast_done: bool,
+    /// Teardown progress: the event's stop succeeded (it is no longer ours).
+    pub event_stopped: bool,
     /// Teardown progress: the event is stopped and its servers are gone.
     pub event_done: bool,
     pub vod_id: Option<String>,
@@ -56,6 +58,7 @@ impl AvGateSessionRow {
             went_live: false,
             cleanup_pending: false,
             broadcast_done: false,
+            event_stopped: false,
             event_done: false,
             vod_id: None,
             reason: None,
@@ -70,7 +73,7 @@ impl AvGateSessionRow {
 }
 
 const COLUMNS: &str = "id, requester, title, state, broadcast_id, stream_id, event_id, went_live, \
-     cleanup_pending, broadcast_done, event_done, vod_id, reason, quota_units, created_at, ready_at, stop_requested_at, processing_at, \
+     cleanup_pending, broadcast_done, event_stopped, event_done, vod_id, reason, quota_units, created_at, ready_at, stop_requested_at, processing_at, \
      finished_at";
 
 fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
@@ -85,6 +88,7 @@ fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
         went_live: r.get::<i64, _>("went_live") != 0,
         cleanup_pending: r.get::<i64, _>("cleanup_pending") != 0,
         broadcast_done: r.get::<i64, _>("broadcast_done") != 0,
+        event_stopped: r.get::<i64, _>("event_stopped") != 0,
         event_done: r.get::<i64, _>("event_done") != 0,
         vod_id: r.get("vod_id"),
         reason: r.get("reason"),
@@ -103,10 +107,11 @@ fn row_to_session(r: sqlx::sqlite::SqliteRow) -> AvGateSessionRow {
 pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
     sqlx::query(
         "INSERT INTO av_gate_sessions (id, requester, title, state, broadcast_id, stream_id, \
-             event_id, went_live, cleanup_pending, broadcast_done, event_done, vod_id, reason, \
-             quota_units, created_at, ready_at, stop_requested_at, processing_at, finished_at)
+             event_id, went_live, cleanup_pending, broadcast_done, event_stopped, event_done, \
+             vod_id, reason, quota_units, created_at, ready_at, stop_requested_at, \
+             processing_at, finished_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-             ?18, ?19)
+             ?18, ?19, ?20)
          ON CONFLICT(id) DO UPDATE SET
              requester = excluded.requester,
              title = excluded.title,
@@ -117,6 +122,7 @@ pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
              went_live = excluded.went_live,
              cleanup_pending = excluded.cleanup_pending,
              broadcast_done = excluded.broadcast_done,
+             event_stopped = excluded.event_stopped,
              event_done = excluded.event_done,
              vod_id = excluded.vod_id,
              reason = excluded.reason,
@@ -137,6 +143,7 @@ pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
     .bind(i64::from(s.went_live))
     .bind(i64::from(s.cleanup_pending))
     .bind(i64::from(s.broadcast_done))
+    .bind(i64::from(s.event_stopped))
     .bind(i64::from(s.event_done))
     .bind(&s.vod_id)
     .bind(&s.reason)

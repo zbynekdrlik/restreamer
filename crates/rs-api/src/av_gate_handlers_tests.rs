@@ -430,6 +430,19 @@ async fn status_and_clear_cleanup_through_the_router() {
     let (status, body) = send(&a.state, authed("POST", clear, "")).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "not_pending");
+    let mut row = AvGateSessionRow::new_starting("busy", "r", "t", "2026-10-06T10:00:00.000Z");
+    row.state = "failed".to_string();
+    row.cleanup_pending = true;
+    store::save(&a.state.pool, &row).await.unwrap();
+    let round = a.state.av_gate.registry.cleanup_round.lock().await;
+    let (status, body) = send(
+        &a.state,
+        authed("POST", "/api/v1/av-gate/session/busy/clear-cleanup", ""),
+    )
+    .await;
+    drop(round);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "retry_running");
     let (status, _) = send(
         &a.state,
         authed("POST", "/api/v1/av-gate/session/nope/clear-cleanup", ""),

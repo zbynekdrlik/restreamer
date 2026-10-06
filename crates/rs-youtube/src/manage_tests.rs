@@ -567,7 +567,14 @@ async fn completing_a_broadcast_is_never_refused_by_an_empty_bucket() {
     c.transition_broadcast("bc-1", BroadcastTransition::Complete)
         .await
         .unwrap();
-    assert_eq!(c.broadcast_life_cycle("bc-1").await.unwrap(), None);
+    assert_eq!(
+        c.broadcast_life_cycle_for_teardown("bc-1").await.unwrap(),
+        None
+    );
+    assert!(
+        c.broadcast_life_cycle("bc-1").await.is_err(),
+        "a readiness poll is refused by an empty bucket"
+    );
     assert_eq!(c.units_used(), units::TRANSITION + units::LIST);
     assert_eq!(bucket.remaining(), 0, "the forced calls put it into debt");
 }

@@ -142,6 +142,7 @@ pub(crate) struct YtState {
     pub fail: StdMutex<HashSet<&'static str>>,
     pub transitions: StdMutex<Vec<String>>,
     pub inserts: AtomicU32,
+    pub video_polls: AtomicU32,
 }
 
 impl Default for YtState {
@@ -157,6 +158,7 @@ impl Default for YtState {
             fail: StdMutex::new(HashSet::new()),
             transitions: StdMutex::new(Vec::new()),
             inserts: AtomicU32::new(0),
+            video_polls: AtomicU32::new(0),
         }
     }
 }
@@ -293,6 +295,7 @@ pub(crate) async fn fake_youtube(state: Arc<YtState>) -> MockServer {
             if st.fails("video") {
                 return api_error("backendError");
             }
+            st.video_polls.fetch_add(1, Ordering::SeqCst);
             let video = st.video.lock().unwrap().clone();
             let upload = st.upload.lock().unwrap().clone();
             ResponseTemplate::new(200).set_body_json(
@@ -769,6 +772,34 @@ async fn a_stop_before_ready_fails_and_cleans_up() {
 
 #[path = "av_gate_driver_cleanup_tests.rs"]
 mod cleanup_tests;
+#[tokio::test]
+async fn live_is_never_sent_before_went_live_is_durable() {
+    let rig = FakeRig::default();
+    *rig.deliveries.lock().unwrap() = VecDeque::from([Ok(RigDelivery::Booting)]);
+    let h = Harness::with(rig, timings()).await;
+    assert!(matches!(
+        h.create("s1").await,
+        CreateOutcome::Created { .. }
+    ));
+    sqlx::query("ALTER TABLE av_gate_sessions RENAME TO av_gate_sessions_away")
+        .execute(&h.ctx.pool)
+        .await
+        .unwrap();
+    *h.rig.deliveries.lock().unwrap() = VecDeque::from([Ok(RigDelivery::Delivering)]);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        h.yt_state.transitions().is_empty(),
+        "the went_live save failed, so live must not be sent"
+    );
+    sqlx::query("ALTER TABLE av_gate_sessions_away RENAME TO av_gate_sessions")
+        .execute(&h.ctx.pool)
+        .await
+        .unwrap();
+    let row = h.wait_state("s1", SessionState::Ready).await;
+    assert!(row.went_live);
+    assert_eq!(h.yt_state.transitions(), vec!["live"]);
+}
+
 #[path = "av_gate_driver_create_tests.rs"]
 mod create_tests;
 #[path = "av_gate_driver_stop_tests.rs"]

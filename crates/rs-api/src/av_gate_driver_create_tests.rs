@@ -313,3 +313,27 @@ async fn a_low_project_bucket_refuses_the_session_and_frees_the_slot() {
     assert_eq!(ctx.registry.holder(), None);
     assert_eq!(h.yt_state.inserts.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_project_bucket_with_room_admits_the_session() {
+    static ROOMY: std::sync::OnceLock<rs_youtube::quota::QuotaTracker> = std::sync::OnceLock::new();
+    let h = Harness::new().await;
+    let base = h.fresh_ctx(timings());
+    base.registry.mark_reconciled();
+    let ctx = Arc::new(SessionCtx {
+        quota_bucket: Some(ROOMY.get_or_init(|| rs_youtube::quota::QuotaTracker::new(400))),
+        pool: base.pool.clone(),
+        audit_tx: base.audit_tx.clone(),
+        registry: Arc::clone(&base.registry),
+        rig: Arc::clone(&base.rig),
+        timings: timings(),
+        event_name: "E2E-Test".to_string(),
+        stream_title: "e2e rtmp".to_string(),
+        daily_quota_budget: 4_000,
+    });
+    let outcome = create_session(ctx, h.yt(), "s1".into(), "r".into(), "t".into()).await;
+    assert!(
+        matches!(outcome, CreateOutcome::Created { .. }),
+        "{outcome:?}"
+    );
+}

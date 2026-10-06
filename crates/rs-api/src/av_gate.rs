@@ -134,9 +134,23 @@ struct Active {
 pub struct AvGateRegistry {
     active: Mutex<Option<Active>>,
     reconciled: std::sync::atomic::AtomicBool,
+    /// Held while a cleanup retry round runs: the operator's force-clear must
+    /// not race it (the retry would save a stale row over the clear).
+    pub(crate) cleanup_round: tokio::sync::Mutex<()>,
+    /// Sessions whose VOD wait was resumed after a restart, so a restarted
+    /// maintenance loop does not resume one twice.
+    resumed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AvGateRegistry {
+    /// Record that `session_id`'s VOD wait was resumed. False if it already was.
+    pub fn mark_resumed(&self, session_id: &str) -> bool {
+        self.resumed
+            .lock()
+            .expect("av-gate registry poisoned")
+            .insert(session_id.to_string())
+    }
+
     /// Open the API: the boot reconcile finished.
     pub fn mark_reconciled(&self) {
         self.reconciled

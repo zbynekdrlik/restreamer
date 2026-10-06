@@ -121,6 +121,7 @@ fn the_view_carries_every_row_field() {
         went_live: true,
         cleanup_pending: true,
         broadcast_done: true,
+        event_stopped: true,
         event_done: false,
         vod_id: Some("v".to_string()),
         reason: Some("why".to_string()),

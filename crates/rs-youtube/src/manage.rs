@@ -480,15 +480,27 @@ impl ManageClient {
     }
 
     /// `status.lifeCycleStatus` of one broadcast, or `None` if it is gone.
-    /// Never refused by the project bucket: the teardown needs it to complete.
     pub async fn broadcast_life_cycle(&self, broadcast_id: &str) -> Result<Option<String>> {
+        self.life_cycle(broadcast_id, admit(units::LIST)).await
+    }
+
+    /// The same read for a teardown: never refused by the project bucket,
+    /// because the teardown needs it to complete a live broadcast.
+    pub async fn broadcast_life_cycle_for_teardown(
+        &self,
+        broadcast_id: &str,
+    ) -> Result<Option<String>> {
+        self.life_cycle(broadcast_id, forced(units::LIST)).await
+    }
+
+    async fn life_cycle(&self, broadcast_id: &str, cost: Cost) -> Result<Option<String>> {
         let v = self
             .call(
                 Method::GET,
                 "liveBroadcasts",
                 &[("part", "status"), ("id", broadcast_id)],
                 None,
-                forced(units::LIST),
+                cost,
             )
             .await?;
         Ok(v["items"][0]["status"]["lifeCycleStatus"]

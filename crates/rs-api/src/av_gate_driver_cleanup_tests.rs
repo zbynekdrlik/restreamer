@@ -139,27 +139,99 @@ async fn a_boot_reconcile_that_cannot_list_keeps_the_api_closed() {
     assert_eq!(retry_cleanups(&ctx, &h.clients()).await, 1);
 }
 
+fn stops(h: &Harness) -> usize {
+    h.rig
+        .calls()
+        .iter()
+        .filter(|c| **c == format!("stop:{EVENT}"))
+        .count()
+}
+
 #[tokio::test]
 async fn a_retry_never_stops_an_event_another_run_has_taken() {
     let rig = FakeRig::default();
     *rig.servers.lock().unwrap() = VecDeque::from([Ok(1)]);
     let h = Harness::with(rig, timings()).await;
     h.ready_session("s1").await;
-    stop_and_wait(&h, "s1", SessionState::Failed).await;
-    let stops = |h: &Harness| {
-        h.rig
-            .calls()
-            .iter()
-            .filter(|c| **c == format!("stop:{EVENT}"))
-            .count()
-    };
+    let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
+    assert!(row.event_stopped && !row.event_done, "{row:?}");
     assert_eq!(stops(&h), 1);
     h.rig.active.store(true, Ordering::SeqCst);
-    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 1);
+    let servers_before = h
+        .rig
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("servers:"))
+        .count();
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
     assert_eq!(stops(&h), 1, "an active event belongs to someone else now");
+    let servers_after = h
+        .rig
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("servers:"))
+        .count();
+    assert_eq!(servers_after, servers_before, "their servers are not ours");
     let row = h.row("s1").await;
-    assert!(row.cleanup_pending);
+    assert!(!row.cleanup_pending && row.event_done, "{row:?}");
     assert!(h.rig.called(&format!("active:{EVENT}")));
+}
+
+#[tokio::test]
+async fn a_retry_stops_its_own_event_whose_stop_never_succeeded() {
+    let rig = FakeRig::default();
+    *rig.stop.lock().unwrap() = Err("SQLITE_BUSY".to_string());
+    let h = Harness::with(rig, timings()).await;
+    h.ready_session("s1").await;
+    let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
+    assert!(row.cleanup_pending && !row.event_stopped, "{row:?}");
+    // Still active, because our stop failed: it is still ours.
+    h.rig.active.store(true, Ordering::SeqCst);
+    *h.rig.stop.lock().unwrap() = Ok(());
+    assert_eq!(retry_cleanups(&h.ctx, &h.clients()).await, 0);
+    assert_eq!(stops(&h), 2);
+    let row = h.row("s1").await;
+    assert!(row.event_stopped && row.event_done && !row.cleanup_pending);
+}
+
+#[tokio::test]
+async fn a_clear_waits_for_a_running_retry_round() {
+    let h = Harness::new().await;
+    seed(&h, "s1", "failed", false).await;
+    let mut row = h.row("s1").await;
+    row.cleanup_pending = true;
+    store::save(&h.ctx.pool, &row).await.unwrap();
+    let round = h.ctx.registry.cleanup_round.lock().await;
+    assert_eq!(
+        clear_cleanup(&h.ctx, "s1").await,
+        Ok(ClearOutcome::RetryRunning)
+    );
+    drop(round);
+    assert_eq!(clear_cleanup(&h.ctx, "s1").await, Ok(ClearOutcome::Cleared));
+}
+
+#[test]
+fn a_vod_wait_is_resumed_only_once() {
+    let r = AvGateRegistry::default();
+    assert!(r.mark_resumed("s1"));
+    assert!(!r.mark_resumed("s1"));
+    assert!(r.mark_resumed("s2"));
+}
+
+#[tokio::test]
+async fn a_second_boot_reconcile_does_not_start_a_second_vod_wait() {
+    let h = Harness::new().await;
+    seed(&h, "s1", "processing", true).await;
+    *h.yt_state.video.lock().unwrap() = "processing".to_string();
+    let ctx = h.fresh_ctx(AvGateTimings {
+        processing_poll: Duration::from_millis(200),
+        processing_timeout: Duration::from_secs(20),
+        ..timings()
+    });
+    reconcile_on_boot(&ctx, &h.clients()).await;
+    reconcile_on_boot(&ctx, &h.clients()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.yt_state.video_polls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

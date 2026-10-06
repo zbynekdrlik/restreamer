@@ -55,12 +55,15 @@ measurement.
   the broadcast if a live transition was ever attempted (`went_live` is persisted
   BEFORE the call), `stop-stream` the event, then poll Hetzner
   (`app=restreamer,client_uuid=<box>,event_id=<id>`) until 0. Each half that succeeds is
-  recorded (`broadcast_done`, `event_done`) and never repeated. A teardown with a
+  recorded (`broadcast_done`, `event_stopped`, `event_done`) and never repeated. A teardown with a
   problem sets `cleanup_pending`; the maintenance task (`run_av_gate_maintenance`:
   a supervisor around the loop, spawned by the runtime after the delivery reconcile)
-  retries only the missing half with backoff (5 min doubling, 2 h cap). **A retry never
-  stops an event that is active again**: the session is over, so an active `E2E-Test`
-  belongs to another run. Audit rows:
+  retries only the missing step with backoff (5 min doubling, 2 h cap). A stop that
+  never succeeded is retried (the active event is still ours); **once the stop
+  succeeded, an event that is active again belongs to another run**: the retry neither
+  stops it nor waits for its servers (anything of ours left has no live delivery row,
+  so the #352 orphan reaper deletes it). `live` is only sent after `went_live` was
+  saved. A force-clear during a retry round gets `409 retry_running`. Audit rows:
   `av_gate_session_{started,ready,stop_requested,processing,done,failed,reaped}`
   (`reaped.cause`: `idle_timeout`, `boot_reconcile`, `driver_died`, `cleanup_retry`,
   `operator_clear`).

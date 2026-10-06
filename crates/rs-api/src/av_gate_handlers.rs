@@ -314,6 +314,7 @@ pub async fn clear(
             Json(json!({ "session_id": id, "cleanup_pending": false })).into_response()
         }
         Ok(ClearOutcome::NotPending) => error(StatusCode::CONFLICT, "not_pending", id),
+        Ok(ClearOutcome::RetryRunning) => error(StatusCode::CONFLICT, "retry_running", id),
         Ok(ClearOutcome::NotFound) => error(StatusCode::NOT_FOUND, "not_found", id),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
     }
