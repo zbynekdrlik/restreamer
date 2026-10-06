@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { broadcast, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -37,46 +38,43 @@ test("Change Key on a live endpoint runs remove -> update -> re-add(Live)", asyn
   // Drive a live delivery with one endpoint whose alias matches a CONFIGURED
   // endpoint ("YouTube Main", id 1 in the mock's endpoints list) so the modal
   // can resolve the endpoint id for update_endpoint + re-add.
-  await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+  await waitForWsClient(page, request);
+  await broadcast(request, {
+    type: "DeliveryStatus",
     data: {
-      type: "DeliveryStatus",
-      data: {
-        instance_name: "rs-delivery-evt1",
-        status: "running",
-        server_ip: "1.2.3.4",
-        endpoint_count: 1,
-        endpoints: [
-          {
-            alias: "YouTube Main",
-            alive: true,
-            current_chunk_id: 142,
-            bytes_processed_total: 1073741824,
-            chunks_processed: 1847,
-            chunk_delay_secs: 3.2,
-            stall_reason: null,
-            ffmpeg_restart_count: 0,
-            last_error: null,
-            is_fast: false,
-            delivery_mode: "normal",
-            rescue_eta_secs: null,
-          },
-        ],
-      },
+      instance_name: "rs-delivery-evt1",
+      status: "running",
+      server_ip: "1.2.3.4",
+      endpoint_count: 1,
+      endpoints: [
+        {
+          alias: "YouTube Main",
+          alive: true,
+          current_chunk_id: 142,
+          bytes_processed_total: 1073741824,
+          chunks_processed: 1847,
+          chunk_delay_secs: 3.2,
+          stall_reason: null,
+          ffmpeg_restart_count: 0,
+          last_error: null,
+          is_fast: false,
+          delivery_mode: "normal",
+          rescue_eta_secs: null,
+        },
+      ],
     },
   });
-  await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+  await broadcast(request, {
+    type: "PipelineState",
     data: {
-      type: "PipelineState",
-      data: {
-        state: "streaming",
-        event_id: 1,
-        event_name: "test-event",
-        target_delay_secs: 120,
-        session_start: new Date().toISOString(),
-        local_buffer_chunks: 10,
-        s3_queue_chunks: 5,
-        cache_duration_secs: 118.0,
-      },
+      state: "streaming",
+      event_id: 1,
+      event_name: "test-event",
+      target_delay_secs: 120,
+      session_start: new Date().toISOString(),
+      local_buffer_chunks: 10,
+      s3_queue_chunks: 5,
+      cache_duration_secs: 118.0,
     },
   });
 

@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { broadcast, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -75,20 +76,19 @@ test("audit panel shows timestamps in browser-local time, not raw UTC", async ({
   await expect(page.locator(".audit-panel")).toBeVisible();
 
   const fixedTs = "2026-01-15T09:03:37.000Z";
-  await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+  await waitForWsClient(page, request);
+  await broadcast(request, {
+    type: "AuditAppended",
     data: {
-      type: "AuditAppended",
-      data: {
-        id: 999901,
-        ts: fixedTs,
-        source: "operator",
-        severity: "info",
-        event_id: null,
-        instance_id: null,
-        endpoint: null,
-        action: "tz_regression_probe",
-        detail: {},
-      },
+      id: 999901,
+      ts: fixedTs,
+      source: "operator",
+      severity: "info",
+      event_id: null,
+      instance_id: null,
+      endpoint: null,
+      action: "tz_regression_probe",
+      detail: {},
     },
   });
 
@@ -140,21 +140,20 @@ test("audit panel groups a repeat burst and un-groups when toggled off", async (
     "2026-01-15T08:00:20.000Z",
     "2026-01-15T08:00:40.000Z",
   ];
+  await waitForWsClient(page, request);
   for (let i = 0; i < burst.length; i++) {
-    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(request, {
+      type: "AuditAppended",
       data: {
-        type: "AuditAppended",
-        data: {
-          id: 770001 + i,
-          ts: burst[i],
-          source: "vps",
-          severity: "warn",
-          event_id: null,
-          instance_id: null,
-          endpoint: "FB-Zbynek",
-          action: "endpoint_rtmp_push_died",
-          detail: { lifetime_secs: 30 },
-        },
+        id: 770001 + i,
+        ts: burst[i],
+        source: "vps",
+        severity: "warn",
+        event_id: null,
+        instance_id: null,
+        endpoint: "FB-Zbynek",
+        action: "endpoint_rtmp_push_died",
+        detail: { lifetime_secs: 30 },
       },
     });
   }

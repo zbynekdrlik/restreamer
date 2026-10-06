@@ -1020,6 +1020,32 @@ jobs:
           done
           echo "OK: tauri.conf.json declares the bundled delivery binary + sha256 sidecar."
 
+      - name: "Verify frontend-e2e runs the ws-broadcast guard before Playwright (#377)"
+        run: |
+          # Structural check: parse the workflow, find the frontend-e2e job, and
+          # require a step (working-directory e2e) running BOTH the guard's
+          # self-test and its scan, placed before "Run Playwright tests".
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys, yaml
+          wf = yaml.safe_load(open(".github/workflows/ci.yml"))
+          steps = wf["jobs"]["frontend-e2e"]["steps"]
+          names = [s.get("name", "") for s in steps]
+          guard = [i for i, s in enumerate(steps)
+                   if s.get("working-directory") == "e2e"
+                   and "node check-ws-broadcast.js --self-test" in s.get("run", "")
+                   and any(l.strip() == "node check-ws-broadcast.js" for l in s.get("run", "").splitlines())]
+          if not guard:
+              sys.exit("ERROR: frontend-e2e must run e2e/check-ws-broadcast.js (--self-test + scan) (#377)")
+          if "Run Playwright tests" not in names:
+              sys.exit("ERROR: frontend-e2e has no 'Run Playwright tests' step")
+          if guard[0] > names.index("Run Playwright tests"):
+              sys.exit("ERROR: the ws-broadcast guard must run BEFORE Playwright (#377)")
+          if any(s.get("continue-on-error") for s in (steps[guard[0]], wf["jobs"]["frontend-e2e"])):
+              sys.exit("ERROR: the ws-broadcast guard must not be continue-on-error (#377)")
+          print("OK: frontend-e2e runs the ws-broadcast guard before Playwright.")
+          PY
+
       - name: "Verify deploy-stream-lan firewall opens RTMP 1234 (#363)"
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -1461,6 +1487,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: "Guard ws-broadcast goes through waitForWsClient (#377)"
+        working-directory: e2e
+        run: |
+          # The mock drops a broadcast that beats the page's WebSocket connect
+          # (1/160 flake, main run 37520022262). Self-test first (the guard
+          # must catch known-bad shapes), then scan every spec.
+          node check-ws-broadcast.js --self-test
+          node check-ws-broadcast.js
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

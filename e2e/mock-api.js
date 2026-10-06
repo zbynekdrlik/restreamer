@@ -1325,10 +1325,32 @@ app.post("/api/v1/_test/emit-metrics-sample", (req, res) => {
   res.json({ emitted: count });
 });
 
-// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests
+// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests.
+// Specs MUST NOT post here directly -- go through `broadcast()` in
+// e2e/lib/ws.ts after `waitForWsClient()` (#377; enforced by
+// e2e/check-ws-broadcast.js). A message sent before the page's socket is
+// connected is silently dropped.
 app.post("/api/v1/_test/ws-broadcast", (req, res) => {
-  broadcastWs(req.body);
-  res.json({ status: "ok" });
+  const delivered = broadcastWs(req.body);
+  console.log(`[ws] _test/ws-broadcast type=${req.body && req.body.type} delivered_to=${delivered}`);
+  res.json({ status: "ok", delivered });
+});
+
+// Test-only (#377): how many WebSocket clients can safely receive a
+// `_test/ws-broadcast` right now. `count` = OPEN clients whose connect-time
+// snapshot (sent 200 ms after `connection`, see wss.on("connection")) has
+// already gone out -- broadcasting before that would let the late snapshot
+// overwrite the test's message. `open` = every OPEN socket (diagnostics).
+app.get("/api/v1/_test/ws-clients", (_req, res) => {
+  let open = 0;
+  let ready = 0;
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      open += 1;
+      if (client.snapshotSent) ready += 1;
+    }
+  });
+  res.json({ count: ready, open });
 });
 
 // Test-only: simulate VPS disconnect — cache bar drains at real-time rate
@@ -1383,14 +1405,18 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
 
-// Broadcast a message to all connected WebSocket clients
+// Broadcast a message to all connected WebSocket clients. Returns how many
+// clients it was sent to (0 = the message was dropped on the floor).
 function broadcastWs(message) {
   const data = JSON.stringify(message);
+  let delivered = 0;
   wss.clients.forEach((client) => {
     if (client.readyState === 1) {
       client.send(data);
+      delivered += 1;
     }
   });
+  return delivered;
 }
 
 wss.on("connection", (ws) => {
@@ -1508,6 +1534,10 @@ wss.on("connection", (ws) => {
       if (pipelineData) {
         ws.send(JSON.stringify({ type: "PipelineState", data: pipelineData }));
       }
+      // #377: from here on a `_test/ws-broadcast` can no longer be
+      // overwritten by this connect-time snapshot -- /_test/ws-clients
+      // counts this client as ready.
+      ws.snapshotSent = true;
     }
   }, 200);
 

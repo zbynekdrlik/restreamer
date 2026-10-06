@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { broadcast, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -69,14 +70,13 @@ test("RtmpBindFailed WebSocket event raises the banner instantly (no poll wait)"
   const banner = page.locator('[data-testid="rtmp-bind-error-banner"]');
   await expect(banner).toHaveCount(0);
 
-  await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+  await waitForWsClient(page, request);
+  await broadcast(request, {
+    type: "RtmpBindFailed",
     data: {
-      type: "RtmpBindFailed",
-      data: {
-        port: 1234,
-        error:
-          "Port 1234 is already in use by another process. RTMP streaming will not work until the conflict is resolved.",
-      },
+      port: 1234,
+      error:
+        "Port 1234 is already in use by another process. RTMP streaming will not work until the conflict is resolved.",
     },
   });
 
