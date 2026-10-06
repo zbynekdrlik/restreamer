@@ -139,6 +139,54 @@ fn ttl_is_short_when_not_good() {
     assert_eq!(ttl_for_fb_health(&bad), std::time::Duration::from_secs(15));
 }
 
+/// "good" needs BOTH a positive bitrate and a positive frame rate: a LIVE
+/// object with only one of them, or a zero, is FB measuring no media (#166).
+#[test]
+fn good_needs_both_bitrate_and_framerate_positive() {
+    let live = |bitrate: f64, framerate: f64| {
+        format!(
+            r#"{{ "data": [{{ "id": "8", "status": "LIVE",
+              "ingest_streams": {{ "data": [{{ "is_master": true,
+                "stream_health": {{ "video_bitrate": {bitrate:.1}, "video_framerate": {framerate:.1} }} }}]}}
+            }}]}}"#
+        )
+    };
+    assert_eq!(
+        classify_fb_health(&videos_from(&live(2500000.0, 30.0))).health,
+        "good"
+    );
+    assert_eq!(
+        classify_fb_health(&videos_from(&live(2500000.0, 0.0))).health,
+        "bad"
+    );
+    assert_eq!(
+        classify_fb_health(&videos_from(&live(0.0, 30.0))).health,
+        "bad"
+    );
+}
+
+/// A half-configured probe (token without page, or page without token) is
+/// still "unconfigured": it never reaches the Graph API.
+#[tokio::test]
+async fn attach_surfaces_unconfigured_when_only_one_credential_is_set() {
+    for (token, page) in [("tok", ""), ("", "163104934022649"), ("tok", "  ")] {
+        let fb = rs_core::config::FacebookConfig {
+            enabled: true,
+            page_id: page.into(),
+            page_access_token: token.into(),
+            api_version: "v21.0".into(),
+        };
+        let mut m = super::test_metrics();
+        attach_fb_health(&fb, &mut m).await;
+        let h = m.facebook_health.unwrap();
+        assert_eq!(
+            h.error.as_deref(),
+            Some("fb_not_configured"),
+            "token={token:?} page={page:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn attach_surfaces_unconfigured_when_token_or_page_empty() {
     // attach_fb_health is reached only when enabled; an empty token/page then is
@@ -244,4 +292,40 @@ async fn expired_token_maps_to_oauth_invalid() {
     let h = m.facebook_health.unwrap();
     assert_eq!(h.health, "unknown");
     assert_eq!(h.error.as_deref(), Some("oauth_invalid"));
+}
+
+/// Graph's `error.code` decides the reason (#166 review): 10 and 200-299 are
+/// a missing permission, 4/17/32/613 a rate limit, anything else a generic
+/// API error. One mock server per code, all on the HTTP 400 Graph uses.
+#[tokio::test]
+async fn graph_error_codes_map_to_permission_rate_limit_or_api_error() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _guard = FB_ENV_LOCK.lock().await;
+    let cases = [
+        (10, "permission"),
+        (200, "permission"),
+        (299, "permission"),
+        (4, "rate_limited"),
+        (17, "rate_limited"),
+        (32, "rate_limited"),
+        (613, "rate_limited"),
+        (100, "fb_api_error"),
+    ];
+    for (code, reason) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v21.0/163104934022649/live_videos"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "message": "graph error", "code": code }
+            })))
+            .mount(&server)
+            .await;
+        let fb = fb_cfg(&server.uri());
+        let mut m = super::test_metrics();
+        attach_fb_health(&fb, &mut m).await;
+        let h = m.facebook_health.unwrap();
+        assert_eq!(h.error.as_deref(), Some(reason), "Graph error code {code}");
+    }
+    unsafe { std::env::remove_var("FB_GRAPH_API_BASE") };
 }

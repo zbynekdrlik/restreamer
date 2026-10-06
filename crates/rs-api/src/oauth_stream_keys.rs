@@ -150,7 +150,7 @@ async fn build_map(pool: &sqlx::SqlitePool) -> (Vec<OauthStreamKeys>, bool) {
 /// The grant→names map, TTL-cached to bound YouTube quota.
 async fn cached_map(pool: &sqlx::SqlitePool) -> (Vec<OauthStreamKeys>, bool) {
     if let Some((at, map, ok)) = cache_lock().as_ref() {
-        if at.elapsed() < CACHE_TTL {
+        if crate::cache_ttl::is_fresh(at.elapsed(), CACHE_TTL) {
             return (map.clone(), *ok);
         }
     }
@@ -182,3 +182,7 @@ pub async fn endpoint_oauth_suggest(
         probed_ok,
     }))
 }
+
+#[cfg(test)]
+#[path = "oauth_stream_keys_probe_tests.rs"]
+mod probe_tests;

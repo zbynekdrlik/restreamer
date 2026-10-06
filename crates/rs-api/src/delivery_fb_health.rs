@@ -230,7 +230,7 @@ pub async fn attach_fb_health_cached(
     let prior_health: Option<String> = if let Some(entry) = fb_health_cache().get(&endpoint_id) {
         let (when, h) = entry.value().clone();
         let age = when.elapsed();
-        if age < ttl_for_fb_health(&h) {
+        if crate::cache_ttl::is_fresh(age, ttl_for_fb_health(&h)) {
             let mut aged = h;
             aged.age_secs = age.as_secs() as i64;
             metrics.facebook_health = Some(aged);

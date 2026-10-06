@@ -2,6 +2,7 @@ pub mod access;
 #[cfg(test)]
 mod access_tests;
 pub mod audit_handlers;
+pub(crate) mod cache_ttl;
 pub mod clock_skew_probe;
 #[cfg(test)]
 mod config_redaction_tests;
@@ -39,6 +40,8 @@ pub mod facebook;
 #[cfg(test)]
 mod facebook_tests;
 pub mod handlers;
+#[cfg(test)]
+mod handlers_crud_tests;
 pub mod internet_probe;
 pub mod metrics_handlers;
 pub mod oauth_device;
