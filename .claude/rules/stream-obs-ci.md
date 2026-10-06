@@ -159,6 +159,11 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     streams again (a lost StopStream plus an OBS reconnect). It never gives up while the
     stream is ours, because a crash gate may have Restreamer down. It keeps its heartbeat.
     A confirmed `-Action Stop` (owned=false) or the teardown ends it.
+  - **A deliberate exception to "a session that is not ours is never stopped" (#374).**
+    Between the watchdog's own confirmed stop and the job's OBS Stop step, owned stays
+    true. Any `streaming:true` in that window is stopped again. That includes a session
+    camera-box starts there, because Restreamer's status cannot tell a reconnect from a new
+    session. Copyright wins: the CI event may still be delivering to a platform.
   - An unreachable, stale or malformed read is re-read once after 2 s. A FOREIGN or UNKNOWN
     verdict trips at once.
   - A dead watchdog fails the assert, and so does a hung one: a heartbeat older than

@@ -245,6 +245,9 @@ function Test-ProgramAudioObsStopped {
 # watching while the stream is ours: a lost StopStream or an OBS reconnect can put it
 # back on air, and then the stop is re-issued. Never gives up while our stream is
 # ours; the heartbeat keeps proving the watchdog is alive, the teardown ends it.
+# Deliberate #374 exception: until obs-stream.ps1 marks our stream over, a session
+# camera-box starts meanwhile is stopped too (Restreamer's status cannot tell it from
+# our reconnect, and the CI event may still be delivering to a platform).
 function Invoke-ProgramAudioBreachStop {
   $p = Get-ProgramAudioPaths
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
