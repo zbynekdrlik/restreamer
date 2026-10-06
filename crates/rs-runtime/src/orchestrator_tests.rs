@@ -50,3 +50,69 @@ async fn service_core_with_pool_uses_same_pool_instance() {
     assert!(profile.is_some(), "Should find test data in provided pool");
     assert_eq!(profile.unwrap().user_uuid, "test-client-uuid");
 }
+
+/// #106: the bind-retry wait doubles to the 30 s cap; a restart request
+/// starts the next conflict over at 2 s.
+#[test]
+fn bind_backoff_doubles_to_the_cap_and_a_restart_starts_over() {
+    assert_eq!(next_bind_backoff(2, false), 4);
+    assert_eq!(next_bind_backoff(4, false), 8);
+    assert_eq!(next_bind_backoff(16, false), MAX_BIND_BACKOFF_SECS);
+    assert_eq!(next_bind_backoff(30, false), MAX_BIND_BACKOFF_SECS);
+    assert_eq!(next_bind_backoff(8, true), INITIAL_BIND_BACKOFF_SECS);
+}
+
+async fn eventually(what: &str, mut ok: impl AsyncFnMut() -> bool) {
+    for _ in 0..500 {
+        if ok().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out after 10 s waiting until {what}");
+}
+
+/// #106 end to end. While another socket holds the RTMP port, the inpoint
+/// loop records the bind error and keeps waiting: a conflict never ends it.
+/// A restart request re-probes at once, and once the port is free the RTMP
+/// server really listens on it. Shutdown then ends the loop.
+#[tokio::test]
+async fn inpoint_loop_waits_out_a_port_conflict_then_serves_rtmp() {
+    let hog = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = hog.local_addr().unwrap().port();
+    let inpoint_state = InpointState::new();
+    let (ws_tx, _ws_rx) = broadcast::channel(16);
+    let (restart_tx, restart_rx) = mpsc::channel(4);
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let task = tokio::spawn(run_inpoint_loop(
+        "127.0.0.1".into(),
+        port,
+        Arc::new(FlvChunkSink::new_null()),
+        inpoint_state.clone(),
+        ws_tx,
+        restart_rx,
+        shutdown_rx,
+    ));
+
+    eventually("the bind conflict is recorded", async || {
+        inpoint_state.bind_error().is_some()
+    })
+    .await;
+    assert!(!task.is_finished(), "a port conflict never ends the loop");
+
+    drop(hog);
+    restart_tx.send(()).await.unwrap();
+    eventually("the RTMP server listens on the freed port", async || {
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+    })
+    .await;
+    assert_eq!(inpoint_state.bind_error(), None, "the recovery clears it");
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("shutdown ends the inpoint loop")
+        .expect("the inpoint loop must not panic");
+}

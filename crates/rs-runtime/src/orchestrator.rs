@@ -668,6 +668,21 @@ impl ServiceCore {
     }
 }
 
+/// The first RTMP bind-retry wait, and its cap (#106).
+const INITIAL_BIND_BACKOFF_SECS: u64 = 2;
+const MAX_BIND_BACKOFF_SECS: u64 = 30;
+
+/// The bind-retry wait after the one just served (#106): doubles up to
+/// [`MAX_BIND_BACKOFF_SECS`]. A restart request re-probes at once, so the
+/// next conflict starts fresh at [`INITIAL_BIND_BACKOFF_SECS`].
+fn next_bind_backoff(current_secs: u64, was_restart: bool) -> u64 {
+    if was_restart {
+        INITIAL_BIND_BACKOFF_SECS
+    } else {
+        (current_secs * 2).min(MAX_BIND_BACKOFF_SECS)
+    }
+}
+
 /// Run the RTMP inpoint server with restart support.
 ///
 /// Each iteration first PROBES the RTMP port (#106): if it cannot bind, the
@@ -689,9 +704,8 @@ async fn run_inpoint_loop(
 ) {
     let mut consecutive_crashes: u32 = 0;
     let mut last_connected = false;
-    let mut bind_backoff_secs: u64 = 2;
+    let mut bind_backoff_secs = INITIAL_BIND_BACKOFF_SECS;
     const MAX_CONSECUTIVE_CRASHES: u32 = 10;
-    const MAX_BIND_BACKOFF_SECS: u64 = 30;
 
     loop {
         // #106: probe the RTMP port BEFORE starting xiu. A bind conflict used
@@ -731,17 +745,11 @@ async fn run_inpoint_loop(
             if !bind_wait {
                 break;
             }
-            if was_restart {
-                // A restart request re-probes immediately without consuming a
-                // doubling step — start the next conflict backoff fresh at 2s.
-                bind_backoff_secs = 2;
-            } else {
-                bind_backoff_secs = (bind_backoff_secs * 2).min(MAX_BIND_BACKOFF_SECS);
-            }
+            bind_backoff_secs = next_bind_backoff(bind_backoff_secs, was_restart);
             continue;
         }
         // Port is free — reset the bind backoff for the next conflict.
-        bind_backoff_secs = 2;
+        bind_backoff_secs = INITIAL_BIND_BACKOFF_SECS;
 
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
