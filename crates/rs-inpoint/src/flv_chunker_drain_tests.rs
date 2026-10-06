@@ -43,20 +43,39 @@ async fn gives_up_after_the_limit() {
 }
 
 /// A wall clock frozen at one instant, so chunk file names are known.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct FixedClock;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl WallClock for FixedClock {
     fn now_ms(&self) -> i64 {
         1_000
     }
 }
 
+/// Opens the FIFO's read end WITHOUT blocking when dropped, so a writer
+/// still blocked in `open()` is always released, even when the test fails
+/// before its reader started. Otherwise the test runtime's shutdown waits
+/// forever for that blocking write (a TIMEOUT under a mutant, not a failure).
+#[cfg(target_os = "linux")]
+struct ReleaseFifo(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Drop for ReleaseFifo {
+    fn drop(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        const O_NONBLOCK: i32 = 0o4000; // Linux
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NONBLOCK)
+            .open(&self.0);
+    }
+}
+
 /// A REAL background write in flight: the first chunk's file is a FIFO, so
 /// the write blocks until a reader opens it. `wait_for_writes` counts it as
 /// pending until it has written AND reported the chunk.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_blocked_on_its_file_is_pending_until_it_reports() {
     let dir = tempfile::tempdir().unwrap();
@@ -66,6 +85,7 @@ async fn a_write_blocked_on_its_file_is_pending_until_it_reports() {
         .status()
         .expect("run mkfifo");
     assert!(made.success(), "mkfifo {fifo:?}");
+    let _release = ReleaseFifo(fifo.clone());
     let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(10))
         .with_wall_clock(Arc::new(FixedClock));
     let mut reports = sink.subscribe();
@@ -80,10 +100,12 @@ async fn a_write_blocked_on_its_file_is_pending_until_it_reports() {
         1,
         "the write blocked on the FIFO is still pending"
     );
-    let reader = tokio::task::spawn_blocking(move || std::fs::read(&fifo));
+    // A plain thread, not spawn_blocking: it runs even if the test fails
+    // below and its runtime starts shutting down.
+    let reader = std::thread::spawn(move || std::fs::read(&fifo));
     assert_eq!(sink.wait_for_writes(Duration::from_secs(10)).await, 0);
     let chunk = reports.try_recv().expect("the write reported its chunk");
     assert_eq!(chunk.index, 0);
-    let written = reader.await.unwrap().expect("read the FIFO");
+    let written = reader.join().unwrap().expect("read the FIFO");
     assert_eq!(written.len(), chunk.size);
 }
