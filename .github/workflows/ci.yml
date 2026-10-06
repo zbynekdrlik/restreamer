@@ -1043,6 +1043,8 @@ jobs:
               sys.exit("ERROR: the ws-broadcast guard must run BEFORE Playwright (#377)")
           if any(s.get("continue-on-error") for s in (steps[guard[0]], wf["jobs"]["frontend-e2e"])):
               sys.exit("ERROR: the ws-broadcast guard must not be continue-on-error (#377)")
+          if "if" in steps[guard[0]]:
+              sys.exit("ERROR: the ws-broadcast guard step must run unconditionally (no if:) (#377)")
           print("OK: frontend-e2e runs the ws-broadcast guard before Playwright.")
           PY
 
