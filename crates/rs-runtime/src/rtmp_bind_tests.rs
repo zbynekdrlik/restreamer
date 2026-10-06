@@ -156,3 +156,14 @@ fn tasklist_csv_parses_to_the_image_name() {
     );
     assert_eq!(format_holder("5512", None), "PID 5512");
 }
+
+/// #106: the bind-retry wait doubles to the 30 s cap; a restart request
+/// starts the next conflict over at 2 s.
+#[test]
+fn bind_backoff_doubles_to_the_cap_and_a_restart_starts_over() {
+    assert_eq!(next_bind_backoff(2, false), 4);
+    assert_eq!(next_bind_backoff(4, false), 8);
+    assert_eq!(next_bind_backoff(16, false), MAX_BIND_BACKOFF_SECS);
+    assert_eq!(next_bind_backoff(30, false), MAX_BIND_BACKOFF_SECS);
+    assert_eq!(next_bind_backoff(8, true), INITIAL_BIND_BACKOFF_SECS);
+}

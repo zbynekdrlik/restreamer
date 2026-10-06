@@ -804,13 +804,14 @@ mod fast_upload_gap_regression {
         // 8s — is what proves the anchor is the last-real-chunk 6s value, not
         // the raw 8s threshold (never slower than before #124, never later).
         advance_in_steps(Duration::from_millis(200), 4).await; // → ~6.6s total
-        // Bounded: a keepalive that never escalates keeps pushing freeze
-        // frames forever, so an unbounded await would hang the test (a
-        // cargo-mutants TIMEOUT, #367) instead of failing it.
-        let outcome = tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("the bridge must have escalated by ~6.6s, not keep freezing")
-            .expect("keepalive task panicked");
+        // Checked on the paused clock HERE: an await (even a bounded one)
+        // would let the runtime auto-advance past 8 s, and a stale 8 s anchor
+        // would pass (#367 review).
+        assert!(
+            task.is_finished(),
+            "the bridge must have escalated by ~6.6s (the 6s anchor), not keep freezing"
+        );
+        let outcome = task.await.expect("keepalive task panicked");
         match outcome {
             KeepaliveOutcome::EscalateToRescue => {}
             KeepaliveOutcome::Chunk(_) => panic!(

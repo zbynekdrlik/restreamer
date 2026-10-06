@@ -400,6 +400,7 @@ fn retry_backoff_is_base_times_three_to_the_attempt_capped() {
     assert_eq!(retry_backoff(s(1), 4), s(27));
     assert_eq!(retry_backoff(s(1), 5), MAX_BACKOFF);
     assert_eq!(retry_backoff(s(1), u32::MAX), MAX_BACKOFF);
+    assert_eq!(retry_backoff(s(1), 0), s(1), "attempt 0 cannot underflow");
     assert_eq!(
         retry_backoff(Duration::from_millis(10), 2),
         Duration::from_millis(30)
@@ -410,23 +411,37 @@ fn retry_backoff_is_base_times_three_to_the_attempt_capped() {
 /// error in none of them (a builder error, a redirect loop) is not.
 #[test]
 fn every_transport_error_class_is_transient_on_its_own() {
+    let none = TransportClass::default();
+    assert!(!none.is_transient());
+    let only = |c: TransportClass| c.is_transient();
     assert!(
-        transport_error_is_transient(true, false, false, false),
+        only(TransportClass {
+            timeout: true,
+            ..none
+        }),
         "timeout"
     );
     assert!(
-        transport_error_is_transient(false, true, false, false),
+        only(TransportClass {
+            connect: true,
+            ..none
+        }),
         "connect"
     );
     assert!(
-        transport_error_is_transient(false, false, true, false),
+        only(TransportClass {
+            request: true,
+            ..none
+        }),
         "request"
     );
     assert!(
-        transport_error_is_transient(false, false, false, true),
+        only(TransportClass {
+            decode: true,
+            ..none
+        }),
         "decode"
     );
-    assert!(!transport_error_is_transient(false, false, false, false));
 }
 
 /// Only a 409 is the "name already taken" adoption signal; a 5xx or a

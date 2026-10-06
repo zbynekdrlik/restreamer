@@ -11,9 +11,6 @@ const VERSION: &str = "9.9.9";
 const RELEASE_BYTES: &[u8] = b"release-binary-bytes";
 const BUNDLED_BYTES: &[u8] = b"bundled-binary-bytes";
 
-/// `RESTREAMER_RELEASE_BASE_URL` is process-global; serialize its users.
-static RELEASE_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 fn config_for(s3: &MockServer) -> rs_core::config::Config {
     let mut cfg = rs_core::config::Config::for_testing();
     cfg.s3.endpoint = s3.uri();
@@ -41,7 +38,7 @@ async fn bucket(head_status: u16, uploads: u64) -> MockServer {
 }
 
 /// The GitHub release: the binary and its `.sha256` sidecar. Points
-/// `RESTREAMER_RELEASE_BASE_URL` at it.
+/// the test release-base override (`TEST_RELEASE_BASE_ENV`) at it.
 async fn release() -> MockServer {
     let server = MockServer::start().await;
     let asset = format!("/restreamer-v{VERSION}/rs-delivery-{VERSION}-linux-amd64");
@@ -60,7 +57,7 @@ async fn release() -> MockServer {
         .await;
     unsafe {
         std::env::set_var(
-            "RESTREAMER_RELEASE_BASE_URL",
+            TEST_RELEASE_BASE_ENV,
             format!("{}/restreamer-v", server.uri()),
         )
     };
@@ -81,7 +78,7 @@ fn bundled(dir: &std::path::Path, sidecar_sha: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn a_present_versioned_key_needs_no_upload() {
-    let _env = RELEASE_ENV.lock().await;
+    let _env = RELEASE_ENV_LOCK.lock().await;
     let s3 = bucket(200, 0).await;
     let got = ensure_bucket_binary(&config_for(&s3), VERSION)
         .await
@@ -93,18 +90,18 @@ async fn a_present_versioned_key_needs_no_upload() {
 /// none) is filled from the sha-verified GitHub release.
 #[tokio::test]
 async fn a_missing_key_is_filled_from_the_verified_release() {
-    let _env = RELEASE_ENV.lock().await;
+    let _env = RELEASE_ENV_LOCK.lock().await;
     let s3 = bucket(404, 1).await;
     let _gh = release().await;
     let got = ensure_bucket_binary(&config_for(&s3), VERSION).await;
-    unsafe { std::env::remove_var("RESTREAMER_RELEASE_BASE_URL") };
+    unsafe { std::env::remove_var(TEST_RELEASE_BASE_ENV) };
     assert_eq!(got.unwrap(), Some(sha256_hex(RELEASE_BYTES)));
 }
 
 /// A release whose `.sha256` does not match its bytes is never uploaded.
 #[tokio::test]
 async fn a_release_with_a_wrong_sidecar_is_refused() {
-    let _env = RELEASE_ENV.lock().await;
+    let _env = RELEASE_ENV_LOCK.lock().await;
     let s3 = bucket(404, 0).await;
     let gh = MockServer::start().await;
     let asset = format!("/restreamer-v{VERSION}/rs-delivery-{VERSION}-linux-amd64");
@@ -121,14 +118,9 @@ async fn a_release_with_a_wrong_sidecar_is_refused() {
         )
         .mount(&gh)
         .await;
-    unsafe {
-        std::env::set_var(
-            "RESTREAMER_RELEASE_BASE_URL",
-            format!("{}/restreamer-v", gh.uri()),
-        )
-    };
+    unsafe { std::env::set_var(TEST_RELEASE_BASE_ENV, format!("{}/restreamer-v", gh.uri())) };
     let got = upload_release_binary(&config_for(&s3), VERSION).await;
-    unsafe { std::env::remove_var("RESTREAMER_RELEASE_BASE_URL") };
+    unsafe { std::env::remove_var(TEST_RELEASE_BASE_ENV) };
     let err = got.expect_err("a sha mismatch must not upload");
     assert!(err.to_string().contains("sha256 mismatch"), "{err}");
 }

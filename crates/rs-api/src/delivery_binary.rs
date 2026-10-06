@@ -90,12 +90,29 @@ enum BinarySource {
     GitHubRelease(String),
 }
 
-/// The release-asset URL prefix: [`RELEASE_BASE`], or the
-/// `RESTREAMER_RELEASE_BASE_URL` override (tests point it at a mock server,
-/// like `FB_GRAPH_API_BASE` / `YOUTUBE_API_BASE`).
+/// The release-asset URL prefix: always [`RELEASE_BASE`] in a real build.
+///
+/// Only a TEST build reads [`TEST_RELEASE_BASE_ENV`], to point the download at
+/// a mock server. A production override must not exist: the binary's sha256
+/// sidecar comes from the same server, so whoever sets the variable would
+/// choose the code the delivery VPS runs (#367 review).
 fn release_base() -> String {
-    std::env::var("RESTREAMER_RELEASE_BASE_URL").unwrap_or_else(|_| RELEASE_BASE.to_string())
+    #[cfg(test)]
+    {
+        if let Ok(base) = std::env::var(TEST_RELEASE_BASE_ENV) {
+            return base;
+        }
+    }
+    RELEASE_BASE.to_string()
 }
+
+/// The test-only release base override, and the lock every test that sets or
+/// reads it takes: `cargo test` runs a crate's tests as threads of one
+/// process, so an unlocked reader could see another test's mock URL.
+#[cfg(test)]
+const TEST_RELEASE_BASE_ENV: &str = "RESTREAMER_RELEASE_BASE_URL";
+#[cfg(test)]
+static RELEASE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// GitHub release URL of the `rs-delivery-{version}-linux-amd64` asset — the
 /// single derivation used by both the fallback source and the download.
@@ -633,6 +650,10 @@ mod tests {
     #[test]
     fn resolve_binary_source_github_when_no_bundle() {
         // No bundle available (dev build / older install) → GitHub fallback.
+        // Hold the env lock and clear the test override, so a concurrent
+        // io_tests mock URL can never leak in (#367 review).
+        let _env = RELEASE_ENV_LOCK.blocking_lock();
+        unsafe { std::env::remove_var(TEST_RELEASE_BASE_ENV) };
         match resolve_binary_source(None, "0.29.25") {
             BinarySource::GitHubRelease(url) => {
                 assert!(url.contains("github.com"), "url was {url}");

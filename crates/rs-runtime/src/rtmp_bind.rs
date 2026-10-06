@@ -17,6 +17,21 @@ use rs_core::models::{InpointState, WsEvent};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
+/// The first RTMP bind-retry wait, and its cap (#106).
+pub(crate) const INITIAL_BIND_BACKOFF_SECS: u64 = 2;
+pub(crate) const MAX_BIND_BACKOFF_SECS: u64 = 30;
+
+/// The bind-retry wait after the one just served (#106): doubles up to
+/// [`MAX_BIND_BACKOFF_SECS`]. A restart request re-probes at once, so the
+/// next conflict starts fresh at [`INITIAL_BIND_BACKOFF_SECS`].
+pub(crate) fn next_bind_backoff(current_secs: u64, was_restart: bool) -> u64 {
+    if was_restart {
+        INITIAL_BIND_BACKOFF_SECS
+    } else {
+        (current_secs * 2).min(MAX_BIND_BACKOFF_SECS)
+    }
+}
+
 /// Probe whether `bind:port` can be bound for the RTMP listener, recording the
 /// outcome on the shared `InpointState` (#106).
 ///

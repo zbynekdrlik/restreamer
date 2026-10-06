@@ -39,9 +39,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The sleep before retry number `attempt` (1-based: the first failed attempt
 /// is 1): `base * 3^(attempt-1)`, i.e. 1 s, 3 s, 9 s with the 1 s default,
 /// capped at [`MAX_BACKOFF`]. `saturating_*` so a large operator-supplied
-/// `max_attempts` can never overflow (#223 S1).
+/// `max_attempts` can never overflow (#223 S1), and attempt 0 cannot
+/// underflow.
 fn retry_backoff(base: Duration, attempt: u32) -> Duration {
-    base.saturating_mul(3u32.saturating_pow(attempt - 1))
+    base.saturating_mul(3u32.saturating_pow(attempt.saturating_sub(1)))
         .min(MAX_BACKOFF)
 }
 
@@ -61,23 +62,38 @@ fn retry_backoff(base: Duration, attempt: u32) -> Duration {
 /// surfaced immediately.
 fn is_transient(err: &CloudError) -> bool {
     match err {
-        CloudError::Http(e) => transport_error_is_transient(
-            e.is_timeout(),
-            e.is_connect(),
-            e.is_request(),
-            e.is_decode(),
-        ),
+        CloudError::Http(e) => TransportClass::of(e).is_transient(),
         CloudError::Api { status, .. } => *status == 429 || *status == 409 || *status >= 500,
         _ => false,
     }
 }
 
-/// The transport half of [`is_transient`], over reqwest's error-class flags:
-/// ANY of the four classes is retried. reqwest sets several flags at once
-/// (a refused connection is both `connect` and `request`), so the classes
-/// are tested one by one here rather than through real errors (#367).
-fn transport_error_is_transient(timeout: bool, connect: bool, request: bool, decode: bool) -> bool {
-    timeout || connect || request || decode
+/// The reqwest error classes the transport half of [`is_transient`] looks
+/// at. reqwest sets several at once (a refused connection is both `connect`
+/// and `request`), so the retry rule is tested class by class on this value
+/// rather than through real errors (#367).
+#[derive(Debug, Clone, Copy, Default)]
+struct TransportClass {
+    timeout: bool,
+    connect: bool,
+    request: bool,
+    decode: bool,
+}
+
+impl TransportClass {
+    fn of(e: &reqwest::Error) -> Self {
+        Self {
+            timeout: e.is_timeout(),
+            connect: e.is_connect(),
+            request: e.is_request(),
+            decode: e.is_decode(),
+        }
+    }
+
+    /// ANY of the four classes is a transient transport failure.
+    fn is_transient(self) -> bool {
+        self.timeout || self.connect || self.request || self.decode
+    }
 }
 
 /// `true` when `err` is the Hetzner `409` name-conflict — the definitive
@@ -281,10 +297,11 @@ impl HetznerClient {
         self
     }
 
-    /// Override the HTTP timeouts (production: [`CONNECT_TIMEOUT`] /
-    /// [`REQUEST_TIMEOUT`]). Tests use ~0.3 s so a stalled Hetzner response
-    /// surfaces as a timeout in a fraction of a second.
-    pub fn with_timeouts(mut self, connect_timeout: Duration, request_timeout: Duration) -> Self {
+    /// Test-only: override the HTTP timeouts (production always uses
+    /// [`CONNECT_TIMEOUT`] / [`REQUEST_TIMEOUT`]), so a stalled Hetzner
+    /// response surfaces as a timeout in a fraction of a second.
+    #[cfg(test)]
+    fn with_timeouts(mut self, connect_timeout: Duration, request_timeout: Duration) -> Self {
         self.client = Self::build_client(connect_timeout, request_timeout);
         self
     }

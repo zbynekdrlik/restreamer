@@ -278,15 +278,17 @@ jobs:
           # rs-delivery mutants then still fit the cap.
           MUTANTS_PER_SHARD=20
           # 64 shards x MUTANTS_PER_SHARD mutants is the most one PR may carry.
-          # A bigger diff is a dev branch that was not merged for weeks: split
-          # it, never widen the shards.
+          # A bigger diff is a dev branch that was not released for weeks:
+          # release dev -> main more often; never widen the shards. If a
+          # release genuinely needs more, MAX_SHARDS may rise to 256 (the
+          # GitHub matrix limit) -- the guard allows it.
           MAX_SHARDS=64
           TOTAL=$(( (COUNT + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
           if [ "$TOTAL" -lt 1 ]; then
             TOTAL=1
           fi
           if [ "$TOTAL" -gt "$MAX_SHARDS" ]; then
-            echo "::error::$COUNT mutants need $TOTAL shards; the cap is $MAX_SHARDS. Split this PR."
+            echo "::error::$COUNT mutants need $TOTAL shards; the cap is $MAX_SHARDS. Release dev to main in smaller steps (or raise MAX_SHARDS, at most 256)."
             exit 1
           fi
           SHARDS=$(python3 -c 'import json, sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$TOTAL")
@@ -389,7 +391,9 @@ jobs:
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
-        if: failure()
+        # cancelled() too: a shard killed by timeout-minutes is cancelled,
+        # and its partial report is what shows which mutants were slow.
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: mutants-report-shard-${{ matrix.shard }}
@@ -1102,7 +1106,8 @@ jobs:
           # rejected --jobs with --in-place, and a Rust CI Gate that passed a
           # failed mutation job with a WARN. Then, once real, it ran > 3 h on
           # one runner (.claude/rules/ci-mutation-gate.md). This step parses
-          # the workflow and the two configs, so none of that can come back.
+          # the workflow and the two configs and fails on every known way back
+          # to an unbounded or fake-green gate.
           # It only reads jobs that RUN cargo-mutants (no line of this step
           # starts with that command), so it never matches itself (#325).
           python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
@@ -1148,17 +1153,41 @@ jobs:
               if not isinstance(tm, int) or not 1 <= tm <= 20:
                   errors.append(f"{name}: timeout-minutes must be an integer <= 20, got {tm!r}")
 
-          # 2. Plan and shards install the SAME pinned cargo-mutants, so they
-          #    compute the same mutant list.
+          # 2. EACH job installs a pinned cargo-mutants (the shards also a pinned
+          #    nextest), the same version in both, so they list the same mutants.
+          #    Nothing may be allowed to fail open.
+          def installed(job, prefix):
+              """The taiki-e/install-action tool specs of `job` starting with `prefix`."""
+              specs = []
+              for st in job.get("steps", []):
+                  tool = str((st.get("with") or {}).get("tool", ""))
+                  specs += [t for t in tool.replace(",", " ").split() if t.startswith(prefix)]
+              return specs
+
           pins = set()
           for name, job in mut_jobs.items():
-              for step in job.get("steps", []):
-                  tool = (step.get("with") or {}).get("tool", "")
-                  pins.update(re.findall(r"cargo-mutants@[0-9]+\.[0-9]+\.[0-9]+", tool))
-                  if "cargo install cargo-mutants" in (step.get("run") or ""):
+              if job.get("continue-on-error"):
+                  errors.append(f"{name}: continue-on-error is forbidden on a mutation job")
+              mut = installed(job, "cargo-mutants")
+              if not mut or not all(re.fullmatch(r"cargo-mutants@[0-9]+\.[0-9]+\.[0-9]+", t) for t in mut):
+                  errors.append(f"{name}: install cargo-mutants pinned (cargo-mutants@X.Y.Z), found {mut}")
+              pins.update(mut)
+              for st in job.get("steps", []):
+                  if st.get("continue-on-error"):
+                      errors.append(f"{name}: continue-on-error is forbidden on a mutation step")
+                  if "cargo install cargo-mutants" in (st.get("run") or ""):
                       errors.append(f"{name}: install cargo-mutants pinned via taiki-e/install-action, not cargo install")
           if len(pins) != 1:
               errors.append(f"plan and shards must pin ONE cargo-mutants version, found {sorted(pins)}")
+          nextest = installed(mut_jobs.get("mutation-testing") or {}, "cargo-nextest")
+          if len(nextest) != 1 or not re.fullmatch(r"cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+", nextest[0]):
+              errors.append(f"mutation-testing must install ONE pinned cargo-nextest, found {nextest}")
+          for name, job in mut_jobs.items():
+              for _, cmd, _, _ in commands(job):
+                  # A pipe, a list or a background job would hide cargo-mutants'
+                  # exit status (the plan's `> mutants.list` redirect is fine).
+                  if re.search(r"\||;|&", cmd):
+                      errors.append(f"{name}: the cargo-mutants command must stand alone, found {cmd!r}")
 
           # 3. The plan sizes the matrix from the diff and caps it.
           plan = mut_jobs.get("mutation-plan", {})
@@ -1204,16 +1233,24 @@ jobs:
                   errors.append(f"EXIT=$? must be the line right after cargo mutants, found {nxt!r}")
               if not re.search(r"^\s*set \+e\s*$", before, re.M):
                   errors.append("cargo mutants must run under set +e so EXIT=$? sees its status")
-              if not re.search(r'^\s*exit "?\$EXIT"?\s*$', step.get("run") or "", re.M):
-                  errors.append('the step must end with exit "$EXIT" (every non-zero exit fails the shard)')
+              body = [l for l in (step.get("run") or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+              exits = [l.strip() for l in body if re.search(r"(?:^|[;)&|]\s*)exit\b", l.strip())]
+              if exits != ['exit "$EXIT"'] or body[-1].strip() != 'exit "$EXIT"':
+                  errors.append(f'the step\'s only exit must be its last line, exit "$EXIT"; found {exits}')
 
           # 5. The Rust CI Gate requires the mutation result on PRs, with no WARN pass.
           gate_run = "\n".join(s.get("run") or "" for s in jobs["rust-ci-gate"].get("steps", []))
           if "mutation-testing" not in jobs["rust-ci-gate"].get("needs", []):
               errors.append("rust-ci-gate must need mutation-testing")
-          if not re.search(r'MUTATION_RESULT="\$\{\{ needs\.mutation-testing\.result \}\}"', gate_run) or \
-             not re.search(r'if \[\[ "\$MUTATION_RESULT" != "success" \]\]', gate_run):
-              errors.append("rust-ci-gate must FAIL a PR whose mutation-testing result is not success")
+          for var, job in (("PLAN_RESULT", "mutation-plan"), ("MUTATION_RESULT", "mutation-testing")):
+              if job not in jobs["rust-ci-gate"].get("needs", []):
+                  errors.append(f"rust-ci-gate must need {job}")
+              if not re.search(rf'{var}="\$\{{\{{ needs\.{job}\.result \}}\}}"', gate_run):
+                  errors.append(f"rust-ci-gate must read {var} from needs.{job}.result")
+              # The not-success branch must set FAILED=1 before its fi.
+              branch = re.search(rf'if \[\[ "\${var}" != "success" \]\]; then\n(.*?)\n\s*fi\n', gate_run, re.S)
+              if not branch or not re.search(r"^\s*FAILED=1\s*$", branch.group(1), re.M):
+                  errors.append(f"rust-ci-gate must set FAILED=1 when {var} is not success")
           if re.search(r"Allowing PR to proceed|WARN: mutation", gate_run):
               errors.append("rust-ci-gate must not pass a failed or cancelled mutation run with a WARN")
 
@@ -1512,6 +1549,7 @@ jobs:
         secret-scan,
         test-integrity,
         frontend-e2e,
+        mutation-plan,
         mutation-testing,
       ]
     runs-on: ubuntu-latest
@@ -1529,6 +1567,7 @@ jobs:
           echo "secret-scan:    ${{ needs.secret-scan.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
+          echo "mutation-plan:  ${{ needs.mutation-plan.result }}"
           echo "mutation-testing: ${{ needs.mutation-testing.result }}"
 
           FAILED=0
@@ -1544,20 +1583,26 @@ jobs:
             echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
           fi
 
-          # mutation-testing runs only on pull_request, where it is REQUIRED.
-          # It is a matrix job: its result is "success" only when EVERY shard
-          # succeeded, and "skipped" when mutation-plan failed, so anything
-          # but success fails the gate (#367). It used to pass the gate on
-          # "failure" and "cancelled" with a WARN, so even a real MISSED-mutant
-          # failure never blocked a merge.
+          # mutation-plan + mutation-testing run only on pull_request, where
+          # they are REQUIRED. mutation-testing is a matrix job: its result is
+          # "success" only when EVERY shard succeeded, and "skipped" when
+          # mutation-plan failed (named separately so the cause is visible),
+          # so anything but success fails the gate (#367). It used to pass the
+          # gate on "failure" and "cancelled" with a WARN, so even a real
+          # MISSED-mutant failure never blocked a merge.
+          PLAN_RESULT="${{ needs.mutation-plan.result }}"
           MUTATION_RESULT="${{ needs.mutation-testing.result }}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$PLAN_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-plan did not succeed (result: $PLAN_RESULT) -- see its log (over the shard cap?)"
+              FAILED=1
+            fi
             if [[ "$MUTATION_RESULT" != "success" ]]; then
               echo "FAIL: mutation-testing did not succeed on every shard (result: $MUTATION_RESULT)"
               FAILED=1
             fi
           else
-            echo "mutation-testing: $MUTATION_RESULT (OK - only required on PRs)"
+            echo "mutation-plan + mutation-testing: $PLAN_RESULT / $MUTATION_RESULT (OK - only required on PRs)"
           fi
 
           # All other jobs must succeed
