@@ -28,7 +28,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
-use rs_runtime::stall_detector::{StallDetectorConfig, StallDetectorGuard, spawn_stall_detector};
+use rs_runtime::stall_detector::{
+    INGEST_RUNTIME, MAIN_RUNTIME, StallDetectorConfig, StallDetectorGuard,
+    spawn_runtime_stall_detector, spawn_stall_detector,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -127,6 +130,15 @@ fn spawn_and_block(
     dir: &Path,
     audit_tx: mpsc::Sender<AuditRow>,
 ) -> (tokio::runtime::Runtime, StallDetectorGuard, Duration) {
+    spawn_and_block_runtime(MAIN_RUNTIME, dir, audit_tx)
+}
+
+/// `spawn_and_block` with the detector labelled `runtime` (#368).
+fn spawn_and_block_runtime(
+    runtime: &'static str,
+    dir: &Path,
+    audit_tx: mpsc::Sender<AuditRow>,
+) -> (tokio::runtime::Runtime, StallDetectorGuard, Duration) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -135,7 +147,12 @@ fn spawn_and_block(
     let log_path = cfg.log_path.clone();
     let guard = rt
         .block_on(async {
-            spawn_stall_detector(tokio::runtime::Handle::current(), cfg, Some(audit_tx))
+            spawn_runtime_stall_detector(
+                runtime,
+                tokio::runtime::Handle::current(),
+                cfg,
+                Some(audit_tx),
+            )
         })
         .expect("detector thread starts");
     wait_for_event(&log_path, "detector_started");
@@ -356,4 +373,35 @@ fn dropping_the_guard_stops_the_detector_thread() {
         matches!(closed, Ok(None)),
         "detector thread exited after its guard was dropped"
     );
+}
+
+/// #368: the RTMP ingest runs on its own runtime with its own detector. A
+/// stall there is reported with `runtime: "ingest"` in every stall.log record
+/// and in the ProcessStall row, so the evidence says WHICH runtime stopped.
+#[test]
+fn a_stall_names_the_runtime_that_stalled() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = test_config(dir.path()).log_path;
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
+    let (rt, mut guard, blocked) = spawn_and_block_runtime(INGEST_RUNTIME, dir.path(), audit_tx);
+    let row = rt
+        .block_on(async { tokio::time::timeout(Duration::from_secs(10), audit_rx.recv()).await })
+        .expect("ProcessStall row within 10 s of recovery")
+        .expect("audit channel open");
+    guard.stop();
+
+    assert_runtime_starved_row(&row, &log_path, blocked);
+    assert_eq!(row.detail["runtime"], "ingest");
+    assert_eq!(
+        events(&log_path),
+        vec![
+            "detector_started",
+            "stall_start",
+            "stall_end",
+            "detector_stopped"
+        ]
+    );
+    for record in records(&log_path) {
+        assert_eq!(record["runtime"], "ingest", "{record}");
+    }
 }

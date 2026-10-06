@@ -2,11 +2,11 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
@@ -15,12 +15,14 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
+use rs_core::stable_since::StableSince;
 use rs_endpoint::metrics::UploadMetrics;
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
 use rs_inpoint::flv_chunker::FlvChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
+use crate::inpoint_service::{InpointParams, InpointService};
 use crate::shutdown::ShutdownCoordinator;
 
 /// Main service orchestrator that starts all components.
@@ -41,10 +43,10 @@ pub struct ServiceCore {
     /// GUI shares this Arc so its IPC `get_status` reads the same value as
     /// the HTTP `/api/v1/status` path (#234).
     provided_disk_pressure_level: Option<Arc<std::sync::atomic::AtomicU8>>,
-    /// Externally provided rtmp-stable-since mutex. Same rationale as
+    /// Externally provided rtmp-stable-since cell. Same rationale as
     /// `provided_disk_pressure_level` — shared with Tauri AppState so the
     /// IPC `get_status` exposes the same `rtmp_stable_secs` (#234).
-    provided_rtmp_stable_since: Option<Arc<Mutex<Option<Instant>>>>,
+    provided_rtmp_stable_since: Option<StableSince>,
     /// Externally provided orphan-VPS-count atomic. When set, the Tauri GUI
     /// shares this Arc so its IPC `get_status` reads the SAME count the runtime
     /// orphan reaper writes — the tray tray-app is the production deployment, so
@@ -108,10 +110,10 @@ impl ServiceCore {
         self
     }
 
-    /// Share an externally created `rtmp_stable_since` mutex with the
+    /// Share an externally created `rtmp_stable_since` cell with the
     /// embedded `AppState` (#234, mirror of `with_disk_pressure_level`).
-    pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
-        self.provided_rtmp_stable_since = Some(arc);
+    pub fn with_rtmp_stable_since(mut self, cell: StableSince) -> Self {
+        self.provided_rtmp_stable_since = Some(cell);
         self
     }
 
@@ -138,6 +140,14 @@ impl ServiceCore {
         shutdown_signal: impl Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
+
+        // #368: Normal process priority (never above) and EcoQoS off. The
+        // task registration sets -Priority 4; this covers a box whose task
+        // was registered before that (it would start BelowNormal).
+        let priority = crate::ingest_priority::apply_process_priority(
+            &crate::ingest_priority::SystemPriorityOs,
+        );
+        log::log!(priority.level(), "{}", priority.summary());
 
         // Database: use provided pool or create a new one. For audit
         // purposes we capture the schema version before and after
@@ -260,8 +270,8 @@ impl ServiceCore {
         if let Some(arc) = self.provided_disk_pressure_level.take() {
             api_state = api_state.with_disk_pressure_level(arc);
         }
-        if let Some(arc) = self.provided_rtmp_stable_since.take() {
-            api_state = api_state.with_rtmp_stable_since(arc);
+        if let Some(cell) = self.provided_rtmp_stable_since.take() {
+            api_state = api_state.with_rtmp_stable_since(cell);
         }
         // #352: same for the orphan-VPS count, so the reaper writes and the tray
         // IPC reads the SAME atomic (the boot_orphan_count clone below is taken
@@ -335,7 +345,7 @@ impl ServiceCore {
             .inpoint_state
             .clone()
             .with_audit_tx(api_state.audit_tx.clone())
-            .with_stable_since(Arc::clone(&api_state.rtmp_stable_since));
+            .with_stable_since(api_state.rtmp_stable_since.clone());
         api_state = api_state.with_inpoint_state(wired_inpoint.clone());
         let inpoint_state = wired_inpoint;
 
@@ -508,24 +518,25 @@ impl ServiceCore {
             }
         });
 
-        // Inpoint restart loop
-        let inpoint_shutdown_rx = shutdown.subscribe();
-        let inpoint_bind = self.config.inpoint.rtmp_bind.clone();
-        let inpoint_port = self.config.inpoint.rtmp_port;
-        let inpoint_flv_sink = Arc::clone(&flv_chunk_sink);
-        let inpoint_state_clone = inpoint_state.clone();
-        let inpoint_ws_tx = ws_tx.clone();
-        let inpoint_task = tokio::spawn(async move {
-            run_inpoint_loop(
-                inpoint_bind,
-                inpoint_port,
-                inpoint_flv_sink,
-                inpoint_state_clone,
-                inpoint_ws_tx,
-                inpoint_restart_rx,
-                inpoint_shutdown_rx,
+        // Inpoint: the restart/supervision loop and the RTMP server it runs.
+        let mut inpoint = InpointService::start(InpointParams {
+            bind: self.config.inpoint.rtmp_bind.clone(),
+            port: self.config.inpoint.rtmp_port,
+            flv_chunk_sink: Arc::clone(&flv_chunk_sink),
+            inpoint_state: inpoint_state.clone(),
+            ws_tx: ws_tx.clone(),
+            restart_rx: inpoint_restart_rx,
+            shutdown_rx: shutdown.subscribe(),
+        });
+        // #368: a second stall detector probes the ingest runtime
+        // (`logs/stall-ingest.log`, rows labelled runtime=ingest).
+        let ingest_stall_detector = inpoint.ingest_handle().and_then(|ingest| {
+            crate::stall_detector::start_for_runtime(
+                crate::stall_detector::INGEST_RUNTIME,
+                ingest.clone(),
+                self.db_path.parent().unwrap_or(std::path::Path::new(".")),
+                audit_tx.clone(),
             )
-            .await;
         });
 
         // Endpoint restart loop (S3 upload only — no manager notification)
@@ -640,8 +651,9 @@ impl ServiceCore {
         // Flush remaining chunks before uploader stops
         flv_chunk_sink.flush().await;
 
-        // Wait for all tasks
-        match inpoint_task.await {
+        // Wait for all tasks. The ingest detector stops before its runtime.
+        drop(ingest_stall_detector);
+        match inpoint.stop().await {
             Ok(()) => info!("Inpoint stopped cleanly"),
             Err(e) => tracing::error!("Inpoint task panicked: {e}"),
         }
@@ -677,8 +689,12 @@ impl ServiceCore {
 /// it runs xiu and auto-restarts on crash with exponential backoff (2s, 4s, 8s,
 /// 16s, max 30s). Crash counter resets when a publisher connects. Gives up after
 /// 10 consecutive crashes without any successful connection.
+///
+/// The loop itself runs on the caller's runtime; the RTMP server it
+/// supervises (xiu sessions, hub, receiver, chunker) runs on `server_runtime`
+/// (#368).
 #[allow(clippy::too_many_arguments)]
-async fn run_inpoint_loop(
+pub(crate) async fn run_inpoint_loop(
     bind: String,
     port: u16,
     flv_chunk_sink: Arc<FlvChunkSink>,
@@ -686,6 +702,7 @@ async fn run_inpoint_loop(
     ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    server_runtime: tokio::runtime::Handle,
 ) {
     let mut consecutive_crashes: u32 = 0;
     let mut last_connected = false;
@@ -740,7 +757,7 @@ async fn run_inpoint_loop(
         let rtmp_shutdown = server.shutdown_handle();
         let flv_sink = Arc::clone(&flv_chunk_sink);
         let state = inpoint_state.clone();
-        let mut handle = tokio::spawn(async move { server.run(flv_sink, state).await });
+        let mut handle = server_runtime.spawn(async move { server.run(flv_sink, state).await });
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 

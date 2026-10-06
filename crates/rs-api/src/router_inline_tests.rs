@@ -585,12 +585,12 @@ async fn get_logs_with_populated_buffer() {
 async fn delivery_start_returns_503_without_hetzner_token() {
     let state = test_state().await;
     // Satisfy the RTMP-stable gate so we reach the Hetzner-missing check.
-    *state.rtmp_stable_since.lock().await = Some(
+    state.rtmp_stable_since.set(Some(
         std::time::Instant::now()
             - std::time::Duration::from_secs(
                 crate::delivery_handlers::RTMP_STABLE_REQUIRED_SECS + 5,
             ),
-    );
+    ));
     let app = build_router(state);
 
     let response = app

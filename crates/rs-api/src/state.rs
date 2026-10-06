@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 use rs_core::audit::AuditRow;
 use rs_core::config::{Config, ObsConfig};
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
+use rs_core::stable_since::StableSince;
 use rs_endpoint::metrics::UploadMetrics;
 
 use crate::delivery::DeliveryOrchestrator;
@@ -63,10 +63,11 @@ pub struct AppState {
     /// When the RTMP publisher last became "connected". Used by the
     /// `POST /delivery/start` handler to gate creation of a VPS until the
     /// ingest has been stable for `RTMP_STABLE_REQUIRED_SECS` seconds.
-    /// `None` means no publisher is currently connected. Wire-up to the
-    /// inpoint MediaReceiver lands in Task 18; for now the field exists so
-    /// the handler and its tests can exercise the gate directly.
-    pub rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+    /// `None` means no publisher is currently connected. The inpoint's
+    /// MediaReceiver writes it through the `InpointState` the runtime wires
+    /// with this same cell. Lock-free (#368): the ingest thread never waits
+    /// for a handler.
+    pub rtmp_stable_since: StableSince,
     /// Fire-and-forget sender for audit rows. Handlers push `AuditRow` via
     /// `rs_core::audit::record(&state.audit_tx, row)` and the audit writer
     /// task batches INSERTs + broadcasts `WsEvent::AuditAppended`.
@@ -145,7 +146,7 @@ impl AppState {
             s3_upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             s3_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             upload_metrics: Arc::new(UploadMetrics::default()),
-            rtmp_stable_since: Arc::new(Mutex::new(None)),
+            rtmp_stable_since: StableSince::new(),
             audit_tx,
             device_flow_api_base: None,
             disk_critical,
@@ -249,11 +250,11 @@ impl AppState {
         self
     }
 
-    /// Replace the `rtmp_stable_since` mutex with one provided externally.
+    /// Replace the `rtmp_stable_since` cell with one provided externally.
     /// Used by the Tauri GUI to surface `rtmp_stable_secs` in the tray
     /// `get_status` IPC alongside the HTTP path (#234).
-    pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
-        self.rtmp_stable_since = arc;
+    pub fn with_rtmp_stable_since(mut self, cell: StableSince) -> Self {
+        self.rtmp_stable_since = cell;
         self
     }
 }
@@ -348,28 +349,28 @@ mod tests {
         );
     }
 
-    /// #234: same contract for `rtmp_stable_since` — external Mutex Arc
+    /// #234: same contract for `rtmp_stable_since` — the external cell
     /// must back the embedded field by pointer identity.
     #[tokio::test]
     async fn with_rtmp_stable_since_replaces_shared_arc() {
         use std::time::Instant;
         let pool = db::create_memory_pool().await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let shared = Arc::new(Mutex::new(None));
+        let shared = StableSince::new();
         let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
-            .with_rtmp_stable_since(Arc::clone(&shared));
+            .with_rtmp_stable_since(shared.clone());
 
         let now = Instant::now();
-        *shared.lock().await = Some(now);
+        shared.set(Some(now));
 
         assert_eq!(
-            state.rtmp_stable_since.lock().await.as_ref(),
-            Some(&now),
-            "external Mutex must back the embedded field"
+            state.rtmp_stable_since.get(),
+            Some(now),
+            "the external cell must back the embedded field"
         );
         assert!(
-            Arc::ptr_eq(&state.rtmp_stable_since, &shared),
-            "Arc identity must be preserved"
+            state.rtmp_stable_since.ptr_eq(&shared),
+            "cell identity must be preserved"
         );
     }
 }

@@ -70,10 +70,9 @@ pub async fn delivery_start(
     Json(req): Json<DeliveryStartRequest>,
 ) -> Result<Json<DeliveryStartResponse>, (StatusCode, Json<serde_json::Value>)> {
     // RTMP-stable gate: refuse to spin up a VPS until the ingest has been
-    // publishing for at least RTMP_STABLE_REQUIRED_SECS. See `state.rs` for
-    // wire-up status (Task 18 plumbs set/clear into MediaReceiver).
-    let stable_since = *state.rtmp_stable_since.lock().await;
-    let current_secs = stable_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    // publishing for at least RTMP_STABLE_REQUIRED_SECS. The MediaReceiver
+    // sets and clears the cell through the wired `InpointState`.
+    let current_secs = state.rtmp_stable_since.stable_secs();
     if current_secs < RTMP_STABLE_REQUIRED_SECS {
         return Err((
             StatusCode::BAD_REQUEST,

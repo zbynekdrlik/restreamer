@@ -91,6 +91,9 @@ SQLX_OFFLINE=true CARGO_INCREMENTAL=1 cargo mutants --in-diff pr.diff --in-place
 - `--re '<fn names>'` plus `-f 'crates/<crate>/**'` re-checks only the
   functions you just changed.
 - Never run two lanes that both run rs-delivery tests at once: both bind 1935.
+- `--in-place` and `-j/--jobs` are mutually exclusive (cargo-mutants 27.1.0
+  refuses at once). To parallelise locally, use `--shard k/N` in separate
+  checkouts instead.
 - Never overwrite a running bash script: bash reads it while it runs.
   Upload a new version under a new name.
 

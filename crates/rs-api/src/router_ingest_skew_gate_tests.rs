@@ -25,8 +25,9 @@ async fn stable_state() -> AppState {
     let state = AppState::new_for_tests(pool, config, ws_tx);
     // Ingest has been publishing well past the rtmp-stable threshold, so
     // the rtmp gate passes and only the skew gate is under test.
-    *state.rtmp_stable_since.lock().await =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+    state.rtmp_stable_since.set(Some(
+        std::time::Instant::now() - std::time::Duration::from_secs(120),
+    ));
     state
 }
 
@@ -42,8 +43,9 @@ async fn stable_state_with_audit() -> (AppState, mpsc::Receiver<AuditRow>) {
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(8);
     let state = AppState::new(pool, config, ws_tx, audit_tx);
-    *state.rtmp_stable_since.lock().await =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+    state.rtmp_stable_since.set(Some(
+        std::time::Instant::now() - std::time::Duration::from_secs(120),
+    ));
     (state, audit_rx)
 }
 

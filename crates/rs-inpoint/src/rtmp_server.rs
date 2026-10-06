@@ -21,14 +21,19 @@ use crate::media_receiver::MediaReceiver;
 pub struct RtmpServer {
     address: String,
     shutdown_tx: broadcast::Sender<()>,
+    /// Subscribed in `new`, so a shutdown sent before `serve` starts (the
+    /// server task runs on the ingest runtime, after its bind) is buffered,
+    /// never dropped for lack of a receiver (#368).
+    shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl RtmpServer {
     pub fn new(bind: &str, port: u16) -> Self {
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         Self {
             address: format!("{bind}:{port}"),
             shutdown_tx,
+            shutdown_rx,
         }
     }
 
@@ -101,7 +106,7 @@ impl RtmpServer {
             Err(_) => info!("RTMP server accepting on {}", self.address),
         }
 
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let mut shutdown_rx = self.shutdown_rx;
 
         // #106: capture the run outcome instead of swallowing it. A xiu bind
         // failure (e.g. a process grabbed the port in the TOCTOU window between
@@ -225,6 +230,27 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    /// #368: `run_inpoint_loop` stops the server with `shutdown.send(())`
+    /// and then awaits its task. A stop or restart that lands before the
+    /// server task got to subscribe (it runs on the ingest runtime, after the
+    /// bind) must not be lost: a lost one left that await, and the inpoint,
+    /// hanging forever.
+    #[tokio::test]
+    async fn a_shutdown_sent_before_the_server_runs_still_stops_it() {
+        let server = RtmpServer::new("127.0.0.1", 0);
+        let shutdown = server.shutdown_handle();
+        let _ = shutdown.send(());
+
+        let run = server.run(Arc::new(FlvChunkSink::new_null()), InpointState::new());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("a shutdown sent before run() must still stop the server");
+        assert!(
+            result.is_ok(),
+            "a requested stop is a clean stop: {result:?}"
+        );
     }
 
     /// #106: a bind failure must PROPAGATE (Err), never be swallowed into

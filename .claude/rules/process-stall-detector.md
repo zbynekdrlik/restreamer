@@ -13,6 +13,18 @@ On 2026-10-01 a 35.7 s freeze left only a hole in `restreamer.log`.
 `C:\ProgramData\Restreamer\logs\stall.log` (JSON lines, rotated to
 `stall.log.old` at 1 MB), plus `ProcessStall` audit rows (`/api/v1/audit?action=process_stall`).
 
+**Two runtimes, two detectors (#368).** The RTMP ingest runs on its own
+runtime (`.claude/rules/ingest-runtime.md`), and a second detector instance
+probes it. Every record and every `ProcessStall` row carries `runtime`:
+`main` (evidence in `logs/stall.log`) or `ingest` (evidence in
+`logs/stall-ingest.log`). A whole-process freeze shows in BOTH files; a
+stall in only one names the runtime that stopped polling.
+- Start one with `spawn_runtime_stall_detector(runtime, ..)` /
+  `start_for_runtime(runtime, handle, ..)`. `spawn_stall_detector` and
+  `start_for_service` are the `main` shorthands.
+- The label is added in `Detector::write` (`stall_log::with_runtime`), so the
+  record builders stay label-free.
+
 - Every process start writes a `detector_started` line, and every detector
   exit writes `detector_stopped` with its reason. No `stall_start` between the
   two (or after a still-running start) means there was no stall. It does NOT

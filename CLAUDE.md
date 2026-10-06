@@ -30,11 +30,13 @@ auto-load on their `paths:` — you do not invoke those.
 - Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
 - leptos-ui timers / detached async / reactive-disposal panics on SPA nav → `.claude/rules/leptos-ownership.md` (auto-loads on `leptos-ui/src/**`)
+- RTMP ingest runtime thread / Windows process+thread priorities / blocking calls off async workers → `.claude/rules/ingest-runtime.md` (auto)
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
 - A/V-skew guard (ingest diag #354 vs push actuator #257/#359, STEP-vs-DRIFT, DriftHold) → `.claude/rules/av-skew-guard.md` (auto)
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
+- YouTube-measured A/V + frame-continuity session (manage-scope OAuth on stream.lan, Thursday trigger, camera-box roles, pass criteria) → `.claude/rules/youtube-av-measurement.md` (auto)
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure

@@ -81,6 +81,7 @@ async fn inpoint_loop_waits_out_a_port_conflict_then_serves_rtmp() {
         ws_tx,
         restart_rx,
         shutdown_rx,
+        tokio::runtime::Handle::current(),
     ));
 
     eventually("the bind conflict is recorded", async || {

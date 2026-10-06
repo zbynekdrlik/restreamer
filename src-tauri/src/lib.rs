@@ -216,9 +216,7 @@ pub fn run() {
                 let disk_pressure_level = std::sync::Arc::new(
                     std::sync::atomic::AtomicU8::new(0),
                 );
-                let rtmp_stable_since = std::sync::Arc::new(
-                    tokio::sync::Mutex::new(None),
-                );
+                let rtmp_stable_since = rs_core::stable_since::StableSince::new();
                 // #352: shared orphan-VPS count so the tray IPC surfaces the
                 // orphan banner (the tray app is the production deployment).
                 let vps_orphan_count = std::sync::Arc::new(
@@ -233,7 +231,7 @@ pub fn run() {
                     shutdown_tx,
                     inpoint_state_clone,
                     Arc::clone(&disk_pressure_level),
-                    Arc::clone(&rtmp_stable_since),
+                    rtmp_stable_since.clone(),
                     Arc::clone(&vps_orphan_count),
                 );
 
