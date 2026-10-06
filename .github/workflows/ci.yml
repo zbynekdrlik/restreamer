@@ -1079,6 +1079,19 @@ jobs:
           python3 scripts/ci/verify_no_obs_mutation.py --self-test
           python3 scripts/ci/verify_no_obs_mutation.py
 
+      - name: "Verify every StartStream is gated by the program-audio guard (#379)"
+        run: |
+          # Owner copyright rule: no room/FOH music on YouTube/Facebook. Every
+          # StartStream in obs-stream.ps1 must be immediately preceded by
+          # Test-ProgramAudio + an exit on its verdict, and every job that starts
+          # OBS streaming must start the watchdog right after, check for a breach
+          # after each long streaming step, and stop the watchdog + assert in an
+          # always() teardown after the OBS stop. The guard parses the YAML, so this
+          # step cannot self-match (#325); --self-test proves it red on regressed copies.
+          python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
+          python3 scripts/ci/verify_program_audio_guard.py --self-test
+          python3 scripts/ci/verify_program_audio_guard.py
+
       - name: "Verify OBS-streaming E2E jobs wait on the rig lease before StartStream (#349)"
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -1569,6 +1582,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run the OBS scripts against the mock obs-websocket
         run: python tests/ci/test_obs_stream.py
+      - name: "Run the program-audio guard against a mock sampler + stop endpoint (#379)"
+        run: python tests/ci/test_program_audio_guard.py
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -3487,6 +3502,19 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
+      # #379: never stream room/FOH music to a platform (owner copyright rule). The start
+      # step above already refused to StartStream unless camera-box's sampler said
+      # MEASUREMENT/SILENT; this detached watchdog re-reads that verdict every 10 s while
+      # we stream and, on FOREIGN/UNKNOWN/stale/unreachable, stops OBS streaming through
+      # Restreamer's API and leaves a breach marker the checks below fail on.
+      - name: "Program-audio watchdog: start (#379)"
+        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Start-ProgramAudioWatchdog
+
       - name: Wait for chunks and verify upload
         shell: powershell
         timeout-minutes: 3
@@ -3840,6 +3868,13 @@ jobs:
           }
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: delivery_init_sent within 180s of vps_ready"
         shell: powershell
         run: |
@@ -4192,6 +4227,13 @@ jobs:
           Write-Host "=========================================="
           Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Verify dashboard per-endpoint cache bar via Playwright
         shell: powershell
@@ -4660,6 +4702,13 @@ jobs:
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"
         if: success()
         shell: powershell
@@ -4860,6 +4909,13 @@ jobs:
           Write-Host "  No endpoint exceeded chunk_delay threshold"
           Write-Host "  No endpoint accumulated >$maxFbDeaths rtmp_push_died rows"
           Write-Host "=========================================="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: OBS disconnect/reconnect resilience test
         if: success()
@@ -5322,6 +5378,13 @@ jobs:
           if (-not $recovered) { throw "FAILED: RescueRecovered not recorded - never returned to live" }
           Write-Host "OK: outage survived end-to-end with zero chunk loss"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: Restreamer crash recovery test
         if: success()
         shell: powershell
@@ -5691,6 +5754,13 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Rebaseline
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell
@@ -5778,6 +5848,16 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+
+      # #379: always, even when the job never streamed (both calls are then no-ops).
+      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Stop-ProgramAudioWatchdog
+          Assert-NoProgramAudioBreach
 
       - name: Verify RTMP disconnected after OBS stream stop
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
@@ -6333,6 +6413,15 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
+      # #379: the program-audio watchdog, as in the YouTube job (see there).
+      - name: "Program-audio watchdog: start (#379)"
+        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Start-ProgramAudioWatchdog
+
       - name: Start delivery
         shell: powershell
         run: |
@@ -6715,6 +6804,13 @@ jobs:
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: FB-side ingest_streams.stream_health populated within 15min (Graph API)"
         shell: powershell
         run: |
@@ -6761,6 +6857,13 @@ jobs:
           }
           if (-not $sawHealth) { throw "FB-side GATE FAIL: ingest_streams.stream_health never populated within 15 min (FB never decoded our H.264)" }
           Write-Host "FB-side GATE: FB confirmed real-time decode of rust-pusher feed"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
@@ -6838,6 +6941,16 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+
+      # #379: always, even when the job never streamed (both calls are then no-ops).
+      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Stop-ProgramAudioWatchdog
+          Assert-NoProgramAudioBreach
 
   e2e-gate:
     name: E2E Gate

@@ -1,7 +1,9 @@
 # obs-stream.ps1 -- #374: the only way restreamer CI starts or stops stream OBS streaming.
 #
-#   -Action Start              rig lease free + readiness (obs-ws.ps1 Test-ObsReady) in
-#                              the SAME websocket session, then StartStream. Writes
+#   -Action Start              rig lease free + readiness (obs-ws.ps1 Test-ObsReady) +
+#                              the program-audio verdict (program-audio-guard.ps1
+#                              Test-ProgramAudio, #379: no room/FOH music to a platform)
+#                              in the SAME websocket session, then StartStream. Writes
 #                              OBS_STREAMING_STARTED_BY_CI=true to GITHUB_ENV BEFORE the
 #                              start (a cancelled step still lets the teardown stop
 #                              ours) and =false when OBS refuses the start (camera-box
@@ -55,6 +57,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\obs-ws.ps1"
+. "$PSScriptRoot\program-audio-guard.ps1"
 
 $Marker = "OBS_STREAMING_STARTED_BY_CI"
 
@@ -117,6 +120,10 @@ function Start-OurStream([bool]$sampleBitrate) {
   try {
     $why = Test-ObsReady
     if ($why) { Write-NotReady $why; exit 1 }
+    # #379: never stream room/FOH music to a platform -- camera-box's verdict on the
+    # program audio, read right before EVERY StartStream (the start and each republish).
+    $why = Test-ProgramAudio
+    if ($why) { Write-ProgramAudioError "not starting OBS streaming" $why; exit 1 }
     Set-StartedMarker "true"
     $resp = Invoke-ObsRequest "StartStream"
     if (-not $resp.requestStatus.result) {

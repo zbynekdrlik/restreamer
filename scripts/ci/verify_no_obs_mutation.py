@@ -23,13 +23,17 @@ The shape this guard enforces:
     == 'true'`; the marker is written nowhere else.
 And everywhere it scans: no OBS process action (kill, suspend, launch, close,
 scheduled task, the port-4455 owner, a wildcard name), no obs-studio / streamEncoder
-touch, no request batch, no third-party OBS client.
+touch, no request batch, no third-party OBS client, no Restreamer
+/api/v1/obs/start|stop-stream call -- except ONE stop-stream call in
+scripts/ci/program-audio-guard.ps1 Invoke-ProgramAudioStop (#379: the watchdog
+stops OBS streaming when room/FOH music reaches the program; CONFINED_API).
 
 Scope: every job that runs on a self-hosted runner in every `.github/workflows/*.yml`
 (step run/with/env/uses/name, job env) and every file under `scripts/`. A
 GitHub-hosted job cannot reach OBS, so it is not scanned; that is also why this
 file's own ci.yml step and the test-integrity grep patterns never self-match (#325).
-This file is skipped by path and may only run in a GitHub-hosted job (checked).
+This file and the #379 wiring guard (GUARD_FILES) are skipped by path and may only
+run in a GitHub-hosted job (checked).
 The scripts' runtime behaviour is tested separately against a mock obs-websocket:
 tests/ci/test_obs_stream.py (ci.yml job obs-scripts-test).
 
@@ -53,6 +57,9 @@ WORKFLOWS = Path(".github/workflows")
 CI = WORKFLOWS / "ci.yml"
 SCRIPTS = Path("scripts")
 SELF = Path("scripts/ci/verify_no_obs_mutation.py")
+# Guards whose own source NAMES the patterns they hunt for: skipped by path, and they
+# may only run in a GitHub-hosted job (checked), where nothing reaches OBS.
+GUARD_FILES = {SELF, Path("scripts/ci/verify_program_audio_guard.py")}
 OBS_STREAM = Path("scripts/ci/obs-stream.ps1")
 OBS_LIB = Path("scripts/ci/obs-ws.ps1")
 MARKER = "OBS_STREAMING_STARTED_BY_CI"
@@ -175,6 +182,12 @@ PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker":
                  "Test-OurStream": 2, "Set-StartedAt": 4, "Get-StartedAtFile": 4}
 MOCK_TEST = "python tests/ci/test_obs_stream.py"
 SKIP_DIRS = {"__pycache__"}
+# #379: the program-audio watchdog stops OBS streaming on a copyright breach through
+# Restreamer's stop-stream API. That ONE call is allowed, once, in that ONE function;
+# start-stream stays banned everywhere and workflows may use neither.
+PROGRAM_AUDIO = Path("scripts/ci/program-audio-guard.ps1")
+CONFINED_API = (PROGRAM_AUDIO, "Invoke-ProgramAudioStop", "/api/v1/obs/stop-stream")
+CONFINED_API_MASK = "CONFINED-379-STOP-API"
 
 
 # ------------------------------------------------------------------ helpers --
@@ -397,8 +410,9 @@ def check_workflows(root: Path) -> list[str]:
         for job_name, job in (wf.get("jobs") or {}).items():
             hosted = runs_on_hosted(job)
             for step in job.get("steps") or []:
-                if SELF.name in str(step.get("run") or "") and not hosted:
-                    errors.append(f"{path.name} {job_name}: {SELF} may only run in a GitHub-hosted job")
+                for guard in GUARD_FILES:
+                    if guard.name in str(step.get("run") or "") and not hosted:
+                        errors.append(f"{path.name} {job_name}: {guard} may only run in a GitHub-hosted job")
             if not hosted:
                 errors += check_job(path.name, job_name, job)
     return errors
@@ -407,8 +421,26 @@ def check_workflows(root: Path) -> list[str]:
 # ------------------------------------------------------------- script rules --
 
 
+def confine_api(rel: Path, text: str) -> tuple[str, list[str]]:
+    """Mask the one allowed stop-stream call (CONFINED_API); any other use stays visible."""
+    path, fn, url = CONFINED_API
+    if rel != path:
+        return text, []
+    code = strip_comments(text)
+    spans = function_spans(code)
+    hits = [m for m in re.finditer(re.escape(url), code, re.I)]
+    owned = [m for m in hits if owner_at(spans, m.start()) == fn]
+    if len(hits) == 1 and len(owned) == 1:
+        m = owned[0]
+        return code[:m.start()] + CONFINED_API_MASK + code[m.end():], []
+    if len(owned) > 1:
+        return code, [f"{rel}: {url} may appear only ONCE, in {fn}"]
+    return code, []
+
+
 def script_errors(rel: Path, text: str) -> list[str]:
-    errors = check_unit(str(rel), text)
+    text, errors = confine_api(rel, text)
+    errors += check_unit(str(rel), text)
     code = strip_comments(text)
     if rel != OBS_LIB:
         for line in code.splitlines():
@@ -513,7 +545,7 @@ def check(root: Path) -> list[str]:
     if not (root / OBS_LIB).is_file():
         errors.append(f"{OBS_LIB} is missing")
     for f in sorted((root / SCRIPTS).rglob("*")):
-        if not f.is_file() or f.relative_to(root) == SELF or SKIP_DIRS & set(f.parts):
+        if not f.is_file() or f.relative_to(root) in GUARD_FILES or SKIP_DIRS & set(f.parts):
             continue
         errors += script_errors(f.relative_to(root), f.read_text(encoding="utf-8", errors="replace"))
     return errors
@@ -563,7 +595,7 @@ INSERTIONS: list[tuple[str, str]] = [
 ]
 
 YT_STOP = "      - name: Stop OBS stream\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
-FB_START = f"        run: {START_RUN}\n\n      - name: Start delivery"
+FB_START = f"        run: {START_RUN}\n\n      # #379: the program-audio watchdog, as in the YouTube job"
 ST_ASSERT = f"        run: {ASSERT_RUN}"
 DISCONNECT = "      - name: OBS disconnect/reconnect resilience test\n        if: success()"
 REPUB_CALL = "& " + PS + "obs-stream.ps1 -Action Republish -GapSeconds 10"
@@ -635,13 +667,18 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("the guard moved onto the stream box", "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
      "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
      "may only run in a GitHub-hosted job"),
+    ("the #379 wiring guard (skipped by path) runs on the stream box",
+     "      # #379: the program-audio watchdog, as in the YouTube job",
+     "      - name: evil\n        run: python3 scripts/ci/verify_program_audio_guard.py\n\n"
+     "      # #379: the program-audio watchdog, as in the YouTube job",
+     "verify_program_audio_guard.py may only run in a GitHub-hosted job"),
     ("a self-hosted runner group is not treated as hosted",
      "    runs-on: [self-hosted, windows, stream-lan]\n    timeout-minutes: 20\n    steps:",
      "    runs-on: {group: stream}\n    timeout-minutes: 20\n    steps:\n      - run: taskkill /F /IM obs64.exe", "obs64.exe"),
 ]
 STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Start skips the readiness check", "$why = Test-ObsReady", "$why = $null", "after the Test-ObsReady"),
-    ("Start ignores the readiness verdict", "    if ($why) { Write-NotReady $why; exit 1 }\n    Set-StartedMarker", "    Set-StartedMarker",
+    ("Start ignores the readiness verdict", "    if ($why) { Write-NotReady $why; exit 1 }\n    # #379", "    # #379",
      "exit on its verdict"),
     ("Start never writes the marker", '    Set-StartedMarker "true"\n', "", "marker true right before"),
     ("a refused start keeps the marker true", '      Set-StartedMarker "false"\n      Write-Host "::error::StartStream refused',
@@ -690,6 +727,25 @@ EXTRA_SCRIPTS: list[tuple[str, dict[str, str], str]] = [
      "only workflows may run obs-stream.ps1"),
     ("a helper script opens its own websocket",
      {"scripts/ci/own-ws.ps1": "$w = New-Object System.Net.WebSockets.ClientWebSocket\n"}, "client internals outside"),
+    ("another script uses Restreamer's stop-stream API (#379 carve-out is one function only)",
+     {"scripts/ci/quick-stop.ps1": '$null = Invoke-WebRequest -Method POST -Uri "http://127.0.0.1:8910/api/v1/obs/stop-stream"\n'},
+     "start|stop-stream"),
+]
+# #379: the program-audio guard's one stop-stream call is confined to Invoke-ProgramAudioStop.
+STOP_API_LINE = '  if (-not $stopUrl) { $stopUrl = "http://127.0.0.1:8910/api/v1/obs/stop-stream" }'
+AUDIO_MUTATIONS: list[tuple[str, str, str, str]] = [
+    ("the program-audio guard starts streaming through the API", STOP_API_LINE,
+     STOP_API_LINE.replace("stop-stream", "start-stream"), "start|stop-stream"),
+    ("the stop-stream call leaves Invoke-ProgramAudioStop", "function Invoke-ProgramAudioStop {",
+     "function Invoke-AnyStop {", "start|stop-stream"),
+    ("a second stop-stream call in Invoke-ProgramAudioStop", STOP_API_LINE,
+     STOP_API_LINE + '\n  $null = Invoke-WebRequest -Method POST -Uri "http://127.0.0.1:8910/api/v1/obs/stop-stream"',
+     "may appear only ONCE"),
+    ("a stop-stream call in another function of the guard", "function Write-ProgramAudioLog([string]$text) {",
+     'function Stop-Anyway { $null = Invoke-WebRequest -Method POST -Uri "http://127.0.0.1:8910/api/v1/obs/stop-stream" }\n'
+     "function Write-ProgramAudioLog([string]$text) {", "start|stop-stream"),
+    ("the program-audio guard kills a process named obs", "    Stop-Process -Id $wd.Id -Force",
+     "    Stop-Process -Name obs64 -Force", "process action"),
 ]
 
 
@@ -750,6 +806,11 @@ def self_test(root: Path) -> int:
             run_case(desc, {OBS_STREAM: text}, expect)
     for desc, files, expect in EXTRA_SCRIPTS:
         run_case(desc, {Path(k): v for k, v in files.items()}, expect)
+    real_audio = (root / PROGRAM_AUDIO).read_text(encoding="utf-8")
+    for desc, old, new, expect in AUDIO_MUTATIONS:
+        text = replaced(real_audio, old, new, desc)
+        if text is not None:
+            run_case(desc, {PROGRAM_AUDIO: text}, expect)
     if failures:
         print("SELF-TEST FAILED:")
         for f in failures:
