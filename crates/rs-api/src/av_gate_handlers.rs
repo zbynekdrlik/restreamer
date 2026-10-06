@@ -78,15 +78,12 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-/// Compare two tokens without an early exit on the first differing byte:
-/// both are hashed to a fixed length and every byte is folded.
+/// Compare two tokens by their SHA-256 digests. A timing difference can then
+/// only reveal how many leading DIGEST bytes match, which says nothing an
+/// attacker can steer towards the token (that would need SHA-256 preimages);
+/// a direct string compare would leak the token prefix byte by byte.
 pub(crate) fn tokens_match(given: &str, expected: &str) -> bool {
-    let a = Sha256::digest(given.as_bytes());
-    let b = Sha256::digest(expected.as_bytes());
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    Sha256::digest(given.as_bytes()) == Sha256::digest(expected.as_bytes())
 }
 
 fn error(status: StatusCode, code: &str, detail: impl Into<String>) -> Response {
