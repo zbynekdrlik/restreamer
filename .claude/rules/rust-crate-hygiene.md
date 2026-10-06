@@ -159,3 +159,20 @@ A "stop" function whose only observable effect is releasing a port or socket
 "sooner" survives as `-> ()` when the `Drop` impl also aborts the task. Pin it
 with a SYNCHRONOUS rebind right after the stop returns, with no await in
 between: `drop(std::net::TcpListener::bind(addr).expect(..))`.
+
+## Never run ci.yml's test-integrity steps wholesale on dev1
+
+Several test-integrity steps run the full workspace test suite (e.g. "Run tests and
+capture output"). Extracting and running ALL of them locally on dev1 starts a full
+workspace build: a Tier-0 violation, an OOM risk, and ~750 MB of `target/` within minutes
+(#367, 2026-10-06). Run only the ONE step you changed (select it by its exact name), or
+run the whole set on dev2.
+
+## GitHub evaluates `${{ }}` everywhere in a `run:` block, even inside string literals
+
+A guard script that merely COMPARES against the text of an expression such as
+`fromJSON(needs.x.outputs.y)` wrapped in `${{ }}` still gets evaluated by Actions in the
+job that runs it. If that job has no such output, the WHOLE workflow template fails to
+load ("Error reading JToken from JsonReader", #367 run 37402222975). Split the literal
+so Actions never sees the opening `${{`, e.g. in Python `"$" "{{ ... }}"` (adjacent
+literals join).
