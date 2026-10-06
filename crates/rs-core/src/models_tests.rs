@@ -189,6 +189,41 @@ fn inpoint_state_bind_error_set_read_clear() {
     assert_eq!(api_view.bind_error(), None, "clear removes the banner text");
 }
 
+/// #368: the ingest thread marks the session through `InpointState`, and the
+/// API reads the publisher-stable cell wired into it. Both marks are plain
+/// synchronous calls, so the ingest thread cannot wait on the API side.
+#[test]
+fn session_marks_drive_the_wired_stable_since_cell() {
+    let api_cell = crate::stable_since::StableSince::new();
+    let state = InpointState::new().with_stable_since(api_cell.clone());
+
+    let before = std::time::Instant::now();
+    state.mark_connected();
+    let since = api_cell.get().expect("a connect sets the cell");
+    assert!(state.is_connected());
+    assert!(since >= before && since <= std::time::Instant::now());
+
+    assert_eq!(state.mark_disconnected(), Some(0), "a sub-second session");
+    assert!(!state.is_connected());
+    assert_eq!(api_cell.get(), None, "a disconnect clears the cell");
+    assert_eq!(
+        state.mark_disconnected(),
+        None,
+        "no session open, so no duration"
+    );
+}
+
+/// Without a wired cell (stand-alone tests) the marks still track the
+/// connection and the session duration.
+#[test]
+fn session_marks_work_without_a_stable_since_cell() {
+    let state = InpointState::new();
+    state.mark_connected();
+    assert!(state.is_connected());
+    assert_eq!(state.mark_disconnected(), Some(0));
+    assert!(!state.is_connected());
+}
+
 #[test]
 fn delivery_metrics_diagnostics_roundtrip() {
     let metrics = DeliveryEndpointMetrics {

@@ -512,7 +512,7 @@ impl MediaReceiver {
         }
         self.remembered.retain(|r| *r != identifier);
         self.last_identifier = Some(identifier.clone());
-        self.inpoint_state.mark_connected().await;
+        self.inpoint_state.mark_connected();
         self.audit_rtmp(
             rs_core::audit::Action::RtmpConnected,
             serde_json::json!({
@@ -765,7 +765,7 @@ impl MediaReceiver {
             return;
         };
         info!(reason, "Stream ended: {}", s.identifier);
-        let duration_secs = self.inpoint_state.mark_disconnected().await;
+        let duration_secs = self.inpoint_state.mark_disconnected();
         self.audit_rtmp(
             rs_core::audit::Action::RtmpDisconnected,
             serde_json::json!({

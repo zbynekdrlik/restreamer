@@ -90,7 +90,7 @@ pub async fn get_status(
 
     let inpoint_connected = state.is_inpoint_connected();
     let disk_pressure = state.disk_pressure();
-    let rtmp_stable_secs = state.rtmp_stable_secs().await;
+    let rtmp_stable_secs = state.rtmp_stable_secs();
     let s3_region_standard = state.s3_region_standard();
     let ingest_skew_ms = state.ingest_skew_ms();
     let ingest_skew_active = state.ingest_skew_active();

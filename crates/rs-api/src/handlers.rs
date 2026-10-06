@@ -39,12 +39,7 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     // dashboard to gate the Start-Delivering button until the ingest has
     // been up for `RTMP_STABLE_REQUIRED_SECS` (15s). Zero when no
     // publisher is connected.
-    let rtmp_stable_secs = state
-        .rtmp_stable_since
-        .lock()
-        .await
-        .map(|t| t.elapsed().as_secs())
-        .unwrap_or(0);
+    let rtmp_stable_secs = state.rtmp_stable_since.stable_secs();
     let inpoint = ComponentStatus {
         state: if rtmp_connected {
             "connected".into()

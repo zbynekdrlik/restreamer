@@ -2,15 +2,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock};
 
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{ChunkStats, InpointState, StreamingEvent, WsEvent};
+use rs_core::stable_since::StableSince;
 
 /// Shared application state that holds the embedded service resources.
 ///
@@ -34,8 +34,8 @@ pub struct AppState {
     disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
     /// Shared "RTMP publisher stable since" timestamp. Same Arc the
     /// embedded `rs_api::AppState` reads in its `get_status` handler.
-    /// #234.
-    rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+    /// #234. Lock-free since #368.
+    rtmp_stable_since: StableSince,
     /// Shared orphan-VPS count. Same Arc the runtime orphan reaper writes and
     /// the embedded `rs_api::AppState` reads in `get_status`, so the tray IPC
     /// surfaces the orphan banner identically to the LAN dashboard. #352.
@@ -52,7 +52,7 @@ impl AppState {
         shutdown_tx: oneshot::Sender<()>,
         inpoint_state: InpointState,
         disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
-        rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+        rtmp_stable_since: StableSince,
         vps_orphan_count: Arc<std::sync::atomic::AtomicU8>,
     ) -> Self {
         Self {
@@ -105,12 +105,8 @@ impl AppState {
 
     /// Seconds since the RTMP publisher has been continuously stable.
     /// Zero when no publisher is currently connected.
-    pub async fn rtmp_stable_secs(&self) -> u64 {
-        self.rtmp_stable_since
-            .lock()
-            .await
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0)
+    pub fn rtmp_stable_secs(&self) -> u64 {
+        self.rtmp_stable_since.stable_secs()
     }
 
     /// Check if RTMP publisher is connected.

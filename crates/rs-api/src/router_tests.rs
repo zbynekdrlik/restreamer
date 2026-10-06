@@ -856,8 +856,9 @@ mod rtmp_stable_gate_tests {
     async fn start_delivery_rejects_when_rtmp_unstable() {
         let state = test_state().await;
         // RTMP has been "connected" for only 5s — below the 15s threshold.
-        *state.rtmp_stable_since.lock().await =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        state.rtmp_stable_since.set(Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(5),
+        ));
         let app = build_router(state);
 
         let body = serde_json::json!({"event_id": 1}).to_string();

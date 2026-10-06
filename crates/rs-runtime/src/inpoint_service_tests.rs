@@ -17,6 +17,7 @@ use super::*;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use rs_core::stable_since::StableSince;
 use rs_inpoint::wall_clock::{SystemWallClock, WallClock};
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
 
@@ -433,18 +434,16 @@ const API_HOLD: Duration = Duration::from_secs(3);
 const MAX_SESSION_START: Duration = Duration::from_secs(1);
 
 /// The API side of the publisher-stable cell, as a task on the main runtime:
-/// it takes the cell and keeps it for `hold`, across an await. A `/status`,
-/// `POST /delivery/start` or tray handler does exactly that when its runtime
-/// stalls after it was handed the lock. Returns once the task holds the cell.
-fn api_task_holds(
-    main_rt: &tokio::runtime::Runtime,
-    cell: &Arc<tokio::sync::Mutex<Option<Instant>>>,
-    hold: Duration,
-) {
+/// it takes what a `/status`, `POST /delivery/start` or tray handler takes
+/// from the cell and then stays in the handler for `hold`, across an await,
+/// as when its runtime stalls mid-handler. Since #368 that is a copied value
+/// and nothing stays held; with the tokio `Mutex` it was the lock guard.
+/// Returns once the task has taken it.
+fn api_task_holds(main_rt: &tokio::runtime::Runtime, cell: &StableSince, hold: Duration) {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let cell = Arc::clone(cell);
+    let cell = cell.clone();
     main_rt.spawn(async move {
-        let _guard = cell.lock().await;
+        let _seen = cell.stable_secs();
         let _ = held_tx.send(());
         tokio::time::sleep(hold).await;
     });
@@ -461,10 +460,10 @@ fn api_task_holds(
 /// a publisher that connects must have its frames processed at once.
 #[test]
 fn ingest_never_waits_for_an_api_task_holding_the_stable_since_cell() {
-    let stable_since = Arc::new(tokio::sync::Mutex::new(None));
+    let stable_since = StableSince::new();
     let mut h = start_inpoint_with_state(
         RecordingClock::default(),
-        InpointState::new().with_stable_since(Arc::clone(&stable_since)),
+        InpointState::new().with_stable_since(stable_since.clone()),
     );
     // A first session proves the server is up and warm, so the measured
     // session pays only its own handshake. Then let its end settle, so no

@@ -2,11 +2,11 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
@@ -15,6 +15,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
+use rs_core::stable_since::StableSince;
 use rs_endpoint::metrics::UploadMetrics;
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
@@ -42,10 +43,10 @@ pub struct ServiceCore {
     /// GUI shares this Arc so its IPC `get_status` reads the same value as
     /// the HTTP `/api/v1/status` path (#234).
     provided_disk_pressure_level: Option<Arc<std::sync::atomic::AtomicU8>>,
-    /// Externally provided rtmp-stable-since mutex. Same rationale as
+    /// Externally provided rtmp-stable-since cell. Same rationale as
     /// `provided_disk_pressure_level` — shared with Tauri AppState so the
     /// IPC `get_status` exposes the same `rtmp_stable_secs` (#234).
-    provided_rtmp_stable_since: Option<Arc<Mutex<Option<Instant>>>>,
+    provided_rtmp_stable_since: Option<StableSince>,
     /// Externally provided orphan-VPS-count atomic. When set, the Tauri GUI
     /// shares this Arc so its IPC `get_status` reads the SAME count the runtime
     /// orphan reaper writes — the tray tray-app is the production deployment, so
@@ -109,10 +110,10 @@ impl ServiceCore {
         self
     }
 
-    /// Share an externally created `rtmp_stable_since` mutex with the
+    /// Share an externally created `rtmp_stable_since` cell with the
     /// embedded `AppState` (#234, mirror of `with_disk_pressure_level`).
-    pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
-        self.provided_rtmp_stable_since = Some(arc);
+    pub fn with_rtmp_stable_since(mut self, cell: StableSince) -> Self {
+        self.provided_rtmp_stable_since = Some(cell);
         self
     }
 
@@ -269,8 +270,8 @@ impl ServiceCore {
         if let Some(arc) = self.provided_disk_pressure_level.take() {
             api_state = api_state.with_disk_pressure_level(arc);
         }
-        if let Some(arc) = self.provided_rtmp_stable_since.take() {
-            api_state = api_state.with_rtmp_stable_since(arc);
+        if let Some(cell) = self.provided_rtmp_stable_since.take() {
+            api_state = api_state.with_rtmp_stable_since(cell);
         }
         // #352: same for the orphan-VPS count, so the reaper writes and the tray
         // IPC reads the SAME atomic (the boot_orphan_count clone below is taken
@@ -344,7 +345,7 @@ impl ServiceCore {
             .inpoint_state
             .clone()
             .with_audit_tx(api_state.audit_tx.clone())
-            .with_stable_since(Arc::clone(&api_state.rtmp_stable_since));
+            .with_stable_since(api_state.rtmp_stable_since.clone());
         api_state = api_state.with_inpoint_state(wired_inpoint.clone());
         let inpoint_state = wired_inpoint;
 

@@ -489,17 +489,18 @@ impl Default for ComponentStatus {
 /// In addition to the connected-flag, the struct carries two optional
 /// hooks set by the runtime at construction time (absent in tests):
 /// - `audit_tx` — emit RtmpConnected/Disconnected/HandshakeFailed rows
-/// - `rtmp_stable_since` — Arc shared with `AppState.rtmp_stable_since`.
+/// - `rtmp_stable_since` — the cell shared with `AppState.rtmp_stable_since`.
 ///   MediaReceiver writes `Some(Instant::now())` on Publish and `None` on
 ///   UnPublish; the `POST /delivery/start` handler reads it to gate VPS
 ///   creation until the ingest has been stable for
-///   `RTMP_STABLE_REQUIRED_SECS`.
+///   `RTMP_STABLE_REQUIRED_SECS`. Lock-free (#368): the ingest thread never
+///   waits for the API side.
 #[derive(Debug, Clone)]
 pub struct InpointState {
     rtmp_connected: Arc<AtomicBool>,
     /// Shared handle to the `AppState.rtmp_stable_since` cell. None in
     /// stand-alone tests; Some in the runtime-wired path.
-    rtmp_stable_since: Option<Arc<tokio::sync::Mutex<Option<std::time::Instant>>>>,
+    rtmp_stable_since: Option<crate::stable_since::StableSince>,
     /// Optional audit channel. None in tests; set by
     /// `with_audit_tx(...)` at runtime wiring time.
     audit_tx: Option<tokio::sync::mpsc::Sender<crate::audit::AuditRow>>,
@@ -549,10 +550,7 @@ impl InpointState {
 
     /// Wire the shared `rtmp_stable_since` cell. Required for
     /// `POST /delivery/start` to see the publisher-stable timestamp.
-    pub fn with_stable_since(
-        mut self,
-        cell: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
-    ) -> Self {
+    pub fn with_stable_since(mut self, cell: crate::stable_since::StableSince) -> Self {
         self.rtmp_stable_since = Some(cell);
         self
     }
@@ -567,12 +565,13 @@ impl InpointState {
 
     /// Mark publisher connected. Sets `rtmp_stable_since` (if wired) and
     /// records the connect instant so `mark_disconnected` can emit a
-    /// duration-accurate audit row.
-    pub async fn mark_connected(&self) {
+    /// duration-accurate audit row. Synchronous and never blocks: it runs on
+    /// the ingest thread (#368).
+    pub fn mark_connected(&self) {
         let now = std::time::Instant::now();
         self.rtmp_connected.store(true, Ordering::Relaxed);
         if let Some(cell) = &self.rtmp_stable_since {
-            *cell.lock().await = Some(now);
+            cell.set(Some(now));
         }
         if let Ok(mut g) = self.connect_started_at.lock() {
             *g = Some(now);
@@ -581,11 +580,11 @@ impl InpointState {
 
     /// Mark publisher disconnected. Clears `rtmp_stable_since` (if wired)
     /// and returns the session duration in seconds (None if not
-    /// previously connected).
-    pub async fn mark_disconnected(&self) -> Option<u64> {
+    /// previously connected). Synchronous, like `mark_connected`.
+    pub fn mark_disconnected(&self) -> Option<u64> {
         self.rtmp_connected.store(false, Ordering::Relaxed);
         if let Some(cell) = &self.rtmp_stable_since {
-            *cell.lock().await = None;
+            cell.set(None);
         }
         let started = self
             .connect_started_at
