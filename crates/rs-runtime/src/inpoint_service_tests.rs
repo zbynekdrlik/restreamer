@@ -34,10 +34,13 @@ const MAX_INGEST_GAP: Duration = Duration::from_millis(200);
 /// One chunker clock read: when, and on which thread.
 type ClockCall = (Instant, Option<String>);
 
-/// A wall clock that records every read.
+/// A wall clock that records every read. With `fixed_ms` it always tells
+/// that time, so chunk file names are known in advance
+/// (`chunk_<ms>_<index:06>.bin`).
 #[derive(Default)]
 struct RecordingClock {
     calls: Mutex<Vec<ClockCall>>,
+    fixed_ms: Option<i64>,
 }
 
 impl WallClock for RecordingClock {
@@ -47,7 +50,7 @@ impl WallClock for RecordingClock {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((Instant::now(), thread));
-        SystemWallClock.now_ms()
+        self.fixed_ms.unwrap_or_else(|| SystemWallClock.now_ms())
     }
 }
 
@@ -167,19 +170,25 @@ struct Harness {
     restart_tx: mpsc::Sender<()>,
     shutdown_tx: broadcast::Sender<()>,
     port: u16,
-    _chunk_dir: tempfile::TempDir,
+    sink: Arc<FlvChunkSink>,
+    chunk_dir: tempfile::TempDir,
 }
 
 /// Start the inpoint the way the orchestrator does, inside a multi-thread
 /// "main" runtime with two workers (the app runtime's shape).
 fn start_inpoint() -> Harness {
+    start_inpoint_with(RecordingClock::default())
+}
+
+/// `start_inpoint` with the chunker reading `clock`.
+fn start_inpoint_with(clock: RecordingClock) -> Harness {
     let main_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("main runtime");
     let chunk_dir = tempfile::tempdir().expect("chunk dir");
-    let clock = Arc::new(RecordingClock::default());
+    let clock = Arc::new(clock);
     let flv_chunk_sink = Arc::new(
         FlvChunkSink::new(chunk_dir.path().to_path_buf(), CHUNK)
             .with_wall_clock(Arc::clone(&clock) as Arc<dyn WallClock>),
@@ -193,7 +202,7 @@ fn start_inpoint() -> Harness {
             InpointService::start(InpointParams {
                 bind: "127.0.0.1".into(),
                 port,
-                flv_chunk_sink,
+                flv_chunk_sink: Arc::clone(&flv_chunk_sink),
                 inpoint_state: InpointState::new(),
                 ws_tx,
                 restart_rx,
@@ -208,7 +217,8 @@ fn start_inpoint() -> Harness {
         restart_tx,
         shutdown_tx,
         port,
-        _chunk_dir: chunk_dir,
+        sink: flv_chunk_sink,
+        chunk_dir,
     }
 }
 
@@ -296,5 +306,54 @@ fn inpoint_restart_and_stop_run_on_the_dedicated_ingest_thread() {
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", h.port)).is_err(),
         "a stopped inpoint must not accept RTMP connections"
+    );
+}
+
+/// #368 review finding: shutting the ingest runtime down cancels its tasks.
+/// A chunk still being written when the inpoint stops must still be written
+/// AND reported: the report is what the chunk forwarder turns into the DB
+/// row the uploader needs. On the app runtime those writes finished during
+/// the orchestrator's shutdown drain.
+///
+/// The first chunk's file is a FIFO, so its write blocks until the test opens
+/// the read end, 500 ms after `stop()` began.
+#[cfg(unix)]
+#[test]
+fn stop_still_reports_a_chunk_that_is_being_written() {
+    let mut h = start_inpoint_with(RecordingClock {
+        fixed_ms: Some(1_000),
+        ..Default::default()
+    });
+    let fifo = h.chunk_dir.path().join("chunk_1000_000000.bin");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {fifo:?}");
+    let mut reports = h.sink.subscribe();
+    spawn_publisher(h.port, Duration::from_millis(1_500))
+        .join()
+        .expect("publisher thread")
+        .expect("publish");
+    h.clock.wait_for_calls(6, "chunks were cut");
+
+    let reader = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::read(&fifo)
+    });
+    h.stop();
+    let written = reader
+        .join()
+        .expect("reader thread")
+        .expect("read the FIFO");
+    assert!(!written.is_empty(), "the first chunk was written");
+
+    let mut reported = Vec::new();
+    while let Ok(chunk) = reports.try_recv() {
+        reported.push(chunk.index);
+    }
+    assert!(
+        reported.contains(&0),
+        "the chunk still being written at stop must be reported, got chunk indexes {reported:?}"
     );
 }
