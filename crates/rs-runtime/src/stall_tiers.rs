@@ -48,8 +48,13 @@ pub enum StallTier {
 
 impl StallTier {
     pub fn of(duration: Duration, cfg: &StallDetectorConfig) -> Self {
-        let _ = (duration, cfg);
-        Self::Minor
+        if duration >= cfg.severe_threshold {
+            Self::Severe
+        } else if duration >= cfg.audit_threshold {
+            Self::Major
+        } else {
+            Self::Minor
+        }
     }
 
     pub fn as_str(self) -> &'static str {
@@ -90,15 +95,19 @@ impl StallAuditGate {
 
     /// A stall lasting `duration` ended at `now`.
     pub fn on_stall_end(&mut self, now: Instant, duration: Duration) -> StallVerdict {
-        let _ = (now, duration, self.audit_threshold, &mut self.throttle);
-        StallVerdict::Audit { suppressed: None }
+        if duration < self.audit_threshold {
+            return StallVerdict::LogOnly;
+        }
+        match self.throttle.admit(now, stall_log::ms(duration)) {
+            Admission::Emit { suppressed } => StallVerdict::Audit { suppressed },
+            Admission::Suppress => StallVerdict::HeldBack,
+        }
     }
 
     /// The held-back aggregate once a row may be written again. The caller
     /// asks only between stalls, when the log pipeline is safe to use.
     pub fn take_due(&mut self, now: Instant) -> Option<Suppressed> {
-        let _ = now;
-        None
+        self.throttle.take_due(now)
     }
 }
 
@@ -114,19 +123,61 @@ pub fn config_from_settings(
     runtime: &str,
     s: &StallDetectorSettings,
 ) -> (StallDetectorConfig, Vec<String>) {
-    let _ = s;
+    let mut warnings = Vec::new();
+    let mut adjust = |name: &str, asked: u64, floor: Duration, ceil: Duration| {
+        let asked = Duration::from_millis(asked);
+        let used = asked.clamp(floor, ceil.max(floor));
+        if used != asked {
+            warnings.push(format!(
+                "stall_detector.{name} = {} ms adjusted to {} ms",
+                stall_log::ms(asked),
+                stall_log::ms(used)
+            ));
+        }
+        used
+    };
+    let probe = adjust(
+        "probe_interval_ms",
+        s.probe_interval_ms,
+        MIN_PROBE_INTERVAL,
+        MAX_PROBE_INTERVAL,
+    );
+    let record = adjust(
+        "record_threshold_ms",
+        s.record_threshold_ms,
+        probe,
+        Duration::MAX,
+    );
+    let audit = adjust(
+        "audit_threshold_ms",
+        s.audit_threshold_ms,
+        record,
+        Duration::MAX,
+    );
+    let severe = adjust(
+        "severe_threshold_ms",
+        s.severe_threshold_ms,
+        audit,
+        Duration::MAX,
+    );
+    let tick_late = adjust(
+        "tick_late_threshold_ms",
+        s.tick_late_threshold_ms,
+        MIN_TICK_LATE_THRESHOLD,
+        Duration::MAX,
+    );
     let config = StallDetectorConfig {
-        probe_interval: Duration::from_secs(1),
-        stall_threshold: Duration::from_secs(5),
-        audit_threshold: Duration::from_secs(5),
-        severe_threshold: Duration::from_secs(5),
-        audit_min_interval: Duration::ZERO,
-        tick_late_threshold: Duration::from_secs(1),
-        baseline_every_ticks: 10,
+        probe_interval: probe,
+        stall_threshold: record,
+        audit_threshold: audit,
+        severe_threshold: severe,
+        audit_min_interval: Duration::from_millis(s.audit_min_interval_ms),
+        tick_late_threshold: tick_late,
+        baseline_every_ticks: baseline_every_ticks(probe),
         log_path: data_dir.join("logs").join(stall_log_file_name(runtime)),
         log_max_bytes: STALL_LOG_MAX_BYTES,
     };
-    (config, Vec::new())
+    (config, warnings)
 }
 
 /// Healthy ticks between two baseline samples: one per `BASELINE_INTERVAL`.

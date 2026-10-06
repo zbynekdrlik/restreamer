@@ -55,22 +55,22 @@ pub struct StallDetectorSettings {
 }
 
 fn default_stall_probe_interval_ms() -> u64 {
-    1_000
+    100
 }
 fn default_stall_record_threshold_ms() -> u64 {
-    5_000
+    500
 }
 fn default_stall_audit_threshold_ms() -> u64 {
-    5_000
+    700
 }
 fn default_stall_severe_threshold_ms() -> u64 {
     5_000
 }
 fn default_stall_tick_late_threshold_ms() -> u64 {
-    1_000
+    250
 }
 fn default_stall_audit_min_interval_ms() -> u64 {
-    0
+    10_000
 }
 
 impl Default for StallDetectorSettings {

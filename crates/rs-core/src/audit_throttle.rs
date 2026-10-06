@@ -34,7 +34,6 @@ pub struct Suppressed {
 }
 
 impl Suppressed {
-    #[allow(dead_code)]
     fn new(at: Instant, value: u64) -> Self {
         Self {
             count: 1,
@@ -45,7 +44,6 @@ impl Suppressed {
         }
     }
 
-    #[allow(dead_code)]
     fn add(&mut self, at: Instant, value: u64) {
         self.count += 1;
         self.max = self.max.max(value);
@@ -103,21 +101,33 @@ impl AuditThrottle {
 
     /// An incident of `value` happened at `now`.
     pub fn admit(&mut self, now: Instant, value: u64) -> Admission {
-        let _ = (now, value, self.open(now), &mut self.last_emit);
-        Admission::Emit { suppressed: None }
+        if self.open(now) {
+            self.last_emit = Some(now);
+            return Admission::Emit {
+                suppressed: self.pending.take(),
+            };
+        }
+        match self.pending.as_mut() {
+            Some(p) => p.add(now, value),
+            None => self.pending = Some(Suppressed::new(now, value)),
+        }
+        Admission::Suppress
     }
 
     /// The held-back aggregate, once a row may be written again: the owner
     /// writes it as a row of its own. This counts as that interval's row.
     pub fn take_due(&mut self, now: Instant) -> Option<Suppressed> {
-        let _ = now;
-        None
+        if self.pending.is_none() || !self.open(now) {
+            return None;
+        }
+        self.last_emit = Some(now);
+        self.pending.take()
     }
 
     /// The held-back aggregate, regardless of the interval (a stream ended,
     /// or the owner shuts down).
     pub fn take_pending(&mut self) -> Option<Suppressed> {
-        None
+        self.pending.take()
     }
 }
 
