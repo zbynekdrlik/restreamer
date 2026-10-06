@@ -189,6 +189,27 @@ extracting its `run:` with `yaml.safe_load` and running it with
 `bash --noprofile --norc -eo pipefail` (the stricter shell) against the real
 file AND hand-made regressed copies (it must go red).
 
+### Structural invariants: parse the YAML in the step (#367)
+
+Some invariants are about structure, not text: a job's `timeout-minutes`, a
+matrix's source, `needs`, a pinned tool spec in `with:`, `continue-on-error`.
+Check those with `yaml.safe_load` inside the step. Use `tomllib` for Cargo.toml
+and `.cargo/*.toml`. Fall back to `pip install pyyaml` if the import fails.
+
+"Verify the mutation gate" is the example. It finds the jobs whose run lines
+start with `cargo mutants` and checks:
+- each such job's `timeout-minutes` is at most 20;
+- each job pins its tools, with no `continue-on-error`;
+- `EXIT=$?` comes right after the command, with no pipe, `;` or `&` around it;
+- the step's only `exit` is its last line;
+- the gate's not-success branch sets `FAILED=1`.
+
+A guard that greps one form misses the next one. The first version of this
+guard passed `|| true`, `continue-on-error` and `2) exit 0`; a review caught
+it. So write the regressed copies as a table of (old, new) replacements and
+run the guard against each copy; every copy must go red, for the right
+reason. The #367 table has 30 rows.
+
 ### Endpoint aliases in the OBS-to-YouTube job must be CI-seeded (#192)
 
 `Verify every strict-gate endpoint alias is seeded by CI` extracts every

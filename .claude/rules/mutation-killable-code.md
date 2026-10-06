@@ -64,9 +64,18 @@ More from the 109 survivors of PR #365's diff (#367, bounded-gate lane):
   the decision as a pure function of the flags (rs-cloud
   `transport_error_is_transient`).
 - **A fixed external URL needs a test override.** Follow the
-  `FB_GRAPH_API_BASE` / `YOUTUBE_API_BASE` pattern
-  (`RESTREAMER_RELEASE_BASE_URL` for the GitHub release). Take paths such as
+  `FB_GRAPH_API_BASE` / `YOUTUBE_API_BASE` pattern, and take paths such as
   the running exe as parameters (`find_bundled_binary(exe)`).
+  - **The override is process-global.** EVERY test that sets it, and every
+    test that READS a value derived from it, must take one shared lock.
+    `cargo test` runs a crate's tests as threads, so an unlocked reader can
+    see another test's mock URL. nextest (one process per test) hides this
+    race, so the mutation gate never sees it.
+  - **When the URL decides which code runs, the override is `#[cfg(test)]`
+    only.** The GitHub release and its sha256 sidecar come from the same
+    server, so a production override would let whoever sets the variable
+    choose the VPS binary. `delivery_binary.rs` `release_base()` is the
+    example; its lock is `RELEASE_ENV_LOCK`.
 - **A redundant guard is an equivalent mutant.** Delete the guard rather than
   test around it: `record_bytes` checked `b > open` before a
   `finalize_up_to` that already no-ops, and `if delta > max { max = delta }`
