@@ -12,7 +12,7 @@ On 2026-10-01 a 35.7 s freeze left only a hole in `restreamer.log`.
 
 **Where the evidence is.** On stream.lan it is
 `C:\ProgramData\Restreamer\logs\stall.log` (JSON lines, rotated to
-`stall.log.old` at 1 MB), plus `ProcessStall` audit rows (`/api/v1/audit?action=process_stall`).
+`stall.log.old` at 10 MB since the #368 tiers record every stall from 500 ms), plus `ProcessStall` audit rows (`/api/v1/audit?action=process_stall`).
 
 **Two runtimes, two detectors (#368).** The RTMP ingest runs on its own
 runtime (`.claude/rules/ingest-runtime.md`), and a second detector instance
@@ -45,6 +45,14 @@ apply):
 - `config_from_settings` sanitises (probe in [10 ms, 1 s], record >= probe,
   audit >= record, severe >= audit, tick_late >= 20 ms) and returns a warning
   per adjusted value; `start_for_runtime` logs them.
+- `ProbeAck` is two atomics (sequence + ns from an anchor), never a lock:
+  the probe runs ON the measured runtime, the THREAD_PRIORITY_HIGHEST ingest
+  one included, at 10 Hz. `seq == 0` means no answer yet (`!= 0`, not `> 0`:
+  `>=` would be an equivalent mutant).
+- `write_error` is taken at EVERY stall end, whatever the verdict, and shown
+  in the info line of an unaudited stall, so a later row reports only its own
+  errors. Held-back stalls still pending when the detector stops are flushed
+  as one aggregate row after `detector_stopped`.
 - The tier is known only at the END (`stall_end.tier`, the row's `tier`).
 - `baseline_every_ticks` is derived: one baseline per 10 s of ticks.
 - **Throttle:** `StallAuditGate` wraps `rs_core::audit_throttle::AuditThrottle`

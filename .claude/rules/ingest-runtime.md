@@ -131,6 +131,10 @@ tokio's `blocking_*` methods. Clippy `-D warnings` fails on any of them.
   media_receiver tests and children, rtmp_server tests,
   `tests/rtmp_server_e2e.rs`). A NEW test module with `#[tokio::test]` needs
   the same allow; production code never gets one.
+- Call sites in THIS crate only: a blocking call inside rs-core or xiu is
+  not seen. The two on the ingest path were fixed by hand: `LogBuffer::push`
+  (every tracing call) uses `try_lock` and counts a dropped entry instead of
+  waiting for an API `recent()` copy; the stall probe's `ProbeAck` is atomic.
 - Proven on dev2 (#368 lane c): a scratch `std::thread::sleep` in
   `MediaReceiver::on_frame` failed `cargo clippy -p rs-inpoint --lib -- -D
   warnings` with `use of a disallowed method`.
@@ -142,13 +146,22 @@ tokio's `blocking_*` methods. Clippy `-D warnings` fails on any of them.
 - video source-ts delta > 1.5 measured frame intervals -> OBS dropped
   `round(delta / interval) - 1` frames before sending. The interval is the
   median-filtered window mean until 32 deltas are counted, then the
-  cumulative mean since the subscription (cancels 29.97 fps' 33/34 ms ms
-  rounding; the exact count holds to N ~800 at 30 fps). Warm-up deltas never
-  enter the cumulative mean. A backward step or one > 30 s is a
+  cumulative mean since the subscription (cancels 29.97 fps' 33/34 ms
+  rounding). Warm-up deltas never enter the cumulative mean. A backward step or one > 30 s is a
   discontinuity: re-based, never counted.
-- `reset_stream()` on every accepted subscription (the subscribe wait is no
-  gap, a new publisher may have another frame rate). The audit throttles
-  survive it.
+- `reset_session()` in `begin_session` (a new publisher: everything starts
+  over); `reset_subscription()` on every accepted subscription forgets only
+  the video timeline. The arrival clock survives a re-subscription, so a
+  FRAME_TIMEOUT stall plus its re-subscription is ONE measured gap of 30 s+
+  (#368 review: resetting it there lost the biggest dropout of all). The
+  audit throttles survive both.
+- A replayed AVC sequence header (`data[1] == 0`, ts 0 from OBS) counts as an
+  arrival but is never a video step: `note_gaps(None)`.
+- The count is exact once the cumulative mean has taken over (32 normal
+  deltas); before that a jump of 100+ frames can be off by one, and drops
+  during the 8-delta warm-up show only as an arrival gap.
+- `frame_interval_us` goes back to 0 at `end_session`. The wall clock is
+  read only for a frame with an incident (`on_frame` takes a closure).
 - Counters: `InpointState::ingest_gaps()` atomics (lock-free, the API reads
   them on `/status` as `inpoint.details.ingest_gaps`). Rows: `IngestFrameGap`
   (Warn, Inpoint), one `AuditThrottle` per kind (10 s), aggregates flushed on
