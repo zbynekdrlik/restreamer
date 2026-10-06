@@ -287,6 +287,83 @@ mod tests {
         assert_eq!(m.stream_health.as_ref().unwrap().video_bitrate, Some(100.0));
     }
 
+    fn ingest(is_master: Option<bool>, bitrate: f64) -> IngestStream {
+        IngestStream {
+            is_master,
+            stream_health: Some(StreamHealth {
+                video_bitrate: Some(bitrate),
+                video_framerate: Some(30.0),
+                video_width: None,
+                video_height: None,
+                audio_bitrate: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn master_ingest_prefers_the_flagged_stream_over_the_first() {
+        let lv = LiveVideo {
+            id: "1".into(),
+            status: Some("LIVE".into()),
+            ingest_streams: Some(IngestStreamsEdge {
+                data: vec![ingest(Some(false), 100.0), ingest(Some(true), 200.0)],
+            }),
+        };
+        let m = lv.master_ingest().unwrap();
+        assert_eq!(m.is_master, Some(true));
+        assert_eq!(m.stream_health.as_ref().unwrap().video_bitrate, Some(200.0));
+    }
+
+    #[test]
+    fn is_live_only_for_live_statuses() {
+        let with_status = |s: Option<&str>| LiveVideo {
+            id: "1".into(),
+            status: s.map(str::to_string),
+            ingest_streams: None,
+        };
+        for live in ["LIVE", "LIVE_NOW", "SCHEDULED_LIVE"] {
+            assert!(with_status(Some(live)).is_live(), "{live} is live");
+        }
+        for not_live in ["VOD", "SCHEDULED_UNPUBLISHED", "UNPUBLISHED", "live"] {
+            assert!(
+                !with_status(Some(not_live)).is_live(),
+                "{not_live} is not live"
+            );
+        }
+        assert!(!with_status(None).is_live(), "no status is not live");
+    }
+
+    #[test]
+    fn resolution_needs_both_dimensions_positive() {
+        let dims = |w: Option<f64>, h: Option<f64>| StreamHealth {
+            video_bitrate: Some(1.0),
+            video_framerate: Some(30.0),
+            video_width: w,
+            video_height: h,
+            audio_bitrate: None,
+        };
+        assert_eq!(
+            dims(Some(1280.0), Some(720.0)).resolution().as_deref(),
+            Some("1280x720")
+        );
+        assert_eq!(
+            dims(Some(0.0), Some(720.0)).resolution(),
+            None,
+            "zero width"
+        );
+        assert_eq!(
+            dims(Some(1280.0), Some(0.0)).resolution(),
+            None,
+            "zero height"
+        );
+        assert_eq!(dims(Some(0.0), Some(0.0)).resolution(), None, "zero both");
+        assert_eq!(
+            dims(Some(1280.0), None).resolution(),
+            None,
+            "missing height"
+        );
+    }
+
     #[test]
     fn resolution_is_none_without_dimensions() {
         let h = StreamHealth {

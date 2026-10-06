@@ -254,6 +254,39 @@ mod tests {
         assert!(!is_long_running(&pool, Some(&evt(event_id, true)), 9000, early).await);
     }
 
+    /// `is_long_running_now` is the wall-clock form the live handlers call.
+    /// An instance created 10 h ago is long-running NOW; no event is not.
+    #[tokio::test]
+    async fn is_long_running_now_reads_the_real_clock() {
+        let pool = setup_pool().await;
+        let event_id = crate::db::create_streaming_event(&pool, "evt")
+            .await
+            .unwrap();
+        let inst = crate::db::create_delivery_instance(
+            &pool,
+            1,
+            "d",
+            "1.2.3.4",
+            "cx23",
+            Some(event_id),
+            "tok",
+        )
+        .await
+        .unwrap();
+        let ten_hours_ago = (Utc::now() - chrono::Duration::hours(10))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        sqlx::query("UPDATE delivery_instances SET created_at = ?1 WHERE id = ?2")
+            .bind(&ten_hours_ago)
+            .bind(inst)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(is_long_running_now(&pool, Some(&evt(event_id, true)), 9000).await);
+        assert!(!is_long_running_now(&pool, None, 9000).await);
+    }
+
     #[tokio::test]
     async fn is_long_running_false_when_no_instance() {
         let pool = setup_pool().await;

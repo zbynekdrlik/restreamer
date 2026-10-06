@@ -637,6 +637,32 @@ fn build_alert_appends_endpoint_alias() {
     assert!(!b.content.contains("endpoint:"));
 }
 
+/// #84: only the long-stream heads-up gets the runtime + limit suffix, read
+/// from the row's detail. Another action with the same detail keys gets none.
+#[test]
+fn build_alert_enriches_only_the_long_stream_warning() {
+    let detail = serde_json::json!({ "elapsed_secs": 9360, "threshold_secs": 9000 });
+    let long = build_alert(
+        Action::LongStreamWarning,
+        &row_detail(Action::LongStreamWarning, detail.clone()),
+    );
+    assert!(
+        long.content.ends_with(" (beží ~2.6 h, limit 2.5 h)"),
+        "long-stream alert must name the runtime and the limit: {:?}",
+        long.content
+    );
+
+    let other = build_alert(
+        Action::VpsUnreachable,
+        &row_detail(Action::VpsUnreachable, detail),
+    );
+    assert!(
+        !other.content.contains("beží"),
+        "only LongStreamWarning carries the runtime suffix: {:?}",
+        other.content
+    );
+}
+
 #[test]
 fn from_config_disabled_when_empty_enabled_when_set() {
     // Nothing set (blank-but-present webhook) -> disabled.

@@ -103,6 +103,56 @@ fn env_overrides() {
     }
 }
 
+/// #166: CI and prod switch FB ingest monitoring on through the environment.
+/// "1" and any-case "true" enable it; anything else disables it, even when
+/// config.json had it on.
+#[serial]
+#[test]
+fn fb_enabled_env_override_accepts_1_and_true_only() {
+    for (value, expected) in [
+        ("1", true),
+        ("true", true),
+        ("TRUE", true),
+        ("0", false),
+        ("yes", false),
+        ("", false),
+    ] {
+        // SAFETY: #[serial]; the var is removed before the next test runs.
+        unsafe { std::env::set_var("RESTREAMER_FB_ENABLED", value) };
+        let mut config = Config::for_testing();
+        config.facebook.enabled = !expected;
+        config.apply_env_overrides();
+        assert_eq!(
+            config.facebook.enabled, expected,
+            "RESTREAMER_FB_ENABLED={value:?} must set facebook.enabled={expected}"
+        );
+    }
+    // SAFETY: cleaning up the env var set by this test.
+    unsafe { std::env::remove_var("RESTREAMER_FB_ENABLED") };
+}
+
+/// A config.json written before #166/#84 has neither field: the defaults
+/// must be the Graph API version the client was built against and a 2.5 h
+/// long-stream warning, never an empty version or a 0/1 s threshold.
+#[test]
+fn fb_api_version_and_long_stream_warn_defaults() {
+    assert_eq!(FacebookConfig::default().api_version, "v21.0");
+    assert_eq!(DeliveryConfig::default().long_stream_warn_secs, 9000);
+
+    let json = r#"{
+        "client_uuid": "abc",
+        "facebook": { "enabled": true, "page_id": "p", "page_access_token": "t" },
+        "delivery": {},
+        "s3": {
+            "bucket": "b", "region": "r", "endpoint": "e",
+            "access_key_id": "k", "secret_access_key": "s"
+        }
+    }"#;
+    let config: Config = serde_json::from_str(json).unwrap();
+    assert_eq!(config.facebook.api_version, "v21.0");
+    assert_eq!(config.delivery.long_stream_warn_secs, 9000);
+}
+
 #[test]
 fn validate_rejects_empty_client_uuid() {
     let config = Config::default();

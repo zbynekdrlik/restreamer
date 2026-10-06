@@ -169,6 +169,26 @@ fn inpoint_state_clone_shares_state() {
     assert!(clone.is_connected());
 }
 
+/// #106: the RTMP bind-error cell round-trips through set / read / clear,
+/// and a clone (the API's copy) sees the runtime's write.
+#[test]
+fn inpoint_state_bind_error_set_read_clear() {
+    let state = InpointState::new();
+    let api_view = state.clone();
+    assert_eq!(state.bind_error(), None, "no bind error by default");
+
+    state.set_bind_error(
+        "Port 1234 is already in use by another process (PID 7: obs64.exe).".into(),
+    );
+    assert_eq!(
+        api_view.bind_error().as_deref(),
+        Some("Port 1234 is already in use by another process (PID 7: obs64.exe).")
+    );
+
+    state.clear_bind_error();
+    assert_eq!(api_view.bind_error(), None, "clear removes the banner text");
+}
+
 #[test]
 fn delivery_metrics_diagnostics_roundtrip() {
     let metrics = DeliveryEndpointMetrics {
