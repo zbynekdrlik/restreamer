@@ -21,14 +21,19 @@ use crate::media_receiver::MediaReceiver;
 pub struct RtmpServer {
     address: String,
     shutdown_tx: broadcast::Sender<()>,
+    /// Subscribed in `new`, so a shutdown sent before `serve` starts (the
+    /// server task runs on the ingest runtime, after its bind) is buffered,
+    /// never dropped for lack of a receiver (#368).
+    shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl RtmpServer {
     pub fn new(bind: &str, port: u16) -> Self {
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         Self {
             address: format!("{bind}:{port}"),
             shutdown_tx,
+            shutdown_rx,
         }
     }
 
@@ -101,7 +106,7 @@ impl RtmpServer {
             Err(_) => info!("RTMP server accepting on {}", self.address),
         }
 
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let mut shutdown_rx = self.shutdown_rx;
 
         // #106: capture the run outcome instead of swallowing it. A xiu bind
         // failure (e.g. a process grabbed the port in the TOCTOU window between
