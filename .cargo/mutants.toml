@@ -81,7 +81,7 @@ exclude_re = [
 ]
 
 # Whole files excluded from mutation (moved verbatim from the ci.yml `-e` list,
-# plus rtmp_bind_windows.rs, #367). The `*_windows.rs` files are
+# plus rtmp_bind_windows.rs, #367, and ingest_priority_windows.rs, #368). The `*_windows.rs` files are
 # `#[cfg(windows)]` glue: cargo-mutants does not evaluate cfg, so their mutants
 # would be generated on Linux, never compiled, and reported MISSED. They hold
 # only raw OS calls; every decision is a tested cross-platform helper.
@@ -93,4 +93,5 @@ exclude_globs = [
     "crates/rs-endpoint/src/metrics.rs",
     "crates/rs-runtime/src/stall_resources_windows.rs",
     "crates/rs-runtime/src/rtmp_bind_windows.rs",
+    "crates/rs-runtime/src/ingest_priority_windows.rs",
 ]

@@ -4,6 +4,8 @@
 //! - The standalone `restreamer-service` binary (Windows Service / console mode)
 //! - The unified Tauri application with embedded service
 
+pub mod ingest_priority;
+pub mod ingest_runtime;
 mod inpoint_service;
 mod log_capture;
 mod orchestrator;
