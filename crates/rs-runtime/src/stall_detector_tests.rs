@@ -707,3 +707,96 @@ fn resource_sample_reads_real_process_and_system_memory() {
         assert!(s.private_bytes.is_some_and(|b| b > 0));
     }
 }
+
+#[test]
+fn each_runtime_has_its_own_evidence_file() {
+    assert_eq!(stall_log_file_name(MAIN_RUNTIME), "stall.log");
+    assert_eq!(stall_log_file_name(INGEST_RUNTIME), "stall-ingest.log");
+    let data = Path::new("C:/ProgramData/Restreamer");
+    assert_eq!(
+        StallDetectorConfig::production_for(data, INGEST_RUNTIME),
+        StallDetectorConfig {
+            log_path: data.join("logs").join("stall-ingest.log"),
+            ..StallDetectorConfig::production(data)
+        }
+    );
+}
+
+#[test]
+fn with_runtime_tags_a_record() {
+    let tagged = stall_log::with_runtime(&serde_json::json!({"event": "stall_end"}), "ingest");
+    assert_eq!(
+        tagged,
+        serde_json::json!({"event": "stall_end", "runtime": "ingest"})
+    );
+    assert_eq!(
+        stall_log::with_runtime(&serde_json::json!("x"), "ingest"),
+        serde_json::json!("x")
+    );
+}
+
+/// Start `start` inside a runtime, wait for its evidence file at `path`,
+/// stop it, and return the records.
+fn run_and_stop(
+    rt: &tokio::runtime::Runtime,
+    start: impl FnOnce() -> Option<StallDetectorGuard>,
+    path: &Path,
+) -> Vec<serde_json::Value> {
+    let mut guard = rt
+        .block_on(async { start() })
+        .expect("started inside a runtime");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(ms_(10));
+    }
+    guard.stop();
+    read_lines(path)
+}
+
+/// #368: the orchestrator starts a second detector on the ingest runtime.
+#[test]
+fn start_for_runtime_probes_the_given_runtime_and_labels_it() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _rx) = mpsc::channel::<AuditRow>(1);
+    let handle = rt.handle().clone();
+    let records = run_and_stop(
+        &rt,
+        || start_for_runtime(INGEST_RUNTIME, handle, dir.path(), tx),
+        &dir.path().join("logs").join("stall-ingest.log"),
+    );
+    assert_eq!(records[0]["event"], "detector_started");
+    assert_eq!(records[0]["probe_interval_ms"], 1_000);
+    assert_eq!(records.last().unwrap()["reason"], "stop_requested");
+    for record in &records {
+        assert_eq!(record["runtime"], "ingest", "{record}");
+    }
+    assert!(
+        !dir.path().join("logs").join("stall.log").exists(),
+        "the main evidence file is the main detector's alone"
+    );
+}
+
+#[test]
+fn start_for_service_labels_its_records_main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _rx) = mpsc::channel::<AuditRow>(1);
+    let records = run_and_stop(
+        &rt,
+        || start_for_service(dir.path(), tx),
+        &dir.path().join("logs").join("stall.log"),
+    );
+    assert!(!records.is_empty());
+    for record in &records {
+        assert_eq!(record["runtime"], "main", "{record}");
+    }
+}

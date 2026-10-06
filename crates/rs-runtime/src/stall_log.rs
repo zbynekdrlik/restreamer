@@ -109,6 +109,16 @@ pub fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `record` with `"runtime": runtime` added: which runtime's detector
+/// wrote it (#368, `main` / `ingest`). A non-object record is returned as is.
+pub fn with_runtime(record: &Value, runtime: &str) -> Value {
+    let mut tagged = record.clone();
+    if let Value::Object(m) = &mut tagged {
+        m.insert("runtime".into(), json!(runtime));
+    }
+    tagged
+}
+
 /// Common header on every record: which process wrote it, and when.
 fn header(event: &str, at: WallAnchor) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();

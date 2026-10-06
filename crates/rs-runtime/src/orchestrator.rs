@@ -528,6 +528,16 @@ impl ServiceCore {
             shutdown_rx: shutdown.subscribe(),
         })
         .context("failed to start the RTMP inpoint")?;
+        // #368: a second stall detector probes the ingest runtime
+        // (`logs/stall-ingest.log`, rows labelled runtime=ingest).
+        let ingest_stall_detector = inpoint.ingest_handle().and_then(|ingest| {
+            crate::stall_detector::start_for_runtime(
+                crate::stall_detector::INGEST_RUNTIME,
+                ingest.clone(),
+                self.db_path.parent().unwrap_or(std::path::Path::new(".")),
+                audit_tx.clone(),
+            )
+        });
 
         // Endpoint restart loop (S3 upload only — no manager notification)
         let endpoint_shutdown_rx = shutdown.subscribe();
@@ -641,7 +651,8 @@ impl ServiceCore {
         // Flush remaining chunks before uploader stops
         flv_chunk_sink.flush().await;
 
-        // Wait for all tasks
+        // Wait for all tasks. The ingest detector stops before its runtime.
+        drop(ingest_stall_detector);
         match inpoint.stop().await {
             Ok(()) => info!("Inpoint stopped cleanly"),
             Err(e) => tracing::error!("Inpoint task panicked: {e}"),
