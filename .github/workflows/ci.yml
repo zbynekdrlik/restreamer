@@ -1531,7 +1531,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Run the OBS scripts against the mock (25 scenarios)
+      - name: Run the OBS scripts against the mock obs-websocket
         run: python tests/ci/test_obs_stream.py
 
   rust-ci-gate:

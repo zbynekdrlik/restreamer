@@ -37,7 +37,10 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
     streaming.
   - **Republish** (the disconnect and A/V-republish gates): Stop, marker=false, N s of dead air,
     then the full Start. If camera-box took OBS during the gap, the restart is refused and
-    the marker stays false.
+    the marker stays false. It prints the measured dead air: stop, idle, the gap, the lease read
+    and readiness make it ~2-8 s longer than `-GapSeconds`.
+    A held lease, a recording, or a scene/service change at the restart now FAILS the gate
+    mid-run (new with #374; before, CI restarted blindly).
   - **The rig lease is a hard gate at Start.** `rig-lease-wait.ps1` (#349) still waits up to its
     budget early in the job and then proceeds. Start then FAILS on a lease that is still held
     and not stale, instead of streaming over a live camera-box run. An unreachable lease
@@ -51,8 +54,13 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
   obs-stream.ps1 `Start-OurStream`, and StopStream only in `Stop-OurStream`.
 - **`tests/ci/test_obs_stream.py`** (ci.yml job `obs-scripts-test`, windows-latest = PowerShell
   5.1, part of the Rust CI Gate) runs every action against a stdlib mock obs-websocket, a mock
-  lease and a fake `obs64` process. It asserts the exit codes, the marker sequence, and that
-  only allowlisted requests were sent. Locally: `OBS_TEST_PWSH=<pwsh> python3 tests/ci/test_obs_stream.py`
+  lease and a fake `obs64` process, in 31 scenarios. It asserts:
+  - the exit codes and the marker sequence;
+  - that only allowlisted requests were sent (the list is read from the guard);
+  - that StopStream is sent only by stop/republish;
+  - that a stream or recording CI did not start is left as it was.
+  The mock also checks the real obs-websocket auth hash, interleaves events, and delays the
+  stop. Camera-box taking OBS during a republish gap is a scenario too. Locally: `OBS_TEST_PWSH=<pwsh> python3 tests/ci/test_obs_stream.py`
   (a portable pwsh tarball works; no install needed).
 - **`/api/v1/obs/start-stream` is banned in CI.** It is fire-and-forget and skips readiness
   (`obs.rs` never awaits the reply).
@@ -64,14 +72,21 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
 - `python3 scripts/ci/verify_no_obs_mutation.py` scans every SELF-HOSTED job in every workflow
   (run/with/env/uses/name, plus the job env) and every file under `scripts/`. A hosted job cannot
   reach OBS, so it is skipped; that is why a test-integrity grep pattern never self-matches.
-- `--self-test` applies 68 known-bad mutations to a temp copy, and each must go red for its own
+- `--self-test` applies 76 known-bad mutations to a temp copy, and each must go red for its own
   reason. When you add a guard rule, add its mutation there.
 - `requestType` is fail-closed. Only `requestType = "<Literal>"` (or the JSON
   `"requestType":"<Literal>"`) passes, plus `requestType = $requestType` inside
   `Invoke-ObsRequest`. Every call to it must pass an allowed literal.
 - The structure of `Start-OurStream` is pinned: lease exit, readiness exit, marker true right
-  before StartStream, marker false on a refused start. Republish writes the marker false right
-  after its Stop.
+  before StartStream, marker false on a refused start.
+- The `switch ($Action)` dispatcher is pinned verbatim (`DISPATCH`), and so is the number of
+  `Start-OurStream`/`Stop-OurStream`/`Set-StartedMarker` occurrences: only the Start/Stop/Republish
+  arms may call them. Changing the dispatcher means updating `DISPATCH` in the guard, on purpose.
+- No other script may name obs-stream.ps1, Start-/Stop-OurStream or the marker. scripts/ci bans
+  aliases, Get-Command, Invoke-Expression and `& $var`. Workflows may use an obs-stream
+  `-Action` word or a computed `-File $x` only in the canonical forms.
+- The guard also requires the `obs-scripts-test` job (windows, runs the mock test) and its
+  Rust CI Gate wiring.
 - Run it with `PYTHONDONTWRITEBYTECODE=1` locally. A stray `scripts/ci/__pycache__` is skipped,
   but do not commit one.
 

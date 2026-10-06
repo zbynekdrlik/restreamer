@@ -17,6 +17,7 @@ Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import http.server
@@ -34,15 +35,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts" / "ci"
-ALLOWED = {
-    "StartStream",
-    "StopStream",
-    "GetStreamStatus",
-    "GetRecordStatus",
-    "GetVersion",
-    "GetCurrentProgramScene",
-    "GetStreamServiceSettings",
-}
+GUARD = SCRIPTS / "verify_no_obs_mutation.py"
+
+
+def _guard_allowlist() -> set[str]:
+    """The guard's READ_ONLY_AND_STREAMING, read without importing it (no PyYAML needed)."""
+    for node in ast.parse(GUARD.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "READ_ONLY_AND_STREAMING" for t in node.targets
+        ):
+            return set(ast.literal_eval(node.value))
+    raise SystemExit(f"READ_ONLY_AND_STREAMING not found in {GUARD}")
+
+
+ALLOWED = _guard_allowlist()
+PASSWORD = "mock-password"
+SALT = "bW9jay1zYWx0"
+CHALLENGE = "bW9jay1jaGFsbGVuZ2U="
+
+
+def _auth_for(password: str) -> str:
+    secret = base64.b64encode(hashlib.sha256((password + SALT).encode()).digest()).decode()
+    return base64.b64encode(hashlib.sha256((secret + CHALLENGE).encode()).digest()).decode()
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MARKER = "OBS_STREAMING_STARTED_BY_CI"
 
@@ -57,8 +71,12 @@ class ObsState:
     start_ok: bool = True
     stop_takes_effect: bool = True
     omit_output_active: bool = False
-    reject_identify: bool = False
+    stop_delay_s: float = 0.0          # OBS releases its output asynchronously
+    emit_events: bool = False          # an op 5 event before every op 7 response
+    foreign_stream_after_stop: bool = False   # camera-box starts streaming in the gap
+    foreign_record_after_stop: bool = False   # camera-box starts recording in the gap
     requests: list[str] = field(default_factory=list)
+    unexpected: list[str] = field(default_factory=list)
     output_bytes: int = 0
 
 
@@ -137,7 +155,16 @@ def _respond(state: ObsState, req: dict) -> dict:
         if not state.streaming:
             ok = {"result": False, "code": 501, "comment": "output not running"}
         elif state.stop_takes_effect:
-            state.streaming = False
+            def stopped() -> None:
+                state.streaming = False
+                if state.foreign_stream_after_stop:
+                    threading.Timer(0.3, lambda: setattr(state, "streaming", True)).start()
+                if state.foreign_record_after_stop:
+                    threading.Timer(0.3, lambda: setattr(state, "recording", True)).start()
+            if state.stop_delay_s:
+                threading.Timer(state.stop_delay_s, stopped).start()
+            else:
+                stopped()
     else:
         ok = {"result": False, "code": 204, "comment": "mock: unknown request"}
     d = {"requestType": rtype, "requestId": rid, "requestStatus": ok}
@@ -156,9 +183,8 @@ def _serve_client(conn: socket.socket, state: ObsState) -> None:
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                       f"Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").encode())
-        hello: dict = {"obsWebSocketVersion": "5.5.0", "rpcVersion": 1}
-        if state.reject_identify:
-            hello["authentication"] = {"challenge": "c2FsdA==", "salt": "c2FsdA=="}
+        hello = {"obsWebSocketVersion": "5.5.0", "rpcVersion": 1,
+                 "authentication": {"challenge": CHALLENGE, "salt": SALT}}
         _send_json(conn, {"op": 0, "d": hello})
         while True:
             opcode, data = _recv_frame(conn)
@@ -169,12 +195,17 @@ def _serve_client(conn: socket.socket, state: ObsState) -> None:
                 continue
             msg = json.loads(data)
             if msg["op"] == 1:
-                if state.reject_identify:
+                if msg["d"].get("authentication") != _auth_for(PASSWORD):
                     _send_frame(conn, 0x8, struct.pack(">H", 4009) + b"Authentication failed.")
                     return
                 _send_json(conn, {"op": 2, "d": {"negotiatedRpcVersion": 1}})
             elif msg["op"] == 6:
+                if state.emit_events:
+                    _send_json(conn, {"op": 5, "d": {"eventType": "StreamStateChanged", "eventIntent": 64,
+                                                     "eventData": {"outputActive": state.streaming}}})
                 _send_json(conn, _respond(state, msg["d"]))
+            else:
+                state.unexpected.append(f"op {msg.get('op')}")
     except (ConnectionError, OSError, StopIteration):
         return
     finally:
@@ -276,6 +307,13 @@ class Case:
     obs_down: bool = False
     forbid_requests: set[str] = field(default_factory=set)
     require_requests: set[str] = field(default_factory=set)
+    password: str = PASSWORD
+    may_stop: bool = False          # only stop:* / republish:* may send StopStream
+    may_change_state: bool = False  # only a successful start / stop / republish may change OBS
+    max_stops: int = 1
+
+    def foreign_kept(self) -> bool:
+        return self.state.foreign_stream_after_stop
 
 
 FREE = {"schema": 1, "held": False, "stale": False}
@@ -301,7 +339,9 @@ CASES = [
     Case("readiness: recording", RC, [], ObsState(recording=True), 1, "stream OBS is recording -- not touching it", []),
     Case("readiness: outputActive missing", RC, [], ObsState(omit_output_active=True), 1, "returned no outputActive", []),
     Case("start: ready -> started, marker true", OS_, START, ObsState(), 0, "kbps", ["true"],
-         lease=FREE, require_requests={"StartStream"}),
+         lease=FREE, require_requests={"StartStream"}, may_change_state=True),
+    Case("start: with events interleaved", OS_, START, ObsState(emit_events=True), 0, "kbps", ["true"],
+         lease=FREE, require_requests={"StartStream"}, may_change_state=True),
     Case("start: refused -> marker false", OS_, START, ObsState(start_ok=False), 1, "StartStream refused", ["true", "false"],
          lease=FREE),
     Case("start: rig lease held -> no start, no marker", OS_, START, ObsState(), 1, "holds the rig lease", [],
@@ -310,23 +350,38 @@ CASES = [
          "OBS is already streaming", [], lease=FREE, forbid_requests={"StartStream"}),
     Case("start: recording -> no start, no marker", OS_, START, ObsState(recording=True), 1,
          "stream OBS is recording", [], lease=FREE, forbid_requests={"StartStream"}),
-    Case("start: lease endpoint down -> fail-open start", OS_, START, ObsState(), 0, "kbps", ["true"]),
+    Case("start: lease endpoint down -> fail-open start", OS_, START, ObsState(), 0, "kbps", ["true"],
+         may_change_state=True),
     Case("stop: ours -> stopped", OS_, STOP, ObsState(streaming=True), 0, "OBS stream stopped", [],
-         require_requests={"StopStream"}),
-    Case("stop: already stopped (501) -> ok", OS_, STOP, ObsState(), 0, "OBS stream stopped", []),
+         require_requests={"StopStream"}, may_stop=True, may_change_state=True),
+    Case("stop: OBS releases the output after 2 s", OS_, STOP, ObsState(streaming=True, stop_delay_s=2.0, emit_events=True),
+         0, "OBS stream stopped", [], require_requests={"StopStream"}, may_stop=True, may_change_state=True),
+    Case("stop: already stopped (501) -> ok", OS_, STOP, ObsState(), 0, "OBS stream stopped", [], may_stop=True),
     Case("stop: OBS keeps streaming -> fail loudly", OS_, STOP, ObsState(streaming=True, stop_takes_effect=False), 1,
-         "still streaming 20 s after StopStream", []),
+         "still streaming 20 s after StopStream", [], may_stop=True),
     Case("assert: not streaming -> ok", OS_, ASSERT, ObsState(), 0, "not streaming - good", [],
          forbid_requests={"StopStream", "StartStream"}),
     Case("assert: streaming -> fail, never stopped", OS_, ASSERT, ObsState(streaming=True), 1, "already streaming", [],
          forbid_requests={"StopStream"}),
     Case("assert: OBS down -> warning, proceed", OS_, ASSERT, ObsState(), 0, "not reachable", [], obs_down=True),
-    Case("assert: identify rejected -> fail", OS_, ASSERT, ObsState(reject_identify=True), 1, "identify rejected", []),
+    Case("assert: wrong password -> identify rejected -> fail", OS_, ASSERT, ObsState(), 1, "identify rejected", [],
+         password="wrong"),
+    Case("start: wrong password -> identify rejected, no marker", OS_, START, ObsState(), 1, "identify rejected", [],
+         lease=FREE, password="wrong"),
     Case("republish: ours -> stop, false, start, true", OS_, REPUBLISH, ObsState(streaming=True), 0,
-         "OBS streaming to the restreamer inpoint", ["false", "true"], lease=FREE,
-         require_requests={"StopStream", "StartStream"}),
+         "Measured dead air", ["false", "true"], lease=FREE,
+         require_requests={"StopStream", "StartStream"}, may_stop=True, may_change_state=True),
     Case("republish: restart refused -> marker false", OS_, REPUBLISH, ObsState(streaming=True, start_ok=False), 1,
-         "StartStream refused", ["false", "true", "false"], lease=FREE),
+         "StartStream refused", ["false", "true", "false"], lease=FREE, may_stop=True, may_change_state=True),
+    Case("republish: camera-box streams in the gap -> no restart, marker false, its stream kept", OS_, REPUBLISH,
+         ObsState(streaming=True, foreign_stream_after_stop=True), 1, "OBS is already streaming", ["false"],
+         lease=FREE, forbid_requests={"StartStream"}, may_stop=True),
+    Case("republish: camera-box records in the gap -> no restart, marker false", OS_, REPUBLISH,
+         ObsState(streaming=True, foreign_record_after_stop=True), 1, "stream OBS is recording", ["false"],
+         lease=FREE, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
+    Case("republish: rig lease held at the restart -> marker false", OS_, REPUBLISH, ObsState(streaming=True), 1,
+         "holds the rig lease", ["false"], lease=HELD, forbid_requests={"StartStream"}, may_stop=True,
+         may_change_state=True),
 ]
 
 
@@ -349,6 +404,7 @@ def markers(path: Path) -> list[str]:
 
 def run_case(case: Case) -> list[str]:
     problems: list[str] = []
+    before = (case.state.streaming, case.state.recording)
     with tempfile.TemporaryDirectory() as tmp_s:
         tmp = Path(tmp_s)
         obs = None if case.obs_down else MockObs(case.state)
@@ -360,7 +416,7 @@ def run_case(case: Case) -> list[str]:
         env.update({
             "OBS_WS_HOST": "127.0.0.1",
             "OBS_WS_PORT": str(obs.port if obs else _closed_port()),
-            "OBS_WS_PASSWORD": "mock-password",
+            "OBS_WS_PASSWORD": case.password,
             "RIG_LEASE_URL": lease.url if lease else f"http://127.0.0.1:{_closed_port()}/rig-lease.json",
             "GITHUB_ENV": str(env_file),
         })
@@ -385,6 +441,18 @@ def run_case(case: Case) -> list[str]:
     if got != case.expect_markers:
         problems.append(f"markers {got}, expected {case.expect_markers}")
     sent = set(case.state.requests)
+    if not case.may_stop and "StopStream" in sent:
+        problems.append("sent StopStream outside a stop/republish action (a stream CI did not start)")
+    if case.state.requests.count("StopStream") > case.max_stops:
+        problems.append(f"sent StopStream {case.state.requests.count('StopStream')}x")
+    after = (case.state.streaming, case.state.recording)
+    if case.foreign_kept():
+        if not case.state.streaming:
+            problems.append("camera-box's stream was stopped")
+    elif not case.may_change_state and after != before:
+        problems.append(f"OBS state changed {before} -> {after} (streaming, recording)")
+    if case.state.unexpected:
+        problems.append(f"sent unexpected messages {case.state.unexpected}")
     if sent - ALLOWED:
         problems.append(f"sent non-allowlisted requests {sorted(sent - ALLOWED)}")
     if sent & case.forbid_requests:

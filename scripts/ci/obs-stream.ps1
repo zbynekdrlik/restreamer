@@ -130,9 +130,11 @@ try {
     "Republish" {
       Stop-OurStream
       Set-StartedMarker "false"
-      Write-Host "Dead-air gap: ${GapSeconds}s..."
+      $deadAir = [System.Diagnostics.Stopwatch]::StartNew()
+      Write-Host "Dead-air gap: ${GapSeconds}s, then the checked restart..."
       Start-Sleep -Seconds $GapSeconds
       Start-OurStream $false
+      Write-Host "Measured dead air (stopped -> streaming again): $([math]::Round($deadAir.Elapsed.TotalSeconds, 1)) s"
     }
     "AssertNotStreaming" { Invoke-AssertNotStreaming }
   }

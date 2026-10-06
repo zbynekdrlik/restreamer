@@ -144,6 +144,29 @@ BAD_STEP_NAME = [
     re.compile(r"\bstoprecord\b", re.I),
 ]
 HOSTED_LABEL = re.compile(r"^(ubuntu|windows|macos)-[\w.]+$")
+# Dynamic dispatch would let a script reach Stop-OurStream / obs-stream.ps1 unseen.
+DYNAMIC_DISPATCH = re.compile(
+    r"set-alias|new-alias|\$\{function:|get-command|invoke-expression|\biex\b|&\s*\$", re.I)
+# Any obs-stream action word or a computed -File path in a stream-box job must be canonical.
+ACTION_WORD = re.compile(r"-Action\b\W*(?:Start|Stop|Republish|AssertNotStreaming)\b|-File\s+\$", re.I)
+# obs-stream.ps1's dispatcher, pinned: only these arms may call Start-/Stop-OurStream.
+DISPATCH = """switch ($Action) {
+"Start" { Start-OurStream $true }
+"Stop" { Stop-OurStream }
+"Republish" {
+Stop-OurStream
+Set-StartedMarker "false"
+$deadAir = [System.Diagnostics.Stopwatch]::StartNew()
+Write-Host "Dead-air gap: ${GapSeconds}s, then the checked restart..."
+Start-Sleep -Seconds $GapSeconds
+Start-OurStream $false
+Write-Host "Measured dead air (stopped -> streaming again): $([math]::Round($deadAir.Elapsed.TotalSeconds, 1)) s"
+}
+"AssertNotStreaming" { Invoke-AssertNotStreaming }
+}"""
+# word -> occurrences in obs-stream.ps1 code: the definition + the pinned uses.
+PINNED_COUNTS = {"Start-OurStream": 3, "Stop-OurStream": 3, "Set-StartedMarker": 4}
+MOCK_TEST = "python tests/ci/test_obs_stream.py"
 SKIP_DIRS = {"__pycache__"}
 
 
@@ -290,6 +313,10 @@ def invocation_errors(label: str, code: str) -> list[str]:
                 errors.append(f"{label}: `{s}` must be the whole run: of its step")
         elif not REPUBLISH_LINE.fullmatch(s):
             errors.append(f"{label}: not a canonical obs-stream.ps1 / obs-readiness-check.ps1 invocation: {s}")
+    for line in code.splitlines():
+        s = line.strip()
+        if ACTION_WORD.search(s) and s not in WHOLE_RUNS and not REPUBLISH_LINE.fullmatch(s):
+            errors.append(f"{label}: an obs-stream action / computed -File outside the canonical forms: {s}")
     return errors
 
 
@@ -363,6 +390,16 @@ def script_errors(rel: Path, text: str) -> list[str]:
         for line in code.splitlines():
             if CLIENT_INTERNALS.search(line):
                 errors.append(f"{rel}: obs-websocket client internals outside {OBS_LIB}: {line.strip()}")
+    # The OBS scripts live in scripts/ci; the installers' `irm ... | iex` self-elevation
+    # one-liners (scripts/*.ps1) are not OBS code, but they may not load the OBS client.
+    if rel.parent == SCRIPTS / "ci":
+        for line in code.splitlines():
+            if DYNAMIC_DISPATCH.search(line):
+                errors.append(f"{rel}: dynamic dispatch (alias / Get-Command / Invoke-Expression / & $var): {line.strip()}")
+    elif re.search(r"obs-ws\.ps1|obs-readiness-check\.ps1", code, re.I):
+        errors.append(f"{rel}: only scripts/ci may load the OBS client")
+    if rel != OBS_STREAM and re.search(r"obs-stream\.ps1|Start-OurStream|Stop-OurStream", code, re.I):
+        errors.append(f"{rel}: only workflows may run obs-stream.ps1 (and only it defines Start-/Stop-OurStream)")
     if rel != OBS_STREAM and (MARKER in code or "Set-StartedMarker" in code):
         errors.append(f"{rel}: {MARKER} may only be written by {OBS_STREAM}")
     spans = function_spans(code)
@@ -403,12 +440,38 @@ def check_obs_stream_shape(root: Path) -> list[str]:
             errs.append(f"{OBS_STREAM}: {why}")
     if not re.search(r'"Republish"\s*\{\s*\n\s*Stop-OurStream\s*\n\s*Set-StartedMarker "false"', code):
         errs.append(f"{OBS_STREAM}: Republish must write the marker false right after stopping our stream")
+    flat = "\n".join(l.strip() for l in code.splitlines() if l.strip())
+    if DISPATCH not in flat:
+        errs.append(f"{OBS_STREAM}: the action dispatcher differs from the pinned one (only Start/Stop/Republish "
+                    "arms may call Start-/Stop-OurStream); update DISPATCH in this guard only with a reviewed reason")
+    for word, n in PINNED_COUNTS.items():
+        got = len(re.findall(rf"(?<![\w-]){re.escape(word)}(?![\w-])", code))
+        if got != n:
+            errs.append(f"{OBS_STREAM}: {word} appears {got}x, pinned at {n}x (a new caller is not allowed)")
+    return errs
+
+
+def check_mock_job(root: Path) -> list[str]:
+    """The mock obs-websocket job must exist, run the test, and be required by the Rust CI Gate."""
+    wf = yaml.safe_load((root / CI).read_text(encoding="utf-8")) or {}
+    jobs = wf.get("jobs") or {}
+    job = jobs.get("obs-scripts-test")
+    errs = []
+    if not job or "windows" not in str(job.get("runs-on", "")):
+        errs.append("ci.yml: job obs-scripts-test (windows, Windows PowerShell 5.1) is missing")
+    elif not any(MOCK_TEST in str(st.get("run") or "") for st in job.get("steps") or []):
+        errs.append(f"ci.yml: obs-scripts-test must run `{MOCK_TEST}`")
+    gate = jobs.get("rust-ci-gate") or {}
+    gate_run = "\n".join(str(st.get("run") or "") for st in gate.get("steps") or [])
+    if "obs-scripts-test" not in (gate.get("needs") or []) or "obs-scripts-test:$" not in gate_run:
+        errs.append("ci.yml: rust-ci-gate must need obs-scripts-test and fail on its result")
     return errs
 
 
 def check(root: Path) -> list[str]:
     errors = check_workflows(root)
     errors += check_obs_stream_shape(root)
+    errors += check_mock_job(root)
     if not (root / OBS_LIB).is_file():
         errors.append(f"{OBS_LIB} is missing")
     for f in sorted((root / SCRIPTS).rglob("*")):
@@ -509,6 +572,13 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("an OBS kill hidden in a step's with: input", "      - name: Start delivery",
      "      - name: evil\n        uses: some/action@v1\n        with:\n          cmd: taskkill /F /IM obs64.exe\n\n      - name: Start delivery",
      "obs64.exe"),
+    ("a computed obs-stream path with -Action Stop before the start", ST_ASSERT,
+     "        run: |\n          $s = 'scripts/ci/obs-' + 'stream.ps1'\n          & powershell -NoProfile -File $s -Action Stop",
+     "outside the canonical forms"),
+    ("the mock obs-websocket job is dropped from the gate", "        mutation-testing,\n        obs-scripts-test,\n      ]",
+     "        mutation-testing,\n      ]", "rust-ci-gate must need obs-scripts-test"),
+    ("the mock obs-websocket job stops running the test", "        run: python tests/ci/test_obs_stream.py",
+     "        run: echo skipped", "must run `python tests/ci/test_obs_stream.py`"),
     ("the guard moved onto the stream box", "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
      "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
      "may only run in a GitHub-hosted job"),
@@ -525,6 +595,15 @@ STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
      '      Write-Host "::error::StartStream refused', "false when it is refused"),
     ("Start ignores a held rig lease", 'if ($holder) { Write-NotReady "camera-box holds the rig lease: $holder"; exit 1 }',
      "$null = $holder", "held rig lease"),
+    ("Start stops the stream when readiness says streaming", "    $why = Test-ObsReady\n",
+     '    $pre = Test-ObsReady; if ($pre -like "OBS is already streaming*") { Write-NotReady $pre; Close-Obs; Stop-OurStream; exit 1 }\n    $why = Test-ObsReady\n',
+     "Stop-OurStream appears"),
+    ("the Start arm stops first", '"Start" { Start-OurStream $true }', '"Start" { Stop-OurStream; Start-OurStream $true }',
+     "dispatcher differs"),
+    ("AssertNotStreaming stops through an alias", "function Invoke-AssertNotStreaming {",
+     "Set-Alias halt Stop-OurStream\nfunction Invoke-AssertNotStreaming {", "dynamic dispatch"),
+    ("Republish forces the marker true", '      Start-OurStream $false\n',
+     '      Set-StartedMarker "true"\n      Start-OurStream $false\n', "dispatcher differs"),
     ("Republish keeps the marker true across the gap", '      Stop-OurStream\n      Set-StartedMarker "false"\n',
      "      Stop-OurStream\n", "Republish must write the marker false"),
     ("AssertNotStreaming stops a foreign stream",
@@ -543,6 +622,9 @@ EXTRA_SCRIPTS: list[tuple[str, dict[str, str], str]] = [
     ("a helper script starts without readiness",
      {"scripts/ci/quick-start.ps1": '. "$PSScriptRoot\\obs-ws.ps1"\nConnect-Obs\n$null = Invoke-ObsRequest "StartStream"\n'},
      "StartStream request is allowed only in"),
+    ("the readiness script runs obs-stream.ps1 -Action Stop",
+     {"scripts/ci/obs-readiness-check.ps1": '& "$PSScriptRoot\\obs-stream.ps1" -Action Stop\n'},
+     "only workflows may run obs-stream.ps1"),
     ("a helper script opens its own websocket",
      {"scripts/ci/own-ws.ps1": "$w = New-Object System.Net.WebSockets.ClientWebSocket\n"}, "client internals outside"),
 ]
