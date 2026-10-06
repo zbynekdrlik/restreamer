@@ -28,6 +28,11 @@
 //! The decision logic is the pure [`StallTracker`]: explicit instants in,
 //! events out — the injected clock the unit tests drive. The thread loop only
 //! feeds it real `Instant`s and performs the I/O.
+//!
+//! Since #368 the RTMP ingest runs on its own runtime, so one detector
+//! instance probes each runtime. Every record and audit row carries
+//! `runtime` (`main` / `ingest`), and the ingest detector writes
+//! `logs/stall-ingest.log` next to the main `logs/stall.log`.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
@@ -58,6 +63,20 @@ pub const TICK_LATE_THRESHOLD: Duration = Duration::from_secs(1);
 pub const BASELINE_EVERY_TICKS: u32 = 10;
 /// `stall.log` is rotated to `stall.log.old` once it reaches this size.
 pub const STALL_LOG_MAX_BYTES: u64 = 1_000_000;
+/// The app-wide runtime (Tauri's in GUI mode): DB, HTTP, delivery, uploads.
+pub const MAIN_RUNTIME: &str = "main";
+/// The dedicated RTMP ingest runtime (#368).
+pub const INGEST_RUNTIME: &str = "ingest";
+
+/// Evidence file of the detector probing `runtime`: `stall.log` for the main
+/// runtime (unchanged since #367), `stall-<runtime>.log` for any other.
+pub fn stall_log_file_name(runtime: &str) -> String {
+    if runtime == MAIN_RUNTIME {
+        "stall.log".to_string()
+    } else {
+        format!("stall-{runtime}.log")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StallDetectorConfig {
@@ -73,12 +92,18 @@ impl StallDetectorConfig {
     /// The production thresholds, logging to `<data_dir>/logs/stall.log`
     /// (`C:\ProgramData\Restreamer\logs\stall.log` on stream.lan).
     pub fn production(data_dir: &Path) -> Self {
+        Self::production_for(data_dir, MAIN_RUNTIME)
+    }
+
+    /// The production thresholds for the detector probing `runtime`, logging
+    /// to `<data_dir>/logs/<stall_log_file_name(runtime)>`.
+    pub fn production_for(data_dir: &Path, runtime: &str) -> Self {
         Self {
             probe_interval: PROBE_INTERVAL,
             stall_threshold: STALL_THRESHOLD,
             tick_late_threshold: TICK_LATE_THRESHOLD,
             baseline_every_ticks: BASELINE_EVERY_TICKS,
-            log_path: data_dir.join("logs").join("stall.log"),
+            log_path: data_dir.join("logs").join(stall_log_file_name(runtime)),
             log_max_bytes: STALL_LOG_MAX_BYTES,
         }
     }
@@ -391,16 +416,27 @@ impl StallDetectorGuard {
     }
 }
 
-/// Start the detector thread against `handle`'s runtime.
+/// Start the detector thread against `handle`'s runtime, the main one.
 pub fn spawn_stall_detector(
     handle: Handle,
     config: StallDetectorConfig,
     audit_tx: Option<mpsc::Sender<AuditRow>>,
 ) -> std::io::Result<StallDetectorGuard> {
+    spawn_runtime_stall_detector(MAIN_RUNTIME, handle, config, audit_tx)
+}
+
+/// Start the detector thread against `handle`'s runtime, labelled `runtime`
+/// in every record and audit row.
+pub fn spawn_runtime_stall_detector(
+    runtime: &'static str,
+    handle: Handle,
+    config: StallDetectorConfig,
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
+) -> std::io::Result<StallDetectorGuard> {
     let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
-    let detector = Detector::new(handle, config, audit_tx);
+    let detector = Detector::new(runtime, handle, config, audit_tx);
     let thread = std::thread::Builder::new()
-        .name("stall-detector".into())
+        .name(format!("stall-detector-{runtime}"))
         .spawn(move || detector.run(stop_rx))?;
     Ok(StallDetectorGuard {
         stop_tx: Some(stop_tx),
@@ -408,9 +444,9 @@ pub fn spawn_stall_detector(
     })
 }
 
-/// `ServiceCore` entry point: production thresholds, the current runtime,
-/// `<data_dir>/logs/stall.log`. A failure to start is logged loudly and never
-/// stops the service.
+/// `ServiceCore` entry point: production thresholds, the current (main)
+/// runtime, `<data_dir>/logs/stall.log`. A failure to start is logged loudly
+/// and never stops the service.
 pub fn start_for_service(
     data_dir: &Path,
     audit_tx: mpsc::Sender<AuditRow>,
@@ -422,15 +458,27 @@ pub fn start_for_service(
             return None;
         }
     };
-    let config = StallDetectorConfig::production(data_dir);
+    start_for_runtime(MAIN_RUNTIME, handle, data_dir, audit_tx)
+}
+
+/// Production detector for `runtime` (`handle`'s runtime), logging to
+/// `<data_dir>/logs/<stall_log_file_name(runtime)>`. A failure to start is
+/// logged loudly and never stops the service.
+pub fn start_for_runtime(
+    runtime: &'static str,
+    handle: Handle,
+    data_dir: &Path,
+    audit_tx: mpsc::Sender<AuditRow>,
+) -> Option<StallDetectorGuard> {
+    let config = StallDetectorConfig::production_for(data_dir, runtime);
     let summary = format!(
-        "probe_interval_ms={} stall_threshold_ms={} tick_late_threshold_ms={} stall_log={}",
+        "runtime={runtime} probe_interval_ms={} stall_threshold_ms={} tick_late_threshold_ms={} stall_log={}",
         stall_log::ms(config.probe_interval),
         stall_log::ms(config.stall_threshold),
         stall_log::ms(config.tick_late_threshold),
         config.log_path.display()
     );
-    match spawn_stall_detector(handle, config, Some(audit_tx)) {
+    match spawn_runtime_stall_detector(runtime, handle, config, Some(audit_tx)) {
         Ok(guard) => {
             log::info!("process-stall detector started: {summary}");
             Some(guard)
@@ -520,6 +568,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The thread-side state: the pure tracker plus everything that does I/O.
 struct Detector {
+    /// Which runtime it probes (`main` / `ingest`), on every record.
+    runtime: &'static str,
     handle: Handle,
     config: StallDetectorConfig,
     audit_tx: Option<mpsc::Sender<AuditRow>>,
@@ -535,11 +585,13 @@ struct Detector {
 
 impl Detector {
     fn new(
+        runtime: &'static str,
         handle: Handle,
         config: StallDetectorConfig,
         audit_tx: Option<mpsc::Sender<AuditRow>>,
     ) -> Self {
         Self {
+            runtime,
             log: StallLog::new(config.log_path.clone(), config.log_max_bytes),
             tracker: StallTracker::new(&config),
             baseline_schedule: BaselineSchedule::new(config.baseline_every_ticks),
@@ -681,7 +733,7 @@ impl Detector {
                 self.write_error.take(),
                 at,
             );
-            self.emit_after_recovery(&report, detail);
+            self.emit_after_recovery(&report, stall_log::with_runtime(&detail, self.runtime));
         } else if self.baseline_schedule.due(self.tracker.in_stall()) {
             self.baseline = Some((now, resources::sample()));
         }
@@ -691,7 +743,10 @@ impl Detector {
         // No `log` here: this may run mid-stall. A failure (or a failed
         // rotation) rides on the next ProcessStall audit row and its
         // post-recovery warning instead.
-        match self.log.append(record) {
+        match self
+            .log
+            .append(&stall_log::with_runtime(record, self.runtime))
+        {
             Ok(None) => {}
             Ok(Some(warning)) => {
                 self.write_error = Some(format!("{}: {warning}", self.log.path().display()));
@@ -706,7 +761,8 @@ impl Detector {
     /// pipeline and the audit channel are safe to use from here.
     fn emit_after_recovery(&self, report: &StallReport, detail: Value) {
         log::warn!(
-            "process stall: class={} duration_ms={} trigger={} detector_max_late_ms={} detector_total_late_ms={} evidence={} evidence_write_error={}",
+            "process stall: runtime={} class={} duration_ms={} trigger={} detector_max_late_ms={} detector_total_late_ms={} evidence={} evidence_write_error={}",
+            self.runtime,
             report.class.as_str(),
             stall_log::ms(report.duration),
             report.trigger.as_str(),

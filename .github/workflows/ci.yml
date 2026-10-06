@@ -1903,10 +1903,12 @@ jobs:
           }
 
           Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          # -Priority 4 = Normal (#368), same as scripts/install.ps1. The
+          # default 7 starts Restreamer BelowNormal and OBS drops frames.
           $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
           $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
           $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -Priority 4
 
           Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
           Write-Host "Created scheduled task: $TaskName"

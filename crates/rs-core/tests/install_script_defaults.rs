@@ -456,6 +456,99 @@ fn install_script_firewall_rules_are_idempotent() {
     }
 }
 
+/// The value of a `-Priority` flag on this skeleton line, read as an EXACT
+/// number (stops at the first non-digit, so `-Priority 44` is 44, never 4).
+/// Accepts PowerShell's `-Priority 4` and `-Priority:4` forms.
+fn task_priority(skeleton: &str) -> Option<u32> {
+    const FLAG: &str = "-priority";
+    let lower = skeleton.to_ascii_lowercase();
+    let at = lower.find(FLAG)?;
+    let value = skeleton[at + FLAG.len()..].trim_start_matches([':', ' ']);
+    let digits: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// For each registration of the `RestreamerGUI` task (`Register-ScheduledTask
+/// -TaskName $TaskName`), the `-Priority` of the settings it registers: the
+/// nearest `New-ScheduledTaskSettingsSet` above it. `None` = no `-Priority`,
+/// i.e. Task Scheduler's default 7 (BelowNormal).
+fn restreamer_task_priorities(lines: &[CodeLine]) -> Vec<Option<u32>> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.skeleton.contains("Register-ScheduledTask")
+                && l.skeleton.contains("-TaskName $TaskName")
+        })
+        .map(|(i, _)| {
+            lines[..i]
+                .iter()
+                .rev()
+                .find(|l| l.skeleton.contains("New-ScheduledTaskSettingsSet"))
+                .and_then(|l| task_priority(&l.skeleton))
+        })
+        .collect()
+}
+
+fn assert_task_runs_at_normal_priority(text: &str, file: &str) {
+    let lines = code_lines(text);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.code.contains("$TaskName = \"RestreamerGUI\"")),
+        "{file} must name the task RestreamerGUI"
+    );
+    let priorities = restreamer_task_priorities(&lines);
+    assert!(
+        !priorities.is_empty(),
+        "{file} must register the RestreamerGUI task"
+    );
+    assert!(
+        priorities.iter().all(|p| *p == Some(4)),
+        "{file} registers RestreamerGUI with task priorities {priorities:?}; every registration \
+         must pass `New-ScheduledTaskSettingsSet ... -Priority 4` (Normal). Task Scheduler's \
+         default 7 runs the app BelowNormal, so every Normal-or-higher thread on the box \
+         preempts the RTMP ingest (#368)"
+    );
+}
+
+#[test]
+fn task_priority_reads_the_exact_flag_value() {
+    assert_eq!(
+        task_priority("$s = New-ScheduledTaskSettingsSet -Priority 4"),
+        Some(4)
+    );
+    assert_eq!(
+        task_priority("$s = New-ScheduledTaskSettingsSet -priority:4 -X"),
+        Some(4)
+    );
+    assert_eq!(
+        task_priority("$s = New-ScheduledTaskSettingsSet -Priority 44"),
+        Some(44)
+    );
+    assert_eq!(
+        task_priority("$s = New-ScheduledTaskSettingsSet -StartWhenAvailable"),
+        None
+    );
+}
+
+/// #368 design test (v): a fresh install runs Restreamer at Normal priority.
+#[test]
+fn install_script_registers_the_task_at_normal_priority() {
+    assert_task_runs_at_normal_priority(&install_script(), "scripts/install.ps1");
+}
+
+/// #368: the CI deploy re-registers the task on stream.lan on every deploy,
+/// so it must carry the same priority as the installer.
+#[test]
+fn ci_deploy_registers_the_task_at_normal_priority() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
+    let ci = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!(".github/workflows/ci.yml must be readable at {path:?}: {e}"));
+    assert_task_runs_at_normal_priority(&ci, ".github/workflows/ci.yml");
+}
+
 fn install_script() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.ps1");
     std::fs::read_to_string(&path)
