@@ -200,11 +200,15 @@ Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-O
     Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
-# Create scheduled task for auto-start at login
+# Create scheduled task for auto-start at login.
+# -Priority 4 = Normal (#368). Task Scheduler's default 7 starts the app
+# BelowNormal, so every Normal-or-higher thread on the box preempts the RTMP
+# ingest and OBS drops frames. Re-running this script re-registers the task
+# (above), so an existing install gets the new priority too.
 $action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $InstallDir
 $trigger = New-ScheduledTaskTrigger -AtLogon
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -Priority 4
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
 Write-Ok "Scheduled task registered"

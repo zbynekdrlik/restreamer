@@ -140,6 +140,14 @@ impl ServiceCore {
     ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
 
+        // #368: Normal process priority (never above) and EcoQoS off. The
+        // task registration sets -Priority 4; this covers a box whose task
+        // was registered before that (it would start BelowNormal).
+        let priority = crate::ingest_priority::apply_process_priority(
+            &crate::ingest_priority::SystemPriorityOs,
+        );
+        log::log!(priority.level(), "{}", priority.summary());
+
         // Database: use provided pool or create a new one. For audit
         // purposes we capture the schema version before and after
         // running migrations so a `MigrationsApplied` row (emitted below,
