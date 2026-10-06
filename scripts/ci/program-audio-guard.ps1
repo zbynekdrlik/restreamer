@@ -29,9 +29,10 @@
 #                                writes the breach marker FIRST, then asks Restreamer to
 #                                stop OBS streaming (POST /api/v1/obs/stop-stream) and
 #                                re-asks until Restreamer's GET /api/v1/obs/status
-#                                CONFIRMS OBS is not streaming (the POST only queues the
-#                                command). It never gives up while our stream is live;
-#                                the teardown (or the job end) ends it.
+#                                CONFIRMS OBS is not streaming (3 reads in a row; the
+#                                POST only queues the command), then keeps watching and
+#                                re-stops if OBS streams again. It never gives up while
+#                                the stream is ours; the teardown (or the job end) ends it.
 #   Assert-NoProgramAudioBreach  fails the step (::error:: + job summary) when the
 #                                breach marker exists, or when the watchdog died or hung
 #                                (an unguarded stream is a failure too).
@@ -223,12 +224,32 @@ function Add-ProgramAudioBreachLine([string]$text) {
   Write-ProgramAudioLog $text
 }
 
-# After a breach: ask for the stop until Restreamer CONFIRMS OBS stopped. Never gives
-# up while our stream is live; the heartbeat keeps proving the watchdog is alive.
+# Three consecutive "not streaming" reads, 1 s apart, within ~6 s. Restreamer's flag
+# can read false for a moment while OBS still sends (right after its OBS client
+# connects, or while OBS reconnects), so one read is not enough.
+function Test-ProgramAudioObsStopped {
+  $quiet = 0
+  for ($i = 0; $i -lt 6; $i++) {
+    Start-Sleep -Seconds 1
+    if ((Get-ProgramAudioObsStreaming) -eq $false) {
+      $quiet++
+      if ($quiet -ge 3) { return $true }
+    } else {
+      $quiet = 0
+    }
+  }
+  return $false
+}
+
+# After a breach: ask for the stop until Restreamer CONFIRMS OBS stopped, then KEEP
+# watching while the stream is ours: a lost StopStream or an OBS reconnect can put it
+# back on air, and then the stop is re-issued. Never gives up while our stream is
+# ours; the heartbeat keeps proving the watchdog is alive, the teardown ends it.
 function Invoke-ProgramAudioBreachStop {
   $p = Get-ProgramAudioPaths
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
   $attempt = 0
+  $confirmed = $false
   while ($true) {
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     if (-not (Test-ProgramAudioStreamOwned)) {
@@ -238,12 +259,25 @@ function Invoke-ProgramAudioBreachStop {
     $attempt++
     $err = Invoke-ProgramAudioStop
     if ($err) { Write-ProgramAudioLog "stop-stream attempt $attempt failed: $err" }
-    for ($i = 0; $i -lt 5; $i++) {
-      Start-Sleep -Seconds 1
-      if ((Get-ProgramAudioObsStreaming) -eq $false) {
-        Add-ProgramAudioBreachLine "stop CONFIRMED: Restreamer reports OBS not streaming (stop-stream attempt $attempt)"
-        return
+    if (Test-ProgramAudioObsStopped) {
+      $word = "CONFIRMED"
+      if ($confirmed) { $word = "re-CONFIRMED" }
+      Add-ProgramAudioBreachLine "stop ${word}: Restreamer reports OBS not streaming (stop-stream attempt $attempt)"
+      $confirmed = $true
+      # Watch until our stream is over; back to the stop loop if OBS streams again.
+      while ($true) {
+        Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
+        if (-not (Test-ProgramAudioStreamOwned)) {
+          Write-ProgramAudioLog "our stream is over (marker false) -- watch ended"
+          return
+        }
+        Start-Sleep -Seconds $poll
+        if ((Get-ProgramAudioObsStreaming) -eq $true) {
+          Add-ProgramAudioBreachLine "OBS is streaming AGAIN after the confirmed stop -- re-issuing the stop"
+          break
+        }
       }
+      continue
     }
     if ($attempt -eq 1 -or $attempt % 10 -eq 0) {
       Add-ProgramAudioBreachLine "stop NOT confirmed yet after $attempt attempt(s) -- still asking"

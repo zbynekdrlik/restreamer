@@ -18,8 +18,8 @@ this file pins their WIRING, which no runtime test can see:
         `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`;
       - every LONG streaming step (timeout-minutes >= 10, or NO timeout-minutes: it
         may run to the job limit) is followed by a breach check before the next
-        long step and before the OBS stop. `if: always()` cleanup steps are not
-        streaming steps; the always() teardown assert covers them;
+        long step and before the OBS stop. Only a step with a timeout under 10
+        minutes is short, whatever its `if:` says;
       - after the OBS stop, an `if: always()` teardown stops the watchdog and then
         asserts no breach;
       - no watchdog / check / teardown step is continue-on-error;
@@ -103,10 +103,11 @@ def check_guard_file(root: Path) -> list[str]:
 
 
 def long_step(step: dict) -> bool:
-    if "always()" in norm_if(step.get("if")):
-        return False
     t = step.get("timeout-minutes")
-    return t is None or not isinstance(t, (int, float)) or t >= LONG_MINUTES
+    bounded_short = isinstance(t, (int, float)) and not isinstance(t, bool) and t < LONG_MINUTES
+    # A short `if: always()` cleanup step is not a streaming step; an always() step that
+    # can run long is (adding always() must not buy a long step out of its check).
+    return not bounded_short
 
 
 def check_job(job_name: str, job: dict) -> list[str]:
@@ -243,7 +244,11 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      - name: evil untimed soak\n        run: echo soak\n\n" + YT_SUSTAINED,
      "`evil untimed soak` has no program-audio breach check"),
     ("an always() cleanup step is not a streaming step", YT_SUSTAINED,
-     "      - name: evil cleanup\n        if: always()\n        run: echo cleanup\n\n" + YT_SUSTAINED, None),
+     "      - name: evil cleanup\n        if: always()\n        timeout-minutes: 2\n        run: echo cleanup\n\n"
+     + YT_SUSTAINED, None),
+    ("always() does not exempt a 30-min step", YT_SUSTAINED,
+     "      - name: evil always soak\n        if: always()\n        timeout-minutes: 30\n        run: echo soak\n\n"
+     + YT_SUSTAINED, "`evil always soak` has no program-audio breach check"),
     ("YT teardown only on success", TEARDOWN, TEARDOWN.replace("always()", "success()"), "needs exactly `if: always()`"),
     ("YT teardown asserts before stopping", "          Stop-ProgramAudioWatchdog\n          Assert-NoProgramAudioBreach",
      "          Assert-NoProgramAudioBreach\n          Stop-ProgramAudioWatchdog", "THEN assert"),

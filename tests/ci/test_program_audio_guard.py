@@ -302,8 +302,9 @@ def breach_checks(job: Env, st: MockState, expect: str, stops: int) -> list[str]
         probs.append("the breach marker never recorded a CONFIRMED stop")
     if st.obs_streaming:
         probs.append("OBS (per the mock Restreamer) is still streaming")
-    if pid and not wait_for(lambda: not alive(pid), 10):
-        probs.append("watchdog did not exit after the breach")
+    time.sleep(1.5)
+    if not (pid and alive(pid)):
+        probs.append("the watchdog stopped watching after the confirmed stop (our stream is still ours)")
     if len(st.stops) != stops:
         probs.append(f"stop endpoint called {len(st.stops)}x, expected {stops}")
     text = breach.read_text(encoding="ascii")
@@ -319,6 +320,52 @@ def breach_checks(job: Env, st: MockState, expect: str, stops: int) -> list[str]
     t = job.run("Stop-ProgramAudioWatchdog\nAssert-NoProgramAudioBreach")
     if t.returncode != 1:
         probs.append(f"teardown after a breach exited {t.returncode}, expected 1")
+    if pid and not wait_for(lambda: not alive(pid), 10):
+        probs.append("the teardown did not end the watchdog")
+    return probs
+
+
+def wd_back_on_air_is_stopped_again(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # Confirmed stop, then OBS streams again (a lost StopStream + an OBS reconnect).
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    breach = job.path("program-audio-breach.txt")
+    if not wait_for(lambda: breach.exists() and "stop CONFIRMED" in breach.read_text(encoding="ascii"), 30):
+        return ["no confirmed stop"]
+    st.obs_streaming = True
+    probs = []
+    if not wait_for(lambda: "stop re-CONFIRMED" in breach.read_text(encoding="ascii"), 30):
+        probs.append("a stream back on air after the confirmed stop was not stopped again")
+    text = breach.read_text(encoding="ascii")
+    if "OBS is streaming AGAIN after the confirmed stop" not in text:
+        probs.append(f"the return to air is not recorded: {text!r}")
+    if len(st.stops) != 2 or st.obs_streaming:
+        probs.append(f"stops={len(st.stops)} (expected 2), still streaming={st.obs_streaming}")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_disconnected_status_is_not_a_confirmation(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # Restreamer's OBS client is disconnected: its streaming=false proves nothing.
+    st.obs_connected = False
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    breach = job.path("program-audio-breach.txt")
+    probs = []
+    if not wait_for(lambda: breach.exists() and "stop NOT confirmed yet" in breach.read_text(encoding="ascii"), 20):
+        probs.append("a disconnected status was not treated as unconfirmed")
+    if "CONFIRMED:" in breach.read_text(encoding="ascii"):
+        probs.append("confirmed on a disconnected status")
+    st.obs_connected = True
+    if not wait_for(lambda: "stop CONFIRMED" in breach.read_text(encoding="ascii"), 30):
+        probs.append("not confirmed once Restreamer's OBS client reconnected")
+    if len(st.stops) < 2:
+        probs.append(f"the stop was not re-issued while unconfirmed (stops={len(st.stops)})")
+    job.run("Stop-ProgramAudioWatchdog")
     return probs
 
 
@@ -516,6 +563,8 @@ WATCHDOG_CASES = [
     ("watchdog: stop endpoint down once (Restreamer restarting) -> retried", wd_stop_retried_while_restreamer_down),
     ("watchdog: stop queued but OBS keeps streaming -> re-issued until CONFIRMED",
      wd_queued_stop_is_reissued_until_confirmed),
+    ("watchdog: back on air after the confirmed stop -> stopped again", wd_back_on_air_is_stopped_again),
+    ("watchdog: Restreamer's OBS client disconnected -> not a confirmation", wd_disconnected_status_is_not_a_confirmation),
     ("watchdog: music while the stream is not ours -> no stop, no breach", wd_not_our_stream_is_never_stopped),
     ("watchdog: unconfirmed stop keeps going, ends when our stream ends", wd_stop_ends_when_our_stream_ends),
     ("start gate: an earlier breach refuses the next start", wd_start_refused_after_breach),

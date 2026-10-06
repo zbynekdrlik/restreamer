@@ -6978,6 +6978,13 @@ jobs:
             }
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "Stop OBS stream (only the one this job started, #374)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
         shell: powershell

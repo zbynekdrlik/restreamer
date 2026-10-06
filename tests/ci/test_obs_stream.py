@@ -573,8 +573,10 @@ def run_case(case: Case) -> list[str]:
         problems.append(f"output lacks {case.expect_text!r}")
     if api.posts:
         problems.append(f"POSTed Restreamer's stop-stream API {api.posts}x (only the #379 watchdog may)")
-    if (owned or None) != (got[-1] if got else None):
-        problems.append(f"the #379 stream-owned record is {owned!r}, the last marker {got[-1] if got else None!r}")
+    # #379: the stream-owned record mirrors the last marker; a confirmed Stop clears it.
+    want_owned = "false" if case.args == STOP and proc.returncode == 0 else (got[-1] if got else None)
+    if (owned or None) != want_owned:
+        problems.append(f"the #379 stream-owned record is {owned!r}, expected {want_owned!r}")
     if got != case.expect_markers:
         problems.append(f"markers {got}, expected {case.expect_markers}")
     sent = set(case.state.requests)

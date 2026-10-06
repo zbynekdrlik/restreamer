@@ -151,9 +151,14 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
   - The runner's job-end cleanup reaps it.
   - On a breach it writes the marker FIRST, then POSTs `/api/v1/obs/stop-stream`. That POST
     only QUEUES a command (`obs.rs`: 200 = queued). So the watchdog re-POSTs until
-    `GET /api/v1/obs/status` reports `connected:true, streaming:false`, then writes
-    `stop CONFIRMED`. It never gives up while our stream is live: a crash gate may have
-    Restreamer down. It keeps its heartbeat, and the teardown ends it.
+    `GET /api/v1/obs/status` reports `connected:true, streaming:false` three times in a
+    row, then writes `stop CONFIRMED`. One read is not enough: that flag can read false
+    while OBS still sends (right after Restreamer's OBS client connects, or while OBS
+    reconnects).
+  - After the confirmation it KEEPS watching while the stream is ours, and re-stops if OBS
+    streams again (a lost StopStream plus an OBS reconnect). It never gives up while the
+    stream is ours, because a crash gate may have Restreamer down. It keeps its heartbeat.
+    A confirmed `-Action Stop` (owned=false) or the teardown ends it.
   - An unreachable, stale or malformed read is re-read once after 2 s. A FOREIGN or UNKNOWN
     verdict trips at once.
   - A dead watchdog fails the assert, and so does a hung one: a heartbeat older than
@@ -167,8 +172,8 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
   - the watchdog step comes right after the start, under
     `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`;
   - a "Program-audio breach check" step follows every long step before the next long step and
-    before the OBS stop. A long step has a timeout >= 10 min or NO `timeout-minutes` (it can
-    run to the job limit); `if: always()` cleanup steps are exempt. When you add such a step
+    before the OBS stop. A step counts as short only when its timeout is under 10 min,
+    whatever its `if:` says. No `timeout-minutes` means it can run to the job limit. When you add such a step
     to a streaming job, add a check after it;
   - an `if: always()` teardown after the OBS stop runs Stop, THEN Assert.
 

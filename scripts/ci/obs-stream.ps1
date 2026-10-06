@@ -173,6 +173,8 @@ function Stop-OurStream {
       $data = Get-ObsData "GetStreamStatus" (Invoke-ObsRequest "GetStreamStatus")
       if (-not (Get-ObsActive "GetStreamStatus" $data)) {
         Write-Host "OBS stream stopped (the one this job started)"
+        # #379: nothing of ours streams now; the program-audio watchdog stands down.
+        Set-ProgramAudioStreamOwned $false
         return
       }
       # A shorter duration than just before our stop = a new session took OBS.
