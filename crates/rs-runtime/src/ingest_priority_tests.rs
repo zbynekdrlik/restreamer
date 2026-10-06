@@ -37,6 +37,26 @@ impl FakeOs {
         }
     }
 
+    /// What a `RestreamerGUI` task still at Task Scheduler priority 7
+    /// starts the app with (stream.lan, #368 issuecomment-6012351712):
+    /// BelowNormal class, memory priority LOW, I/O priority Low.
+    fn task_priority_7() -> Self {
+        Self {
+            memory: Mutex::new(OsCall::Done(MEMORY_PRIORITY_LOW)),
+            io: Mutex::new(OsCall::Done(IO_PRIORITY_LOW)),
+            ..Self::at(BELOW_NORMAL_PRIORITY_CLASS)
+        }
+    }
+
+    /// A process at Normal class with these memory and I/O priorities.
+    fn levels(memory: u32, io: u32) -> Self {
+        Self {
+            memory: Mutex::new(OsCall::Done(memory)),
+            io: Mutex::new(OsCall::Done(io)),
+            ..Self::at(NORMAL_PRIORITY_CLASS)
+        }
+    }
+
     /// The cell and the set outcome of one process level, and its name in
     /// the call log.
     fn level(&self, which: ProcessLevel) -> (&Mutex<OsCall<u32>>, &OsCall<()>, &'static str) {
@@ -214,6 +234,8 @@ fn a_below_normal_process_is_raised_to_normal_and_ecoqos_is_switched_off() {
         [
             "get_class",
             "set_class 0x20",
+            "get_memory",
+            "get_io",
             "throttling v1 control 0x1 state 0x0"
         ]
     );
@@ -221,7 +243,9 @@ fn a_below_normal_process_is_raised_to_normal_and_ecoqos_is_switched_off() {
     assert_eq!(report.raise, Some(OsCall::Done(())));
     assert_eq!(
         report.summary(),
-        "process priority class below_normal; raise to normal: ok; EcoQoS throttling off: ok"
+        "process priority class below_normal; raise to normal: ok; \
+         memory priority normal (5), kept; I/O priority normal (2), kept; \
+         EcoQoS throttling off: ok"
     );
     assert_eq!(report.level(), log::Level::Info);
 }
@@ -233,7 +257,12 @@ fn a_normal_or_higher_process_keeps_its_class() {
         let report = apply_process_priority(&os);
         assert_eq!(
             os.calls(),
-            ["get_class", "throttling v1 control 0x1 state 0x0"],
+            [
+                "get_class",
+                "get_memory",
+                "get_io",
+                "throttling v1 control 0x1 state 0x0"
+            ],
             "{class:#x} must never be changed"
         );
         assert_eq!(report.raise, None);
@@ -242,7 +271,8 @@ fn a_normal_or_higher_process_keeps_its_class() {
     let report = apply_process_priority(&FakeOs::at(NORMAL_PRIORITY_CLASS));
     assert_eq!(
         report.summary(),
-        "process priority class normal; class kept; EcoQoS throttling off: ok"
+        "process priority class normal; class kept; memory priority normal (5), kept; \
+         I/O priority normal (2), kept; EcoQoS throttling off: ok"
     );
 }
 
@@ -257,12 +287,19 @@ fn failed_calls_keep_the_class_and_warn() {
     let report = apply_process_priority(&os);
     assert_eq!(
         os.calls(),
-        ["get_class", "throttling v1 control 0x1 state 0x0"]
+        [
+            "get_class",
+            "get_memory",
+            "get_io",
+            "throttling v1 control 0x1 state 0x0"
+        ]
     );
     assert_eq!(report.action, ClassAction::Keep);
     assert_eq!(
         report.summary(),
-        "process priority class FAILED (denied); class kept; EcoQoS throttling off: ok"
+        "process priority class FAILED (denied); class kept; \
+         memory priority normal (5), kept; I/O priority normal (2), kept; \
+         EcoQoS throttling off: ok"
     );
     assert_eq!(report.level(), log::Level::Warn);
 
@@ -273,7 +310,9 @@ fn failed_calls_keep_the_class_and_warn() {
     assert_eq!(raise_failed.level(), log::Level::Warn);
     assert_eq!(
         raise_failed.summary(),
-        "process priority class idle; raise to normal: FAILED (no); EcoQoS throttling off: ok"
+        "process priority class idle; raise to normal: FAILED (no); \
+         memory priority normal (5), kept; I/O priority normal (2), kept; \
+         EcoQoS throttling off: ok"
     );
 
     let ecoqos_failed = apply_process_priority(&FakeOs {
@@ -288,17 +327,179 @@ fn failed_calls_keep_the_class_and_warn() {
 fn an_unsupported_platform_is_reported_at_info() {
     let os = FakeOs {
         class: OsCall::Unsupported,
+        memory: Mutex::new(OsCall::Unsupported),
+        io: Mutex::new(OsCall::Unsupported),
         throttling: OsCall::Unsupported,
         ..FakeOs::at(0)
     };
     let report = apply_process_priority(&os);
     assert_eq!(report.action, ClassAction::Keep);
     assert_eq!(
+        os.calls(),
+        [
+            "get_class",
+            "get_memory",
+            "get_io",
+            "throttling v1 control 0x1 state 0x0"
+        ]
+    );
+    assert_eq!(
         report.summary(),
         "process priority class unsupported on this platform; class kept; \
+         memory priority unsupported on this platform, kept; \
+         I/O priority unsupported on this platform, kept; \
          EcoQoS throttling off: unsupported on this platform"
     );
     assert_eq!(report.level(), log::Level::Info);
+}
+
+/// ROZHODNUTÉ issuecomment-6013075985 item 1. A box whose task still has
+/// Task Scheduler priority 7 (streampp, an in-app-updated install) starts
+/// the app with memory priority LOW and I/O priority Low as well as a
+/// BelowNormal class. Startup restores all three to Normal, reads each level
+/// back and logs before and after.
+#[test]
+fn a_task_priority_7_process_gets_normal_memory_and_io_priority() {
+    let os = FakeOs::task_priority_7();
+    let report = apply_process_priority(&os);
+    assert_eq!(
+        os.calls(),
+        [
+            "get_class",
+            "set_class 0x20",
+            "get_memory",
+            "set_memory 5",
+            "get_memory",
+            "get_io",
+            "set_io 2",
+            "get_io",
+            "throttling v1 control 0x1 state 0x0"
+        ]
+    );
+    assert_eq!(
+        report.summary(),
+        "process priority class below_normal; raise to normal: ok; \
+         memory priority low (2), raise to normal: ok, now normal (5); \
+         I/O priority low (1), raise to normal: ok, now normal (2); \
+         EcoQoS throttling off: ok"
+    );
+    assert_eq!(report.level(), log::Level::Info);
+}
+
+/// Each level is raised only from a KNOWN value below Normal, and only to
+/// Normal: never lowered (I/O High or Critical stays), never above Normal,
+/// and an unknown value is left alone.
+#[test]
+fn memory_and_io_are_raised_only_from_a_known_level_below_normal() {
+    let raised = |memory: u32, io: u32| {
+        let os = FakeOs::levels(memory, io);
+        apply_process_priority(&os);
+        let calls = os.calls();
+        (
+            calls.iter().any(|c| c == "set_memory 5"),
+            calls.iter().any(|c| c == "set_io 2"),
+            calls.iter().filter(|c| c.starts_with("set_")).count(),
+        )
+    };
+    for memory in [
+        MEMORY_PRIORITY_VERY_LOW,
+        MEMORY_PRIORITY_LOW,
+        MEMORY_PRIORITY_MEDIUM,
+        MEMORY_PRIORITY_BELOW_NORMAL,
+    ] {
+        assert_eq!(
+            raised(memory, IO_PRIORITY_NORMAL),
+            (true, false, 1),
+            "memory {memory}"
+        );
+    }
+    for memory in [MEMORY_PRIORITY_NORMAL, 0, 6, 99] {
+        assert_eq!(
+            raised(memory, IO_PRIORITY_NORMAL),
+            (false, false, 0),
+            "memory {memory}"
+        );
+    }
+    for io in [IO_PRIORITY_VERY_LOW, IO_PRIORITY_LOW] {
+        assert_eq!(
+            raised(MEMORY_PRIORITY_NORMAL, io),
+            (false, true, 1),
+            "io {io}"
+        );
+    }
+    for io in [
+        IO_PRIORITY_NORMAL,
+        IO_PRIORITY_HIGH,
+        IO_PRIORITY_CRITICAL,
+        5,
+        99,
+    ] {
+        assert_eq!(
+            raised(MEMORY_PRIORITY_NORMAL, io),
+            (false, false, 0),
+            "io {io}"
+        );
+    }
+}
+
+/// Kept levels name their value; a level that cannot be read is left alone
+/// and makes the line a warning.
+#[test]
+fn kept_and_unreadable_levels_are_named_in_the_log_line() {
+    let report = apply_process_priority(&FakeOs::levels(0, IO_PRIORITY_HIGH));
+    assert_eq!(
+        report.summary(),
+        "process priority class normal; class kept; memory priority unknown (0), kept; \
+         I/O priority high (3), kept; EcoQoS throttling off: ok"
+    );
+    assert_eq!(report.level(), log::Level::Info);
+
+    let os = FakeOs {
+        io: Mutex::new(OsCall::Failed("gone".into())),
+        ..FakeOs::task_priority_7()
+    };
+    let report = apply_process_priority(&os);
+    assert!(
+        report
+            .summary()
+            .contains("; I/O priority FAILED (gone), kept; "),
+        "{}",
+        report.summary()
+    );
+    assert!(!os.calls().iter().any(|c| c.starts_with("set_io")));
+    assert_eq!(report.level(), log::Level::Warn);
+}
+
+/// A raise Windows refuses is logged with the value read back after it, and
+/// makes the line a warning.
+#[test]
+fn a_refused_level_raise_warns() {
+    let os = FakeOs {
+        set_memory: OsCall::Failed("denied".into()),
+        ..FakeOs::task_priority_7()
+    };
+    let report = apply_process_priority(&os);
+    assert!(
+        report
+            .summary()
+            .contains("; memory priority low (2), raise to normal: FAILED (denied), now low (2); "),
+        "{}",
+        report.summary()
+    );
+    assert_eq!(report.level(), log::Level::Warn);
+
+    let io_refused = apply_process_priority(&FakeOs {
+        set_io: OsCall::Failed("denied".into()),
+        ..FakeOs::levels(MEMORY_PRIORITY_NORMAL, IO_PRIORITY_VERY_LOW)
+    });
+    assert!(
+        io_refused.summary().contains(
+            "; I/O priority very_low (0), raise to normal: FAILED (denied), now very_low (0); "
+        ),
+        "{}",
+        io_refused.summary()
+    );
+    assert_eq!(io_refused.level(), log::Level::Warn);
 }
 
 #[test]
