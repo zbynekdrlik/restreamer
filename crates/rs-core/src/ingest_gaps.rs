@@ -54,17 +54,26 @@ pub struct IngestGapSnapshot {
 impl IngestGapCounters {
     /// Count one arrival gap of `gap_ms`, which ended at `at_ms`.
     pub fn record_arrival_gap(&self, gap_ms: u64, at_ms: i64) {
-        let _ = (gap_ms, at_ms);
+        self.arrival_gaps.fetch_add(1, Ordering::Relaxed);
+        self.arrival_gap_max_ms.fetch_max(gap_ms, Ordering::Relaxed);
+        self.arrival_gap_total_ms
+            .fetch_add(gap_ms, Ordering::Relaxed);
+        self.last_arrival_gap_ms.store(gap_ms, Ordering::Relaxed);
+        self.last_arrival_gap_at_ms.store(at_ms, Ordering::Relaxed);
     }
 
     /// Count one source-ts jump that dropped `dropped` frames, seen at `at_ms`.
     pub fn record_source_jump(&self, dropped: u64, at_ms: i64) {
-        let _ = (dropped, at_ms);
+        self.source_ts_jumps.fetch_add(1, Ordering::Relaxed);
+        self.dropped_frames.fetch_add(dropped, Ordering::Relaxed);
+        self.last_jump_dropped_frames
+            .store(dropped, Ordering::Relaxed);
+        self.last_jump_at_ms.store(at_ms, Ordering::Relaxed);
     }
 
     /// The current stream's measured frame interval (µs), 0 = unknown.
     pub fn set_frame_interval_us(&self, us: u64) {
-        let _ = us;
+        self.frame_interval_us.store(us, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> IngestGapSnapshot {

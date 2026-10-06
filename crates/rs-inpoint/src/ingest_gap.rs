@@ -87,21 +87,43 @@ pub(crate) struct FrameInterval {
 impl FrameInterval {
     /// The current estimate in ms, `None` during the warm-up.
     pub(crate) fn estimate(&self) -> Option<f64> {
-        let _ = (self.window, self.len, self.next, self.cum_ms, self.cum_n);
-        None
+        if self.len < WARMUP_DELTAS {
+            return None;
+        }
+        if self.cum_n >= CUMULATIVE_MIN {
+            return Some(self.cum_ms as f64 / self.cum_n as f64);
+        }
+        let mut sorted = self.window;
+        let recent = &mut sorted[..self.len];
+        recent.sort_unstable();
+        let median = f64::from(recent[self.len / 2]);
+        let (sum, n) = recent
+            .iter()
+            .map(|&d| f64::from(d))
+            .filter(|&d| d >= 0.5 * median && d <= JUMP_FACTOR * median)
+            .fold((0.0, 0u32), |(s, n), d| (s + d, n + 1));
+        // The median itself always passes the filter, so n >= 1.
+        Some(sum / f64::from(n.max(1)))
     }
 
     /// Remember a delta. `counted`: it was classified normal against an
     /// estimate, so it joins the cumulative mean.
     fn accept(&mut self, delta: u32, counted: bool) {
-        let _ = (delta, counted);
+        self.window[self.next] = delta;
+        self.next = (self.next + 1) % WINDOW;
+        self.len = (self.len + 1).min(WINDOW);
+        if counted {
+            self.cum_ms += u64::from(delta);
+            self.cum_n += 1;
+        }
     }
 }
 
 /// Frames OBS dropped for a `delta_ms` step at `interval_ms` per frame.
 pub(crate) fn dropped_frames(delta_ms: u32, interval_ms: f64) -> u64 {
-    let _ = (delta_ms, interval_ms);
-    0
+    // Only called for a delta above 1.5 intervals, so `frames` >= 2.
+    let frames = (f64::from(delta_ms) / interval_ms).round();
+    (frames as u64).saturating_sub(1)
 }
 
 /// Per-subscription gap detection. Pure: instants and timestamps in,
@@ -123,29 +145,41 @@ impl IngestGapTracker {
     /// A media frame arrived at `now`: the gap since the previous one, if it
     /// reached [`ARRIVAL_GAP_THRESHOLD`].
     pub(crate) fn on_media(&mut self, now: Instant) -> Option<Duration> {
-        let _ = (now, self.last_arrival);
-        None
+        let gap = self.last_arrival.map(|t| now.saturating_duration_since(t));
+        self.last_arrival = Some(now);
+        gap.filter(|g| *g >= ARRIVAL_GAP_THRESHOLD)
     }
 
     /// A video frame with source timestamp `ts` arrived.
     pub(crate) fn on_video(&mut self, ts: u32) -> VideoStep {
-        let _ = (
-            ts,
-            self.last_video_ts,
-            &mut self.interval,
-            FrameInterval::accept,
-            SourceJump {
-                from_ts: 0,
-                to_ts: 0,
-                delta_ms: 0,
-                interval_ms: 0.0,
-                dropped: 0,
-            },
-            VideoStep::Discontinuity {
-                from_ts: 0,
-                to_ts: 0,
-            },
-        );
+        let Some(last) = self.last_video_ts.replace(ts) else {
+            return VideoStep::Normal;
+        };
+        if ts == last {
+            return VideoStep::Normal;
+        }
+        if ts < last || ts - last > MAX_COUNTED_JUMP_MS {
+            self.interval = FrameInterval::default();
+            return VideoStep::Discontinuity {
+                from_ts: last,
+                to_ts: ts,
+            };
+        }
+        let delta = ts - last;
+        let Some(interval_ms) = self.interval.estimate() else {
+            self.interval.accept(delta, false);
+            return VideoStep::Normal;
+        };
+        if f64::from(delta) > JUMP_FACTOR * interval_ms {
+            return VideoStep::Jump(SourceJump {
+                from_ts: last,
+                to_ts: ts,
+                delta_ms: delta,
+                interval_ms,
+                dropped: dropped_frames(delta, interval_ms),
+            });
+        }
+        self.interval.accept(delta, true);
         VideoStep::Normal
     }
 
@@ -299,8 +333,27 @@ impl IngestGapMonitor {
 /// The log line of each incident `gaps` holds (#368: every dropout is in
 /// restreamer.log with its time, even when its audit row is held back).
 pub(crate) fn incident_messages<S: Display + ?Sized>(gaps: &FrameGaps, stream: &S) -> Vec<String> {
-    let _ = (gaps, stream);
-    Vec::new()
+    let mut out = Vec::new();
+    if let Some(gap) = gaps.arrival {
+        out.push(format!(
+            "Ingest frame gap (#368): no media frame for {} ms on {stream} \
+             (an ingest stall or a publisher pause; OBS drops frames past ~700 ms)",
+            ms(gap)
+        ));
+    }
+    match gaps.video {
+        VideoStep::Normal => {}
+        VideoStep::Jump(j) => out.push(format!(
+            "Ingest source-ts jump (#368): {stream} video ts {} -> {} ({} ms at {:.3} ms/frame): \
+             the publisher dropped {} frame(s) before sending",
+            j.from_ts, j.to_ts, j.delta_ms, j.interval_ms, j.dropped
+        )),
+        VideoStep::Discontinuity { from_ts, to_ts } => out.push(format!(
+            "Ingest video timeline discontinuity (#368): {stream} ts {from_ts} -> {to_ts} \
+             (backward or > {MAX_COUNTED_JUMP_MS} ms forward): not counted as dropped frames"
+        )),
+    }
+    out
 }
 
 /// Write `rows` as `IngestFrameGap` audit rows (`try_send`, never waits).
