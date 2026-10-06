@@ -21,4 +21,5 @@ sqlx = { workspace = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 wiremock = "0.6"
+tempfile = "3"
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
