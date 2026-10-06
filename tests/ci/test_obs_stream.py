@@ -5,7 +5,8 @@ Stream OBS is camera-box's; restreamer CI may only start/stop streaming and read
 status. The lane that wrote these scripts may not touch the real OBS, so this test is
 their first execution: a stdlib-only mock obs-websocket v5 server (OBS is an external
 service, so a mock is the allowed shape), a mock rig-lease endpoint, and a fake
-`obs64` process. Each scenario runs the real PowerShell script and asserts:
+`obs64` process, plus a mock camera-box program-audio sampler (#379; every start is
+gated on its verdict). Each scenario runs the real PowerShell script and asserts:
 
   * the exit code and the key line of its output;
   * the OBS_STREAMING_STARTED_BY_CI values it wrote to GITHUB_ENV (in order);
@@ -328,11 +329,15 @@ class Case:
     pre_actions: list[list[str]] = field(default_factory=list)  # run first, each must exit 0
     host: bool = False                # a fake Restreamer.exe (just restarted) for Rebaseline
     rebaseline_window_s: float | None = None
+    audio: dict | None = field(default_factory=lambda: dict(AUDIO_OK))  # #379 sampler; None = down
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
 
 
+AUDIO_OK = {"schema": 1, "age_s": 0.6, "verdict": "MEASUREMENT", "rms_dbfs": -35.8, "outside_band_pct": 13.1,
+            "source": "STREAM-SNV (stream)", "last_foreign_age_s": None}
+AUDIO_FOREIGN = dict(AUDIO_OK, verdict="FOREIGN", rms_dbfs=-14.2)
 FREE = {"schema": 1, "held": False, "stale": False}
 HELD = {"schema": 1, "held": True, "stale": False, "ttl_s": 600,
         "holder": {"job": "full-path-e2e", "run_url": "https://example.invalid/run/1"}}
@@ -429,6 +434,19 @@ CASES = [
     Case("republish: rig lease held at the restart -> marker false", OS_, REPUBLISH, ObsState(streaming=True), 1,
          "holds the rig lease", ["false"], lease=HELD, forbid_requests={"StartStream"}, may_stop=True,
          may_change_state=True),
+    # #379: camera-box's program-audio verdict gates every StartStream.
+    Case("start: program audio FOREIGN (music) -> no start, no marker", OS_, START, ObsState(), 1,
+         "not starting OBS streaming -- FOREIGN", [], lease=FREE, audio=AUDIO_FOREIGN, forbid_requests={"StartStream"}),
+    Case("start: program-audio sampler down -> fail closed, no start", OS_, START, ObsState(), 1,
+         "not starting OBS streaming -- unreachable", [], lease=FREE, audio=None, forbid_requests={"StartStream"}),
+    Case("start: program-audio sample stale -> no start", OS_, START, ObsState(), 1,
+         "not starting OBS streaming -- stale", [], lease=FREE, audio=dict(AUDIO_OK, age_s=42),
+         forbid_requests={"StartStream"}),
+    Case("start: program audio SILENT -> started", OS_, START, ObsState(), 0, "kbps", ["true"],
+         lease=FREE, audio=dict(AUDIO_OK, verdict="SILENT"), require_requests={"StartStream"}, may_change_state=True),
+    Case("republish: music at the restart -> stopped, marker false, no restart", OS_, REPUBLISH,
+         ObsState(streaming=True), 1, "not starting OBS streaming -- FOREIGN", ["false"], lease=FREE,
+         audio=AUDIO_FOREIGN, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
 ]
 
 
@@ -463,6 +481,7 @@ def run_case(case: Case) -> list[str]:
         tmp = Path(tmp_s)
         obs = None if case.obs_down else MockObs(case.state)
         lease = MockLease(case.lease) if case.lease else None
+        audio = MockLease(case.audio) if case.audio is not None else None
         fake = FakeObs64(tmp, case.obs64) if case.obs64 else None
         host = FakeObs64(tmp, 1, "Restreamer") if case.host else None
         env_file = tmp / "github_env"
@@ -480,6 +499,10 @@ def run_case(case: Case) -> list[str]:
             "GITHUB_ENV": str(env_file),
             "RUNNER_TEMP": str(tmp),
             "OBS_REBASELINE_WINDOW_S": str(case.rebaseline_window_s or ""),
+            "PROGRAM_AUDIO_URL": (audio.url.replace("rig-lease.json", "program-audio.json") if audio
+                                  else f"http://127.0.0.1:{_closed_port()}/program-audio.json"),
+            # Start never stops anything through the API; a closed port proves it.
+            "PROGRAM_AUDIO_STOP_URL": f"http://127.0.0.1:{_closed_port()}/api/v1/obs/stop-stream",
         })
         try:
             pre_out = ""
@@ -504,6 +527,8 @@ def run_case(case: Case) -> list[str]:
                 obs.close()
             if lease:
                 lease.close()
+            if audio:
+                audio.close()
         out = pre_out + proc.stdout + proc.stderr
         got = markers(env_file)
     if proc.returncode != case.expect_exit:
