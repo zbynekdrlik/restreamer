@@ -82,6 +82,8 @@ use rs_core::models::InpointState;
 use crate::InpointError;
 use crate::flv_chunker::FlvChunkSink;
 use crate::frame_stats::FrameStats;
+use crate::ingest_gap::IngestGapMonitor;
+use crate::wall_clock::{SystemWallClock, WallClock};
 
 /// If no frames arrive for this long, assume the stream stalled and re-subscribe.
 /// 30s is well above the ~33ms frame interval at 30fps, so this won't trigger
@@ -249,6 +251,8 @@ pub struct MediaReceiver {
     /// Idle with no session, unless forgotten first: any probe of it is sent,
     /// or it gets its own session.
     remembered: Vec<StreamIdentifier>,
+    /// Arrival gaps and source-ts jumps of the subscribed stream (#368).
+    gaps: IngestGapMonitor,
 }
 
 impl MediaReceiver {
@@ -269,6 +273,7 @@ impl MediaReceiver {
             last_identifier: None,
             lag_unprobed: false,
             remembered: Vec::new(),
+            gaps: IngestGapMonitor::default(),
         }
     }
 
@@ -521,6 +526,7 @@ impl MediaReceiver {
             }),
         );
         self.flv_chunk_sink.start_new_session().await;
+        self.gaps.reset_session();
         self.session = Some(Session::new(identifier));
     }
 
@@ -656,6 +662,7 @@ impl MediaReceiver {
             }
         }
         info!("Subscribed to stream, processing frames");
+        self.gaps.reset_subscription();
         self.phase = Phase::Streaming {
             frames,
             info,
@@ -679,6 +686,16 @@ impl MediaReceiver {
                 );
             }
         }
+        match &frame {
+            // A replayed AVC sequence header carries its original ts (OBS:
+            // 0): it is an arrival, but not a step of the video timeline.
+            FrameData::Video { timestamp, data } => {
+                let sequence_header = data.get(1) == Some(&0x00);
+                self.note_gaps((!sequence_header).then_some(*timestamp));
+            }
+            FrameData::Audio { .. } => self.note_gaps(None),
+            FrameData::MediaInfo { .. } | FrameData::MetaData { .. } => {}
+        }
         match frame {
             FrameData::Video { timestamp, data } => {
                 self.mark_dirty();
@@ -695,6 +712,27 @@ impl MediaReceiver {
                 debug!("Received metadata");
             }
         }
+    }
+
+    /// Measure the frame against the previous one (#368): counters, a log
+    /// line per incident, throttled `IngestFrameGap` rows. Lock-free.
+    fn note_gaps(&mut self, video_ts: Option<u32>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let (gaps, rows) = self.gaps.on_frame(
+            Instant::now(),
+            || SystemWallClock.now_ms(),
+            video_ts,
+            &session.identifier,
+            self.inpoint_state.ingest_gaps(),
+        );
+        crate::ingest_gap::publish(
+            &gaps,
+            rows,
+            self.inpoint_state.audit_tx(),
+            &session.identifier,
+        );
     }
 
     fn mark_dirty(&mut self) {
@@ -765,6 +803,9 @@ impl MediaReceiver {
             return;
         };
         info!(reason, "Stream ended: {}", s.identifier);
+        let held = self.gaps.flush(None, &s.identifier);
+        crate::ingest_gap::record_rows(self.inpoint_state.audit_tx(), held);
+        self.inpoint_state.ingest_gaps().set_frame_interval_us(0);
         let duration_secs = self.inpoint_state.mark_disconnected();
         self.audit_rtmp(
             rs_core::audit::Action::RtmpDisconnected,
@@ -796,5 +837,9 @@ impl MediaReceiver {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: #[tokio::test] expands to Runtime::block_on, and tests read chunk files back and share hub state synchronously; never on the ingest runtime (#368 clippy.toml)"
+)]
 #[path = "media_receiver_tests.rs"]
 mod tests;

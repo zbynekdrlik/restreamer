@@ -198,7 +198,10 @@ DELETE /api/v1/events/{id}
 | `obs_audio` | GetInputs, Mute, Unmute, GetMuteState, SetVolume, GetVolume, MuteAll, UnmuteAll |
 | `obs_media` | SaveScreenshot, StartVirtualCamera, StopVirtualCamera |
 
-Use these OBS MCP tools instead of python obsws_python hacks via win-stream-snv Shell.
+**#374, owner directive 2026-08-30: stream OBS is camera-box's.** From restreamer use ONLY
+`obs_streaming` (Start, Stop, GetStatus) and the read-only Get*/List calls. Never `obs_recording`
+Start/Stop/Set*, `obs_scene` Set, `obs_source`, `obs_audio` Mute/SetVolume, or virtual-camera
+calls: those change camera-box's rig. See `.claude/skills/obs-recovery` when OBS is not usable.
 
 ## Adding a status field to the delivery-status wire (rs-delivery → dashboard)
 

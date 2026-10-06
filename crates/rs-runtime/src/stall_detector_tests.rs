@@ -11,8 +11,17 @@ fn ms_(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// The tracker scenarios below are built on a 1 s probe / 5 s threshold /
+/// 1 s late grid. They test the tracker's logic, not the production values
+/// (`production_config_matches_the_design` pins those), so they keep that
+/// grid explicitly whatever the production thresholds are.
 fn cfg() -> StallDetectorConfig {
-    StallDetectorConfig::production(Path::new("/nonexistent-test-dir"))
+    StallDetectorConfig {
+        probe_interval: S,
+        stall_threshold: 5 * S,
+        tick_late_threshold: S,
+        ..StallDetectorConfig::production(Path::new("/nonexistent-test-dir"))
+    }
 }
 
 /// Drives a `StallTracker` the way the detector thread does, on a synthetic
@@ -304,11 +313,11 @@ fn one_tick_late_by_exactly_the_threshold_classifies_whole_process() {
     for _ in 0..5 {
         sim.tick(S);
     }
-    sim.tick(ms_(2_000)); // exactly TICK_LATE_THRESHOLD late, inside the stall
+    sim.tick(ms_(2_000)); // exactly cfg().tick_late_threshold late, inside the stall
     sim.answer_probe(ms_(8_000));
     let report = sim.tick(S).ended.expect("ends");
     assert_eq!(report.class, StallClass::WholeProcess);
-    assert_eq!(report.detector_max_late, TICK_LATE_THRESHOLD);
+    assert_eq!(report.detector_max_late, cfg().tick_late_threshold);
 }
 
 #[test]
@@ -328,8 +337,12 @@ fn stall_after_a_stall_is_reported_again() {
 #[test]
 fn production_config_matches_the_design() {
     let c = StallDetectorConfig::production(Path::new("C:/ProgramData/Restreamer"));
-    assert_eq!(c.probe_interval, Duration::from_secs(1));
-    assert_eq!(c.stall_threshold, Duration::from_secs(5));
+    // #368 tiers: probe 100 ms, record from 500 ms (the 1 s / 5 s grid of
+    // #367 missed the 0.7-5 s stalls that make OBS drop frames).
+    assert_eq!(c.probe_interval, ms_(100));
+    assert_eq!(c.stall_threshold, ms_(500));
+    assert_eq!(c.audit_threshold, ms_(700));
+    assert_eq!(c.severe_threshold, ms_(5_000));
     assert_eq!(
         c.log_path,
         Path::new("C:/ProgramData/Restreamer")
@@ -538,7 +551,7 @@ fn raw_windows_counters_map_to_bytes() {
 fn start_for_service_outside_a_runtime_starts_nothing() {
     let (tx, _rx) = mpsc::channel::<AuditRow>(1);
     let dir = tempfile::tempdir().unwrap();
-    assert!(start_for_service(dir.path(), tx).is_none());
+    assert!(start_for_service(dir.path(), &StallDetectorSettings::default(), tx).is_none());
     assert!(!dir.path().join("logs").exists());
 }
 
@@ -552,7 +565,7 @@ fn start_for_service_runs_the_production_detector_under_data_dir() {
     let dir = tempfile::tempdir().unwrap();
     let (tx, _rx) = mpsc::channel::<AuditRow>(1);
     let mut guard = rt
-        .block_on(async { start_for_service(dir.path(), tx) })
+        .block_on(async { start_for_service(dir.path(), &StallDetectorSettings::default(), tx) })
         .expect("started inside a runtime");
     assert!(guard.is_running());
 
@@ -572,9 +585,12 @@ fn start_for_service_runs_the_production_detector_under_data_dir() {
     assert_eq!(last["reason"], "stop_requested");
     let first = &records[0];
     assert_eq!(first["event"], "detector_started");
-    assert_eq!(first["probe_interval_ms"], 1_000);
-    assert_eq!(first["stall_threshold_ms"], 5_000);
-    assert_eq!(first["tick_late_threshold_ms"], 1_000);
+    assert_eq!(first["probe_interval_ms"], 100);
+    assert_eq!(first["stall_threshold_ms"], 500);
+    assert_eq!(first["audit_threshold_ms"], 700);
+    assert_eq!(first["severe_threshold_ms"], 5_000);
+    assert_eq!(first["audit_min_interval_ms"], 10_000);
+    assert_eq!(first["tick_late_threshold_ms"], 250);
     assert_eq!(first["version"], env!("CARGO_PKG_VERSION"));
     assert!(first["resources"]["working_set_bytes"].as_u64() > Some(0));
 }
@@ -766,11 +782,19 @@ fn start_for_runtime_probes_the_given_runtime_and_labels_it() {
     let handle = rt.handle().clone();
     let records = run_and_stop(
         &rt,
-        || start_for_runtime(INGEST_RUNTIME, handle, dir.path(), tx),
+        || {
+            start_for_runtime(
+                INGEST_RUNTIME,
+                handle,
+                dir.path(),
+                &StallDetectorSettings::default(),
+                tx,
+            )
+        },
         &dir.path().join("logs").join("stall-ingest.log"),
     );
     assert_eq!(records[0]["event"], "detector_started");
-    assert_eq!(records[0]["probe_interval_ms"], 1_000);
+    assert_eq!(records[0]["probe_interval_ms"], 100);
     assert_eq!(records.last().unwrap()["reason"], "stop_requested");
     for record in &records {
         assert_eq!(record["runtime"], "ingest", "{record}");
@@ -792,7 +816,7 @@ fn start_for_service_labels_its_records_main() {
     let (tx, _rx) = mpsc::channel::<AuditRow>(1);
     let records = run_and_stop(
         &rt,
-        || start_for_service(dir.path(), tx),
+        || start_for_service(dir.path(), &StallDetectorSettings::default(), tx),
         &dir.path().join("logs").join("stall.log"),
     );
     assert!(!records.is_empty());

@@ -75,62 +75,43 @@ The `win-stream-snv` MCP server provides full Windows desktop control for stream
 | `mcp__win-stream-snv__OCR`            | Extract text from screen    |
 | `mcp__win-stream-snv__NetConnections` | List network connections    |
 
-## OBS WebSocket API
+## Stream OBS: camera-box owns it (read + Start/Stop streaming only)
 
-OBS has WebSocket enabled at `ws://stream.lan:4455`. Use this to control OBS remotely.
+**Owner directive 2026-08-30, verbatim: "na stream nb robi sa vyvoj aj obska tak ty nic nesahaj
+do obs a tak si rob vyvoj iba si zapinaj vypinaj streamovanie ale nic viac".** OBS on stream.lan
+is the camera-box project's development target. Restreamer (this session, CI, scripts) may only:
 
-### OBS Configuration Files
+- **start and stop streaming**: `StartStream` / `StopStream` over the websocket, or Restreamer's
+  own `POST /api/v1/obs/start-stream` / `stop-stream`. Stop only a stream YOU started;
+- **read status**: `GetStreamStatus`, `GetRecordStatus`, `GetVersion`,
+  `GetCurrentProgramScene`, `GetStreamServiceSettings`.
 
-| File                                                                                   | Purpose                   |
-| -------------------------------------------------------------------------------------- | ------------------------- |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\global.ini`                              | Global OBS settings       |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json`  | Stream destination config |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\plugin_config\obs-websocket\config.json` | WebSocket settings        |
+Never do any of the following: kill / close / relaunch / suspend obs64, run or (re)register an
+OBS scheduled task, edit anything under `%APPDATA%\obs-studio` (service.json, streamEncoder.json,
+global.ini, scene collections), change the scene / profile / bitrate / stream service, "restore"
+OBS settings, or start/stop a recording (StopRecord included). Scene `PRO` is the owner's production
+scene and is never selected by anyone. The CI guard `scripts/ci/verify_no_obs_mutation.py`
+(test-integrity, #374) fails the build on any of these in ci.yml or scripts/.
 
-### Change OBS Stream Destination
+**When OBS is not usable** (not running, two obs64, websocket down, wrong scene, wrong stream
+service, recording): do NOT fix it. Report it to camera-box (a camera-box ticket, or a comment on
+the restreamer ticket that hit it) and wait or work on something else.
 
-To switch OBS from YouTube to Restreamer (or vice versa):
+### What CI expects from camera-box's TEST mode
 
-**Option 1: Edit service.json directly**
+`scripts/ci/obs-readiness-check.ps1` (early) and `scripts/ci/obs-stream.ps1 -Action Start` (the only
+CI start: rig lease + the same checks + a checked StartStream, in one session) FAIL with
+`stream OBS not ready (<what>) -- camera-box owns it, not touching it` unless:
 
-```
-# Backup current config
-mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.bak'"
+- exactly one obs64 runs and `ws://127.0.0.1:4455` answers;
+- the program scene is `Development` (camera-box issue 1380, `scripts/lib/stream-dev-scene.sh`);
+- the stream service is `rtmp_custom` -> `rtmp://127.0.0.1:1234/live` (any key; the inpoint
+  accepts every key under `live`);
+- OBS is not streaming and not recording (`stream OBS is recording -- not touching it`).
 
-# Set to Restreamer
-mcp__win-stream-snv__Shell command="@{ type = 'rtmp_custom'; settings = @{ server = 'rtmp://127.0.0.1:1234/live'; key = 'test' } } | ConvertTo-Json -Depth 5 | Set-Content 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json'"
-
-# Restart OBS for changes to take effect (see "Starting OBS Correctly" below)
-```
-
-**Option 2: Use OBS WebSocket API (preferred - no restart needed)**
-
-```python
-# Python example using obs-websocket-py (run from Linux)
-import obsws
-ws = obsws.obsws("stream.lan", 4455, "<OBS WS password — see Quick Reference table above>")
-ws.connect()
-
-# Set stream settings to Restreamer
-ws.call(obsws.requests.SetStreamServiceSettings(
-    streamServiceType="rtmp_custom",
-    streamServiceSettings={
-        "server": "rtmp://127.0.0.1:1234/live",
-        "key": "test"
-    }
-))
-
-# Start streaming
-ws.call(obsws.requests.StartStream())
-```
-
-### Current OBS Stream Config
-
-As of last check:
-
-- **Service**: YouTube - RTMPS
-- **Server**: `rtmps://a.rtmps.youtube.com:443/live2`
-- **Key**: `w7dw-etzx-je1p-bted-6fdr` (YT KS-BB 4K endpoint)
+The OBS-to-YouTube and FB jobs run on whatever encoder / bitrate camera-box's TEST mode sets. If
+a gate needs an OBS setting the TEST mode lacks, it is a requirement for camera-box, never a
+setting CI changes.
 
 ## Restreamer Local Client
 
@@ -218,7 +199,7 @@ Use `Snapshot` after starting apps, changing configs, or any operation where vis
 ### Prerequisites Checklist
 
 1. [ ] Restreamer running on stream.lan
-2. [ ] OBS running on stream.lan
+2. [ ] Stream OBS in camera-box's TEST mode (see "Stream OBS: camera-box owns it" above)
 3. [ ] Manager server accessible (restreamer.newlevel.media)
 4. [ ] S3 credentials configured
 5. [ ] Streaming event with `receiving_activated=True`
@@ -234,17 +215,15 @@ mcp__win-stream-snv__ListProcesses filter="restreamer"
 mcp__win-stream-snv__Shell command="(Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks').Count"
 ```
 
-### Step 2: Switch OBS to Restreamer
+### Step 2: Check stream OBS is ready (read-only)
+
+Run the same read-only check CI runs (it never changes OBS):
 
 ```
-# Backup OBS config
-mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.youtube-backup'"
-
-# Set to Restreamer
-mcp__win-stream-snv__Shell command="@{ type = 'rtmp_custom'; settings = @{ server = 'rtmp://127.0.0.1:1234/live'; key = 'test' } } | ConvertTo-Json -Depth 5 | Set-Content 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json'"
-
-# Restart OBS (see "Starting OBS Correctly" section below)
+mcp__win-stream-snv__Shell command="powershell -NoProfile -ExecutionPolicy Bypass -File <checkout>\scripts\ci\obs-readiness-check.ps1"
 ```
+
+Not ready -> report it to camera-box (see above). Never switch the stream service yourself.
 
 ### Step 3: Start Streaming via OBS WebSocket API
 
@@ -306,14 +285,10 @@ asyncio.run(get_status())
 mcp__win-stream-snv__Shell command="$chunks = Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks'; Write-Host 'Total chunks:' $chunks.Count; $chunks | Select-Object -Last 3 | ForEach-Object { Write-Host 'ID:' $_.id 'Created:' $_.created_at 'Sent:' $_.sent }"
 ```
 
-### Step 5: Restore OBS to YouTube (after test)
+### Step 5: Stop streaming (after test)
 
-```
-# Restore YouTube config
-mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.youtube-backup' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' -Force"
-
-# Restart OBS (see "Starting OBS Correctly" below)
-```
+Send `StopStream` (same pattern as Step 3), or `POST /api/v1/obs/stop-stream`. Nothing else:
+the stream service, scene and recording stay as camera-box set them.
 
 ## Troubleshooting
 
@@ -376,7 +351,8 @@ mcp__win-stream-snv__PortCheck host="127.0.0.1" port=1234
 1. Check Restreamer is running: `mcp__win-stream-snv__ListProcesses filter="restreamer"`
 2. Check NO ffmpeg is blocking port 1234 (see above)
 3. Check firewall allows port 1234
-4. Check RTMP URL format: `rtmp://127.0.0.1:1234/live/test`
+4. Read OBS's stream service with `GetStreamServiceSettings` (read-only). If it does not point at
+   `rtmp://127.0.0.1:1234/live`, report it to camera-box; never change it.
 
 ### No Chunks Being Created
 
@@ -393,89 +369,9 @@ mcp__win-stream-snv__PortCheck host="127.0.0.1" port=1234
 
 ## OBS Management Rules
 
-### NEVER Kill OBS Abruptly
-
-**DO NOT** use `KillProcess name="obs64"` — this causes:
-
-1. Recovery dialog on next start
-2. Duplicate OBS processes
-3. WebSocket server not starting
-4. Broken state that requires user intervention
-
-### Proper OBS Restart (if absolutely necessary)
-
-```
-# CORRECT: Graceful shutdown via WebSocket (from Linux)
-python3 -c "
-import asyncio, json, websockets
-async def quit_obs():
-    async with websockets.connect('ws://stream.lan:4455') as ws:
-        await ws.recv()
-        await ws.send(json.dumps({'op':1,'d':{'rpcVersion':1}}))
-        await ws.recv()
-        await ws.send(json.dumps({'op':6,'d':{'requestType':'ExitOBS','requestId':'1'}}))
-        print(await ws.recv())
-asyncio.run(quit_obs())
-"
-```
-
-### Prefer WebSocket Over Config Changes
-
-Instead of editing service.json and restarting OBS, use WebSocket API:
-
-- `SetStreamServiceSettings` - change stream destination
-- `StartStream` / `StopStream` - control streaming
-- Changes take effect immediately, no restart needed
-
-### Starting OBS Correctly
-
-Since MCP runs in the user's desktop session, OBS can be started directly without Task Scheduler:
-
-```
-# Start OBS with correct working directory (CRITICAL for proper initialization)
-mcp__win-stream-snv__Shell command="Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe' -ArgumentList '--disable-shutdown-check'" cwd="C:\Program Files\obs-studio\bin\64bit"
-```
-
-**CRITICAL**: The working directory MUST be `C:\Program Files\obs-studio\bin\64bit`. Without this, OBS starts in a broken state (~37MB memory, no WebSocket server, error dialogs). A healthy OBS uses ~1GB+ memory.
-
-**Verify OBS started correctly:**
-
-```
-# Check process and memory usage
-mcp__win-stream-snv__Shell command="Get-Process obs64 | Format-List Id, WorkingSet64"
-# WorkingSet64 should be > 100MB (healthy) not ~37MB (broken)
-
-# Verify single OBS process
-mcp__win-stream-snv__ListProcesses filter="obs64"
-
-# Verify WebSocket is listening
-mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
-
-# Take screenshot to visually verify OBS is running
-mcp__win-stream-snv__Snapshot
-```
-
-### Recovery From Bad State (duplicate OBS processes)
-
-If OBS is in bad state with recovery dialog:
-
-1. **Ask the user** to manually close OBS and dismiss dialogs
-2. Then start fresh using the Shell command above
-3. **NEVER try to kill OBS processes remotely** — this makes things worse
-
-### Checking OBS Health
-
-```
-# Verify single OBS process
-mcp__win-stream-snv__ListProcesses filter="obs64"
-# Should show exactly ONE obs64.exe process
-
-# Verify WebSocket is listening
-mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
-
-# Visual check
-mcp__win-stream-snv__Snapshot
-```
+See "Stream OBS: camera-box owns it" above: read status and Start/Stop streaming only. No kill,
+no restart, no relaunch, no config edit, no recording control -- not even a "graceful" `ExitOBS`
+or a crash-dialog click. Those are camera-box's (`.claude/skills/obs-ops` in the camera-box repo).
 
 ## No-CI hotfix of the delivery VPS binary (rs-delivery) — S3-object swap
 
@@ -492,9 +388,8 @@ The fast-endpoint / delivery logic runs in **`rs-delivery`** (Linux binary on th
 ## Important Notes
 
 - **NEVER** give manual instructions when these automated MCP tools exist
-- **NEVER** kill OBS with KillProcess — use WebSocket ExitOBS or ask user
+- **NEVER** kill, restart or reconfigure stream OBS -- camera-box owns it (#374); Start/Stop streaming only
 - **ALWAYS** verify current state before making changes
-- **ALWAYS** backup configs before modifying (use FileRead + FileWrite or Shell Copy-Item)
+- **ALWAYS** backup Restreamer configs before modifying (use FileRead + FileWrite or Shell Copy-Item)
 - The last chunk timestamp tells you if streaming is active
-- OBS requires restart after service.json changes (unless using WebSocket API)
 - MCP runs in user desktop session — no Task Scheduler needed for GUI apps

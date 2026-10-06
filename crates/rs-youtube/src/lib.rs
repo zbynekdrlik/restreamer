@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod device_flow;
+pub mod manage;
 pub mod oauth;
 pub mod quota;
 pub mod streams;

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,10 +16,17 @@ pub struct LogEntry {
 ///
 /// Used by the API to serve GET /logs/inpoint and GET /logs/endpoint.
 /// Populated by a tracing layer in the service binary.
+///
+/// `push` never waits (#368): it runs inside every log call, the ingest
+/// runtime's included, while `recent` (an API request) holds the lock for a
+/// whole copy. A push that finds the lock taken drops its entry and counts
+/// it in `dropped()`. Only this in-memory view loses it: the file log
+/// (restreamer.log) gets every line through its own non-blocking writer.
 #[derive(Clone)]
 pub struct LogBuffer {
     inner: Arc<Mutex<VecDeque<LogEntry>>>,
     capacity: usize,
+    dropped: Arc<AtomicU64>,
 }
 
 impl LogBuffer {
@@ -26,6 +34,7 @@ impl LogBuffer {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
             capacity,
+            dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -34,11 +43,23 @@ impl LogBuffer {
         if self.capacity == 0 {
             return;
         }
-        let mut buf = self.inner.lock().unwrap();
+        let mut buf = match self.inner.try_lock() {
+            Ok(buf) => buf,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
         if buf.len() >= self.capacity {
             buf.pop_front();
         }
         buf.push_back(entry);
+    }
+
+    /// Entries `push` dropped because the buffer was locked at that moment.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Return recent log entries whose target starts with `prefix`, newest first.
@@ -56,6 +77,35 @@ impl LogBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(message: &str) -> LogEntry {
+        LogEntry {
+            level: "WARN".into(),
+            target: "rs_inpoint::ingest_gap".into(),
+            message: message.into(),
+        }
+    }
+
+    /// #368: a log call never waits for a reader holding the buffer.
+    #[test]
+    fn push_never_waits_for_a_held_lock() {
+        let buf = LogBuffer::new(10);
+        buf.push(entry("before"));
+        assert_eq!(buf.dropped(), 0);
+        let held = buf.inner.lock().unwrap();
+        buf.push(entry("while a reader holds it"));
+        buf.push(entry("still held"));
+        drop(held);
+        assert_eq!(buf.dropped(), 2);
+        buf.push(entry("after"));
+        let got: Vec<String> = buf
+            .recent("rs_inpoint", 10)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert_eq!(got, vec!["after", "before"]);
+        assert_eq!(buf.dropped(), 2);
+    }
 
     #[test]
     fn push_and_retrieve() {

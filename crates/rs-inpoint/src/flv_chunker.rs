@@ -692,9 +692,17 @@ mod wall_clock_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: #[tokio::test] expands to Runtime::block_on, and tests read chunk files back and share hub state synchronously; never on the ingest runtime (#368 clippy.toml)"
+)]
 #[path = "flv_chunker_tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: #[tokio::test] expands to Runtime::block_on, and tests read chunk files back and share hub state synchronously; never on the ingest runtime (#368 clippy.toml)"
+)]
 #[path = "flv_chunker_drain_tests.rs"]
 mod drain_tests;

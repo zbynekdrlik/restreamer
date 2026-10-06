@@ -365,3 +365,74 @@ fn s3_config_debug_redacts_credentials() {
     assert!(!debug_str.contains("test-key"));
     assert!(!debug_str.contains("test-secret"));
 }
+
+/// #368: an installed config.json predates the stall-detector section. It
+/// must load with the designed tiers, and a partial section keeps the
+/// defaults for the fields it omits.
+#[test]
+fn stall_detector_settings_default_to_the_designed_tiers() {
+    let base = r#""client_uuid": "abc",
+        "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" }"#;
+    let config: Config = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+    assert_eq!(
+        config.stall_detector,
+        StallDetectorSettings {
+            probe_interval_ms: 100,
+            record_threshold_ms: 500,
+            audit_threshold_ms: 700,
+            severe_threshold_ms: 5_000,
+            tick_late_threshold_ms: 250,
+            audit_min_interval_ms: 10_000,
+        }
+    );
+    assert_eq!(config.stall_detector, StallDetectorSettings::default());
+
+    let partial: Config = serde_json::from_str(&format!(
+        r#"{{{base}, "stall_detector": {{ "audit_threshold_ms": 900 }} }}"#
+    ))
+    .unwrap();
+    assert_eq!(
+        partial.stall_detector,
+        StallDetectorSettings {
+            audit_threshold_ms: 900,
+            ..StallDetectorSettings::default()
+        }
+    );
+}
+
+#[test]
+fn av_gate_defaults_point_into_the_av_gate_dir_beside_the_config() {
+    // #357: an absent `av_gate` block yields the designed defaults, and a
+    // partial block keeps the rest.
+    let base = r#""client_uuid": "abc",
+        "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" }"#;
+    let config: Config = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+    let dir = Config::default_path().parent().unwrap().join("av-gate");
+    assert_eq!(
+        config.av_gate,
+        AvGateConfig {
+            oauth_file: dir.join("oauth.json").to_string_lossy().into_owned(),
+            api_token_file: dir.join("api-token").to_string_lossy().into_owned(),
+            event_name: "E2E-Test".to_string(),
+            stream_title: "e2e rtmp".to_string(),
+            idle_timeout_secs: 2_700,
+            processing_timeout_secs: 7_200,
+            daily_quota_budget: 4_000,
+        }
+    );
+    assert_eq!(config.av_gate, AvGateConfig::default());
+    assert_eq!(Config::default().av_gate, AvGateConfig::default());
+    assert_eq!(Config::for_testing().av_gate, AvGateConfig::default());
+
+    let partial: Config = serde_json::from_str(&format!(
+        r#"{{{base}, "av_gate": {{ "idle_timeout_secs": 60 }} }}"#
+    ))
+    .unwrap();
+    assert_eq!(
+        partial.av_gate,
+        AvGateConfig {
+            idle_timeout_secs: 60,
+            ..AvGateConfig::default()
+        }
+    );
+}

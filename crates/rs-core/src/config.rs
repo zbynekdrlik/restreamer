@@ -23,6 +23,160 @@ pub struct Config {
     pub obs: ObsConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub stall_detector: StallDetectorSettings,
+    #[serde(default)]
+    pub av_gate: AvGateConfig,
+}
+
+/// YouTube A/V-gate session API (#357, `/api/v1/av-gate/session`).
+///
+/// No value here is a credential. The two secrets the API needs live in FILES
+/// beside each other in the `av-gate` directory (ACL SYSTEM + Administrators
+/// on stream.lan), never in `config.json`:
+/// - `oauth_file`: JSON `{refresh_token, scope, ...}`, the manage-scope
+///   (`youtube`) grant for the CI channel, refreshed with
+///   `youtube.device_flow`'s client credentials;
+/// - `api_token_file`: the bearer token every av-gate request must carry.
+///
+/// Both are PATHS, classified `readable` in CONFIG_INVENTORY. The whole subtree
+/// is immutable through `PATCH /api/v1/config` (`config_redact::IMMUTABLE_PATHS`)
+/// so a request through the API cannot repoint the token file at a file the
+/// caller wrote. Read once at startup (restart to apply).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvGateConfig {
+    #[serde(default = "default_av_gate_oauth_file")]
+    pub oauth_file: String,
+    #[serde(default = "default_av_gate_api_token_file")]
+    pub api_token_file: String,
+    /// The Restreamer event the session activates (CI's own test event).
+    #[serde(default = "default_av_gate_event_name")]
+    pub event_name: String,
+    /// Title of the reusable YouTube stream every session binds to.
+    #[serde(default = "default_av_gate_stream_title")]
+    pub stream_title: String,
+    /// A session with no `stop` this long after it was created is reaped:
+    /// broadcast completed, delivery torn down.
+    #[serde(default = "default_av_gate_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// How long `processing` may wait for YouTube to finish the VOD.
+    #[serde(default = "default_av_gate_processing_timeout_secs")]
+    pub processing_timeout_secs: u64,
+    /// YouTube Data API units the av-gate sessions may spend per rolling
+    /// 24 h. A new session is refused when the spend plus one session's
+    /// estimate would exceed it (the project budget is 10,000/day, shared with
+    /// the health polling).
+    #[serde(default = "default_av_gate_daily_quota_budget")]
+    pub daily_quota_budget: u32,
+}
+
+/// `<config dir>\av-gate`, i.e. `C:\ProgramData\Restreamer\av-gate` on Windows.
+fn av_gate_dir() -> PathBuf {
+    Config::default_path()
+        .parent()
+        .map(|p| p.join("av-gate"))
+        .unwrap_or_else(|| PathBuf::from("av-gate"))
+}
+
+fn default_av_gate_oauth_file() -> String {
+    av_gate_dir()
+        .join("oauth.json")
+        .to_string_lossy()
+        .into_owned()
+}
+fn default_av_gate_api_token_file() -> String {
+    av_gate_dir()
+        .join("api-token")
+        .to_string_lossy()
+        .into_owned()
+}
+fn default_av_gate_event_name() -> String {
+    "E2E-Test".to_string()
+}
+fn default_av_gate_stream_title() -> String {
+    "e2e rtmp".to_string()
+}
+fn default_av_gate_idle_timeout_secs() -> u64 {
+    45 * 60
+}
+fn default_av_gate_processing_timeout_secs() -> u64 {
+    2 * 60 * 60
+}
+fn default_av_gate_daily_quota_budget() -> u32 {
+    4_000
+}
+
+impl Default for AvGateConfig {
+    fn default() -> Self {
+        Self {
+            oauth_file: default_av_gate_oauth_file(),
+            api_token_file: default_av_gate_api_token_file(),
+            event_name: default_av_gate_event_name(),
+            stream_title: default_av_gate_stream_title(),
+            idle_timeout_secs: default_av_gate_idle_timeout_secs(),
+            processing_timeout_secs: default_av_gate_processing_timeout_secs(),
+            daily_quota_budget: default_av_gate_daily_quota_budget(),
+        }
+    }
+}
+
+/// Process-stall detector tiers (#368). Both runtimes (main and ingest) are
+/// probed every `probe_interval_ms`. A probe unanswered for
+/// `record_threshold_ms` opens a stall: `stall_start`/`stall_end` lines in
+/// `logs/stall*.log`. A stall of `audit_threshold_ms` or more (OBS starts
+/// dropping frames above ~700 ms of send queue) also writes a `ProcessStall`
+/// audit row, at most one per `audit_min_interval_ms` with the rest counted
+/// into an aggregate. `severe_threshold_ms` labels a record `tier: "severe"`.
+/// A detector wake-up `tick_late_threshold_ms` late during a stall makes it
+/// `whole_process` (the OS did not run us) instead of `runtime_starved`.
+/// None of these is a credential: all `readable` in CONFIG_INVENTORY.
+/// Read once at startup (restart to apply).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StallDetectorSettings {
+    #[serde(default = "default_stall_probe_interval_ms")]
+    pub probe_interval_ms: u64,
+    #[serde(default = "default_stall_record_threshold_ms")]
+    pub record_threshold_ms: u64,
+    #[serde(default = "default_stall_audit_threshold_ms")]
+    pub audit_threshold_ms: u64,
+    #[serde(default = "default_stall_severe_threshold_ms")]
+    pub severe_threshold_ms: u64,
+    #[serde(default = "default_stall_tick_late_threshold_ms")]
+    pub tick_late_threshold_ms: u64,
+    #[serde(default = "default_stall_audit_min_interval_ms")]
+    pub audit_min_interval_ms: u64,
+}
+
+fn default_stall_probe_interval_ms() -> u64 {
+    100
+}
+fn default_stall_record_threshold_ms() -> u64 {
+    500
+}
+fn default_stall_audit_threshold_ms() -> u64 {
+    700
+}
+fn default_stall_severe_threshold_ms() -> u64 {
+    5_000
+}
+fn default_stall_tick_late_threshold_ms() -> u64 {
+    250
+}
+fn default_stall_audit_min_interval_ms() -> u64 {
+    10_000
+}
+
+impl Default for StallDetectorSettings {
+    fn default() -> Self {
+        Self {
+            probe_interval_ms: default_stall_probe_interval_ms(),
+            record_threshold_ms: default_stall_record_threshold_ms(),
+            audit_threshold_ms: default_stall_audit_threshold_ms(),
+            severe_threshold_ms: default_stall_severe_threshold_ms(),
+            tick_late_threshold_ms: default_stall_tick_late_threshold_ms(),
+            audit_min_interval_ms: default_stall_audit_min_interval_ms(),
+        }
+    }
 }
 
 /// Operator-facing outage notifications (#261, #306). All fields are runtime
@@ -664,6 +818,8 @@ impl Config {
                 ..ObsConfig::default()
             },
             notifications: NotificationsConfig::default(),
+            stall_detector: StallDetectorSettings::default(),
+            av_gate: AvGateConfig::default(),
         }
     }
 }
@@ -687,6 +843,8 @@ impl Default for Config {
             delivery: DeliveryConfig::default(),
             obs: ObsConfig::default(),
             notifications: NotificationsConfig::default(),
+            stall_detector: StallDetectorSettings::default(),
+            av_gate: AvGateConfig::default(),
         }
     }
 }

@@ -9,6 +9,10 @@ paths:
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/rtmp_server.rs"
   - "crates/rs-core/src/stable_since*.rs"
+  - "crates/rs-core/src/ingest_gaps.rs"
+  - "crates/rs-inpoint/src/ingest_gap*.rs"
+  - "crates/rs-inpoint/src/media_receiver_gap_tests.rs"
+  - "crates/rs-inpoint/clippy.toml"
 ---
 
 # The dedicated ingest runtime and the Windows priorities (#368)
@@ -112,6 +116,58 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
 `spawn_blocking` and waits at most 5 s. A timed-out enumeration stays in
 flight, and the next sample waits for that same one: one stuck blocking
 thread, never one per tick. Do the same for any new blocking call.
+
+## No blocking call can land in rs-inpoint (clippy guard)
+
+`crates/rs-inpoint/clippy.toml` bans (`disallowed-methods`) `std::thread::sleep`,
+`std::fs` sync IO, std `Mutex`/`RwLock` locks, blocking std channel receives,
+thread joins, blocking std net calls, nested `block_on`/`block_in_place`, and
+tokio's `blocking_*` methods. Clippy `-D warnings` fails on any of them.
+- Clippy reads only the NEAREST clippy.toml, no merge: the root thresholds are
+  repeated there. Change both together.
+- `#[tokio::test]` expands to `Runtime::block_on`, so every test module with a
+  tokio test trips the guard. The test modules allow it on their `mod`
+  declaration with a `reason` (flv_chunker tests + drain tests,
+  media_receiver tests and children, rtmp_server tests,
+  `tests/rtmp_server_e2e.rs`). A NEW test module with `#[tokio::test]` needs
+  the same allow; production code never gets one.
+- Call sites in THIS crate only: a blocking call inside rs-core or xiu is
+  not seen. The two on the ingest path were fixed by hand: `LogBuffer::push`
+  (every tracing call) uses `try_lock` and counts a dropped entry instead of
+  waiting for an API `recent()` copy; the stall probe's `ProbeAck` is atomic.
+- Proven on dev2 (#368 lane c): a scratch `std::thread::sleep` in
+  `MediaReceiver::on_frame` failed `cargo clippy -p rs-inpoint --lib -- -D
+  warnings` with `use of a disallowed method`.
+
+## Ingest frame-gap metric (#368 observability lane)
+
+`ingest_gap.rs` (rs-inpoint) measures every media frame in `on_frame`:
+- arrival gap >= 300 ms (any media frame) -> logged + counted;
+- video source-ts delta > 1.5 measured frame intervals -> OBS dropped
+  `round(delta / interval) - 1` frames before sending. The interval is the
+  median-filtered window mean until 32 deltas are counted, then the
+  cumulative mean since the subscription (cancels 29.97 fps' 33/34 ms
+  rounding). Warm-up deltas never enter the cumulative mean. A backward step or one > 30 s is a
+  discontinuity: re-based, never counted.
+- `reset_session()` in `begin_session` (a new publisher: everything starts
+  over); `reset_subscription()` on every accepted subscription forgets only
+  the video timeline. The arrival clock survives a re-subscription, so a
+  FRAME_TIMEOUT stall plus its re-subscription is ONE measured gap of 30 s+
+  (#368 review: resetting it there lost the biggest dropout of all). The
+  audit throttles survive both.
+- A replayed AVC sequence header (`data[1] == 0`, ts 0 from OBS) counts as an
+  arrival but is never a video step: `note_gaps(None)`.
+- The count is exact once the cumulative mean has taken over (32 normal
+  deltas); before that a jump of 100+ frames can be off by one, and drops
+  during the 8-delta warm-up show only as an arrival gap.
+- `frame_interval_us` goes back to 0 at `end_session`. The wall clock is
+  read only for a frame with an incident (`on_frame` takes a closure).
+- Counters: `InpointState::ingest_gaps()` atomics (lock-free, the API reads
+  them on `/status` as `inpoint.details.ingest_gaps`). Rows: `IngestFrameGap`
+  (Warn, Inpoint), one `AuditThrottle` per kind (10 s), aggregates flushed on
+  the first frame after the interval or at `end_session`.
+- The `stream` parameter is generic `&S: Display + ?Sized`, so the per-frame
+  path never allocates; the identifier is stringified only into a row.
 
 ## Testing
 

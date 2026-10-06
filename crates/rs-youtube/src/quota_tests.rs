@@ -49,3 +49,13 @@ fn remaining_clamps_to_budget() {
     q.advance_for_test(Duration::from_secs(86_400));
     assert_eq!(q.remaining(), 10);
 }
+
+#[test]
+fn charge_spends_even_into_debt() {
+    let q = QuotaTracker::new(10);
+    q.charge(4);
+    assert_eq!(q.remaining(), 6);
+    q.charge(15);
+    assert_eq!(q.remaining(), 0, "in debt reads as nothing left");
+    assert!(q.acquire(1).is_err(), "the debt must be repaid first");
+}

@@ -81,6 +81,19 @@ More from the 109 survivors of PR #365's diff (#367, bounded-gate lane):
   `finalize_up_to` that already no-ops, and `if delta > max { max = delta }`
   became `max.max(delta)`.
 
+From the #357 av-gate lane:
+
+- **A guard on an OPTIONAL collaborator needs a test with it present AND
+  passing.** `Some(r) if !bucket_allows(r, ..)` survived as `true` because every
+  test ran with the bucket `None`; one test with a roomy bucket killed it.
+- **A hand-rolled constant-time compare leaves an unkillable mutant.** An
+  OR-fold over XORed digest bytes survives `|` -> `^` (two differences would have
+  to cancel). Compare the SHA-256 digests with `==` instead: the timing then only
+  reveals matching DIGEST bytes, never a token prefix.
+- **A counter grown inline in an endless loop** (`rounds + 1`) survives as
+  `rounds * 1`: the loop test just finishes faster. Put the step in a pure fn
+  (`next_failed_rounds`) and assert its boundaries.
+
 Run it on dev2 before returning a lane, with the recipe in
 `.claude/rules/ci-mutation-gate.md`. The excludes and levers now live in
 `.cargo/mutants.toml`, so there is nothing to copy from ci.yml.

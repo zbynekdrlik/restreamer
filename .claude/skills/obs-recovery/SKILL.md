@@ -1,14 +1,15 @@
 ---
 name: obs-recovery
 description: >
-  Autonomous OBS and CI runner recovery procedures for stream.lan (streamsnv).
-  Load when OBS is in degraded state, CI E2E fails on OBS state, or runner
-  appears offline. Covers graceful restart, machine reboot authorization,
-  and OBS health verification.
+  What to do when stream OBS on stream.lan (streamsnv) is degraded, or a CI
+  E2E job fails on OBS state, and when the self-hosted CI runner appears
+  offline. Stream OBS is camera-box's: restreamer never restarts or
+  reconfigures it (#374); it reports the problem to camera-box instead.
 triggers:
   - OBS degraded
   - OBS not starting
   - OBS recovery
+  - stream OBS not ready
   - CI runner offline
   - runner stalled
   - obs64
@@ -16,132 +17,66 @@ triggers:
   - streamsnv runner
 ---
 
-# OBS and CI Runner Recovery
+# Stream OBS problems and CI runner recovery
 
-## Autonomous Recovery Authorization
+## Stream OBS is camera-box's: do not recover it (#374)
 
-When CI fails on OBS state on the streamsnv runner and operator is **away / not in a live event**, autonomously recover without pausing to ask. Operator explicitly authorized this autonomy for non-live-event windows (2026-05-16).
+Owner directive 2026-08-30, verbatim: "na stream nb robi sa vyvoj aj obska tak ty nic nesahaj do
+obs a tak si rob vyvoj iba si zapinaj vypinaj streamovanie ale nic viac".
 
-**First: verify NOT in a live event** — check audit log for recent EventStarted / no `delivering_activated` event within the past hour.
+OBS on stream.lan is the camera-box project's development target. Restreamer (this session, CI,
+scripts) may only START and STOP streaming and READ status. Restreamer never:
 
-**Banned phrasings during autonomous sessions:**
-- "OBS is in degraded state, please restart"
-- "Approve graceful WM_CLOSE?"
-- "Want me to reboot the runner?"
-- Any AskUserQuestion that asks permission to recover a runner
+- kills, closes (`WM_CLOSE`/`CloseMainWindow`, `ExitOBS`), suspends or relaunches obs64;
+- runs or (re)registers an OBS scheduled task (`StartOBS`, `Start OBS Studio`, `OBSStudio`);
+- deletes `.sentinel`/`safe_mode`, clicks the crash dialog, or edits anything under
+  `%APPDATA%\obs-studio` (service.json, streamEncoder.json, global.ini, scene collections);
+- changes or "restores" the scene, profile, bitrate or stream service;
+- starts or stops a recording (StopRecord included);
+- reboots the box to "fix" OBS.
 
-## OBS Restart Procedure
+Why: before #374, CI force-killed and relaunched stream OBS and rewrote its settings. Four
+force-kills on 2026-10-06 lost camera-box's unsaved runtime settings (their `mbc` sync went from
+37 to 29 ms). The test-integrity guard `scripts/ci/verify_no_obs_mutation.py` now fails the build
+when ci.yml or scripts/ contain any of the above.
 
-### Step 1 — Graceful shutdown
+## When a CI job fails with "stream OBS not ready"
 
-```powershell
-# Via MCP shell — always WM_CLOSE first, NEVER /F unless graceful fails
-mcp__win-stream-snv__Shell command="taskkill /IM obs64.exe /T"
-```
+`scripts/ci/obs-readiness-check.ps1` (early, read-only) and `scripts/ci/obs-stream.ps1 -Action Start`
+(the only CI start, same checks in the start session) fail with
+`stream OBS not ready (<what>) -- camera-box owns it, not touching it` or
+`stream OBS is recording -- not touching it` when camera-box's TEST mode is not in place:
 
-Wait 15-30 seconds and verify gone:
-```powershell
-mcp__win-stream-snv__ListProcesses filter="obs64"
-```
-
-If still running after 30s: `/F` is acceptable during operator-away autonomous sessions.
-
-### Step 2 — Relaunch via existing scheduled task
-
-```powershell
-# Use the EXISTING scheduled task — do NOT re-register it
-mcp__win-stream-snv__Shell command="Start-ScheduledTask -TaskName 'OBS Studio'"
-```
-
-**Do NOT re-register the OBS scheduled task** — it already works (do not guess parameters and rewrite it).
-
-### Step 3 — Wait and verify health
-
-Wait 60-90 seconds for OBS to load scene. A healthy OBS uses ~1 GB+ memory.
-
-```powershell
-# Check memory usage — must be > 500 MB (healthy), not ~37 MB (broken)
-mcp__win-stream-snv__Shell command="Get-Process obs64 | Format-List Id, WorkingSet64"
-
-# Verify single OBS process
-mcp__win-stream-snv__ListProcesses filter="obs64"
-
-# Verify WebSocket is listening
-mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
-
-# Visual confirmation
-mcp__win-stream-snv__Snapshot
-```
-
-### Step 4 — Machine reboot (last resort)
-
-If OBS or Restreamer cannot be recovered by relaunch:
-
-```powershell
-mcp__win-stream-snv__Shell command="Restart-Computer -Force"
-```
-
-After reboot: wait ~2-3 minutes, then verify all services recovered, then rerun the failed CI job.
-
-## Critical OBS Rules
-
-### NEVER use `/F` (force kill) as the first move
-
-Force-killing OBS leaves a crash-recovery dialog on next launch. The `--disable-shutdown-check` argument does NOT prevent this dialog — it still hangs OBS at ~18 MB working set.
-
-**Exception**: `/F` is acceptable during operator-away autonomous sessions IF graceful `taskkill /IM obs64.exe /T` fails within 30 seconds.
-
-### NEVER try to kill OBS processes to fix duplicate/bad state
-
-If OBS is in a bad state with recovery dialogs, ask the operator to manually close OBS and dismiss dialogs, then start fresh. Killing OBS remotely when it's showing recovery dialogs makes things worse.
-
-### Starting OBS Correctly (when needed)
-
-OBS MUST be started with the correct working directory (CRITICAL for proper initialization):
-
-```powershell
-mcp__win-stream-snv__Shell command="Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe' -ArgumentList '--disable-shutdown-check'" cwd="C:\Program Files\obs-studio\bin\64bit"
-```
-
-Without the correct working directory, OBS starts in a broken state (~37 MB memory, no WebSocket server, error dialogs).
-
-### OBS Config Locations
-
-| File | Purpose |
+| `<what>` | Meaning |
 |---|---|
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\global.ini` | Global OBS settings |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json` | Stream destination config |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\streamEncoder.json` | Encoder/bitrate config |
-| `C:\Users\newlevel\AppData\Roaming\obs-studio\plugin_config\obs-websocket\config.json` | WebSocket settings |
+| `obs64 is not running` / `N obs64 processes` | OBS down or duplicated |
+| `websocket ... unreachable` | obs-websocket on 4455 not answering (often a crash dialog) |
+| `program scene is '<x>', not the TEST scene 'Development'` | rig not in TEST mode (`PRO` = production) |
+| `stream service is ... not the restreamer inpoint` | OBS points elsewhere (YouTube, a test URL) |
+| `OBS is already streaming` | someone else's stream; never stopped by us |
+| `stream OBS is recording` | a recording camera-box or the owner started |
+| `camera-box holds the rig lease: <job> (<run>)` | `obs-stream.ps1 -Action Start` saw a live lease at start time |
+| `StartStream refused: code ...` | OBS refused the start (usually camera-box started streaming first) |
+| `the active stream is newer than ours` / `a newer stream replaced ours` | the teardown refused: the active session is not the one CI recorded. The line prints its duration and our record. Usually camera-box's stream, so leave it. If it IS ours (a Restreamer restart with no `-Action Rebaseline` after it; see `.claude/rules/stream-obs-ci.md`), fix the missing Rebaseline step |
 
-**OBS uses Advanced mode, Stream_Obs profile. Bitrate is in `streamEncoder.json`, NOT `basic.ini`.**
+What to do:
 
-## "OBS Studio Crash Detected" dialog blocks E2E (dismiss via MCP click)
+1. Read the failure line; do not touch OBS.
+2. Tell camera-box: a comment on the restreamer ticket that hit it plus a camera-box ticket
+   (cross-repo: `gh issue create -R zbynekdrlik/camera-box` from the supervisor), naming the
+   exact `<what>` and the run URL.
+3. Re-run the failed job (`gh run rerun <id> --failed`) once camera-box reports the rig is back in
+   TEST mode, or work on something else meanwhile.
 
-If OBS was force-killed or crashed, the next launch shows a modal **"OBS Studio Crash Detected"** dialog asking Safe Mode vs Normal Mode. It hangs OBS at ~70-97 MB working set (WebSocket NOT listening) until dismissed, so `Ensure OBS is running` in CI fails with `OBS did not start` / `schtasks.exe failed to start`.
-
-**Dismiss it — click "Run in Normal Mode" (NOT Safe Mode: Safe Mode disables the WebSocket server CI needs):**
-
-```
-mcp__win-stream-snv__FocusWindow title="OBS Studio Crash Detected"
-mcp__win-stream-snv__Snapshot quality=40 max_width=700     # read the button's on-screen rect
-# CLICK — but SCALE the coordinates first (see gotcha below)
-mcp__win-stream-snv__Click x=<scaled_x> y=<scaled_y>
-```
-
-**CRITICAL coordinate-scaling gotcha:** `Snapshot`/`AnnotatedSnapshot` return an image scaled DOWN to `max_width` (e.g. 700 or 1280), but `Click` uses REAL desktop pixels (1920×1080). A coordinate read off the scaled screenshot lands in the wrong place. **Multiply the screenshot coordinate by `desktop_width / screenshot_width`** before clicking (e.g. button at x=572 on a 1280-wide shot → real x = 572 × 1920/1280 = 858; on a 700-wide shot → ×1920/700). Getting this wrong wastes several minutes per click (observed 2026-07-16). Verify success: `Get-Process obs64 | WorkingSet64` should jump to **>500 MB** and `Test-NetConnection 127.0.0.1 -Port 4455` → `TcpTestSucceeded: True`, then `gh run rerun <id> --failed`.
-
-The autonomous-recovery authorization at the top of this skill covers this (operator away / not in a live event). The dialog is the ONE case where killing/relaunching OBS makes it worse — dismiss it, don't re-kill.
+The rig lease (`scripts/ci/rig-lease-wait.ps1`, #349) still waits out a camera-box hold early in
+the job and then proceeds; `obs-stream.ps1 -Action Start` then FAILS (never streams over it) if
+the lease is still held and not stale. The mid-run gates restart our stream with
+`-Action Republish`, which re-runs the same checks.
 
 ## Runner Offline Detection
 
-When a CI deploy/E2E job stays "queued" with `startedAt` set, the runner is likely offline. Alert user within first poll (within 5 minutes of detecting the queue condition) — do NOT wait hours.
-
-## When Operator Must Be Involved
-
-If OBS is in a bad state with visible recovery dialogs AND it cannot be cleared remotely:
-- Ask operator to manually close OBS and dismiss dialogs
-- Then start fresh using the MCP shell command above
-- This is the ONLY case where operator assistance is needed for OBS state
-
-## Crash-
+When a CI deploy/E2E job stays "queued" with `startedAt` set, the self-hosted runner is likely
+offline. Alert the user within the first poll (within 5 minutes of detecting the queue condition);
+do NOT wait hours. Restarting the runner service or rebooting the box is a host-level action
+and needs the owner's explicit approval at the command (`no-destructive-remote-actions.md`); it
+is never a way to recover OBS.

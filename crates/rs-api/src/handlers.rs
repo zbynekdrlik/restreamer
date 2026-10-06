@@ -59,6 +59,9 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
             // by another process). null when the listener is healthy. Drives the
             // dashboard's red bind-failure banner.
             "rtmp_bind_error": state.inpoint_state.bind_error(),
+            // #368: every frame gap reaching the ingest, counted since start
+            // (arrival gaps >= 300 ms, frames the publisher dropped).
+            "ingest_gaps": state.inpoint_state.ingest_gaps().snapshot(),
         }),
     };
 

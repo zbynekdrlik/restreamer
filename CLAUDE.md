@@ -25,7 +25,8 @@ auto-load on their `paths:` — you do not invoke those.
 - Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
-- OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
+- OBS degraded / CI runner offline (stream OBS is camera-box's: never restart/reconfigure it) → `.claude/skills/obs-recovery`
+- CI's stream-OBS contract (Start/Stop + reads only, readiness check, no-mutation guard) → `.claude/rules/stream-obs-ci.md` (auto)
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
 - Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
@@ -36,7 +37,9 @@ auto-load on their `paths:` — you do not invoke those.
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
+- YouTube A/V-gate session API (`/api/v1/av-gate/session`, manage-scope client, cleanup paths) + the hand recipe → `.claude/rules/youtube-av-measurement.md` (auto)
 - YouTube-measured A/V + frame-continuity session (manage-scope OAuth on stream.lan, Thursday trigger, camera-box roles, pass criteria) → `.claude/rules/youtube-av-measurement.md` (auto)
+- restreamer.log daily roll + 14-day retention (fixed live file name) → `.claude/rules/log-retention.md` (auto)
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure

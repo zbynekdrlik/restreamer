@@ -33,10 +33,16 @@
 //! instance probes each runtime. Every record and audit row carries
 //! `runtime` (`main` / `ingest`), and the ingest detector writes
 //! `logs/stall-ingest.log` next to the main `logs/stall.log`.
+//!
+//! Since the #368 observability lane the thresholds are tiers
+//! (`stall_tiers.rs`, `config.stall_detector`): a probe every 100 ms, a
+//! stall record from 500 ms, a throttled `ProcessStall` row from 700 ms
+//! (where OBS starts dropping frames), `tier: "severe"` from 5 s.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
@@ -49,20 +55,20 @@ pub mod resources;
 #[path = "stall_log.rs"]
 mod stall_log;
 
-use resources::ResourceSnapshot;
-pub use stall_log::{DetectedStall, StallLog, WallAnchor};
+#[path = "stall_tiers.rs"]
+pub mod tiers;
 
-/// How often the detector wakes, and sends a runtime probe when none is in flight.
-pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
-/// An unanswered probe (or a detector wake-up this late) is a stall.
-pub const STALL_THRESHOLD: Duration = Duration::from_secs(5);
-/// A detector wake-up at least this much later than its `PROBE_INTERVAL` wait
-/// during a stall means the OS was not running the process: `whole_process`.
-pub const TICK_LATE_THRESHOLD: Duration = Duration::from_secs(1);
-/// Healthy ticks between two baseline resource samples.
-pub const BASELINE_EVERY_TICKS: u32 = 10;
+use resources::ResourceSnapshot;
+use rs_core::audit_throttle::Suppressed;
+use rs_core::config::StallDetectorSettings;
+pub use stall_log::{DetectedStall, StallLog, WallAnchor};
+use tiers::{StallAuditGate, StallTier, StallVerdict};
+
 /// `stall.log` is rotated to `stall.log.old` once it reaches this size.
-pub const STALL_LOG_MAX_BYTES: u64 = 1_000_000;
+/// 10 MB since the #368 tiers record every stall from 500 ms (about 3 KB of
+/// records each), so a micro-stall-heavy day cannot rotate away last week's
+/// evidence; the pair is bounded at ~20 MB.
+pub const STALL_LOG_MAX_BYTES: u64 = 10_000_000;
 /// The app-wide runtime (Tauri's in GUI mode): DB, HTTP, delivery, uploads.
 pub const MAIN_RUNTIME: &str = "main";
 /// The dedicated RTMP ingest runtime (#368).
@@ -80,8 +86,21 @@ pub fn stall_log_file_name(runtime: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StallDetectorConfig {
+    /// How often the detector wakes, and sends a runtime probe when none is
+    /// in flight.
     pub probe_interval: Duration,
+    /// An unanswered probe (or a detector wake-up this late) is a stall:
+    /// recorded in `stall*.log` (tier `minor` and up).
     pub stall_threshold: Duration,
+    /// A stall at least this long also writes a `ProcessStall` row (`major`).
+    pub audit_threshold: Duration,
+    /// A stall at least this long is `severe`.
+    pub severe_threshold: Duration,
+    /// At most one `ProcessStall` row per this interval; the rest are counted.
+    pub audit_min_interval: Duration,
+    /// A detector wake-up at least this much later than its `probe_interval`
+    /// wait during a stall means the OS was not running the process:
+    /// `whole_process`.
     pub tick_late_threshold: Duration,
     pub baseline_every_ticks: u32,
     pub log_path: PathBuf,
@@ -95,17 +114,11 @@ impl StallDetectorConfig {
         Self::production_for(data_dir, MAIN_RUNTIME)
     }
 
-    /// The production thresholds for the detector probing `runtime`, logging
-    /// to `<data_dir>/logs/<stall_log_file_name(runtime)>`.
+    /// The production thresholds (the `config.stall_detector` defaults) for
+    /// the detector probing `runtime`, logging to
+    /// `<data_dir>/logs/<stall_log_file_name(runtime)>`.
     pub fn production_for(data_dir: &Path, runtime: &str) -> Self {
-        Self {
-            probe_interval: PROBE_INTERVAL,
-            stall_threshold: STALL_THRESHOLD,
-            tick_late_threshold: TICK_LATE_THRESHOLD,
-            baseline_every_ticks: BASELINE_EVERY_TICKS,
-            log_path: data_dir.join("logs").join(stall_log_file_name(runtime)),
-            log_max_bytes: STALL_LOG_MAX_BYTES,
-        }
+        tiers::config_from_settings(data_dir, runtime, &StallDetectorSettings::default()).0
     }
 }
 
@@ -444,11 +457,12 @@ pub fn spawn_runtime_stall_detector(
     })
 }
 
-/// `ServiceCore` entry point: production thresholds, the current (main)
+/// `ServiceCore` entry point: the configured tiers, the current (main)
 /// runtime, `<data_dir>/logs/stall.log`. A failure to start is logged loudly
 /// and never stops the service.
 pub fn start_for_service(
     data_dir: &Path,
+    settings: &StallDetectorSettings,
     audit_tx: mpsc::Sender<AuditRow>,
 ) -> Option<StallDetectorGuard> {
     let handle = match Handle::try_current() {
@@ -458,23 +472,30 @@ pub fn start_for_service(
             return None;
         }
     };
-    start_for_runtime(MAIN_RUNTIME, handle, data_dir, audit_tx)
+    start_for_runtime(MAIN_RUNTIME, handle, data_dir, settings, audit_tx)
 }
 
-/// Production detector for `runtime` (`handle`'s runtime), logging to
-/// `<data_dir>/logs/<stall_log_file_name(runtime)>`. A failure to start is
-/// logged loudly and never stops the service.
+/// Production detector for `runtime` (`handle`'s runtime) with the
+/// configured tiers, logging to `<data_dir>/logs/<stall_log_file_name(runtime)>`.
+/// A failure to start is logged loudly and never stops the service.
 pub fn start_for_runtime(
     runtime: &'static str,
     handle: Handle,
     data_dir: &Path,
+    settings: &StallDetectorSettings,
     audit_tx: mpsc::Sender<AuditRow>,
 ) -> Option<StallDetectorGuard> {
-    let config = StallDetectorConfig::production_for(data_dir, runtime);
+    let (config, adjusted) = tiers::config_from_settings(data_dir, runtime, settings);
+    for warning in &adjusted {
+        log::warn!("process-stall detector ({runtime}): {warning}");
+    }
     let summary = format!(
-        "runtime={runtime} probe_interval_ms={} stall_threshold_ms={} tick_late_threshold_ms={} stall_log={}",
+        "runtime={runtime} probe_interval_ms={} record_threshold_ms={} audit_threshold_ms={} severe_threshold_ms={} audit_min_interval_ms={} tick_late_threshold_ms={} stall_log={}",
         stall_log::ms(config.probe_interval),
         stall_log::ms(config.stall_threshold),
+        stall_log::ms(config.audit_threshold),
+        stall_log::ms(config.severe_threshold),
+        stall_log::ms(config.audit_min_interval),
         stall_log::ms(config.tick_late_threshold),
         config.log_path.display()
     );
@@ -525,17 +546,46 @@ impl BaselineSchedule {
     }
 }
 
-/// The newest probe the runtime answered.
-#[derive(Debug, Default)]
-struct ProbeAck(Mutex<Option<(u64, Instant)>>);
+/// The newest probe the runtime answered. Two atomics, no lock (#368): the
+/// probe runs on the runtime it measures, the ingest one included, whose
+/// thread runs at THREAD_PRIORITY_HIGHEST, and must never wait for the
+/// detector thread. Exactly one probe is in flight, so the two stores of
+/// one answer never interleave with another's.
+#[derive(Debug)]
+struct ProbeAck {
+    /// Origin of `at_ns`.
+    anchor: Instant,
+    /// Nanoseconds from `anchor` when the newest answered probe ran.
+    at_ns: AtomicU64,
+    /// Its sequence number; 0 = none yet (sequences start at 1).
+    seq: AtomicU64,
+}
+
+impl Default for ProbeAck {
+    fn default() -> Self {
+        Self {
+            anchor: Instant::now(),
+            at_ns: AtomicU64::new(0),
+            seq: AtomicU64::new(0),
+        }
+    }
+}
 
 impl ProbeAck {
     fn record(&self, seq: u64, at: Instant) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((seq, at));
+        let ns = at.saturating_duration_since(self.anchor).as_nanos();
+        self.at_ns
+            .store(u64::try_from(ns).unwrap_or(u64::MAX), Ordering::Relaxed);
+        // Release: a reader that sees `seq` also sees its `at_ns`.
+        self.seq.store(seq, Ordering::Release);
     }
 
     fn latest(&self) -> Option<(u64, Instant)> {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+        let seq = self.seq.load(Ordering::Acquire);
+        (seq != 0).then(|| {
+            let ns = self.at_ns.load(Ordering::Relaxed);
+            (seq, self.anchor + Duration::from_nanos(ns))
+        })
     }
 }
 
@@ -581,6 +631,8 @@ struct Detector {
     baseline_schedule: BaselineSchedule,
     open: Option<DetectedStall>,
     write_error: Option<String>,
+    /// Tier thresholds + the `ProcessStall` row throttle (#368).
+    gate: StallAuditGate,
 }
 
 impl Detector {
@@ -595,6 +647,7 @@ impl Detector {
             log: StallLog::new(config.log_path.clone(), config.log_max_bytes),
             tracker: StallTracker::new(&config),
             baseline_schedule: BaselineSchedule::new(config.baseline_every_ticks),
+            gate: StallAuditGate::new(&config),
             handle,
             config,
             audit_tx,
@@ -627,16 +680,24 @@ impl Detector {
             }
         };
         self.write(&stall_log::stopped_record(&reason, WallAnchor::read()));
+        // Stalls the throttle still holds back reach the audit log too.
+        if let Some(held) = self.gate.take_pending() {
+            self.emit_aggregate(&held);
+        }
     }
 
     fn start(&mut self) {
         let snap = resources::sample();
-        self.write(&stall_log::started_record(
+        let started = stall_log::started_record(
             self.config.probe_interval,
             self.config.stall_threshold,
             self.config.tick_late_threshold,
             &snap,
             WallAnchor::read(),
+        );
+        self.write(&tiers::with_fields(
+            &started,
+            &tiers::tier_fields(&self.config),
         ));
         // Startup, not a stall: the log pipeline is safe to use. Taken, so a
         // later stall row reports only errors from ITS OWN records.
@@ -721,22 +782,80 @@ impl Detector {
         }
 
         if let Some(report) = outcome.ended {
-            let snap = resources::sample();
-            let at = WallAnchor::read();
-            self.write(&stall_log::stall_end_record(&report, &snap, at));
-            let detected = self.open.take();
-            let detail = stall_log::audit_detail(
-                &report,
-                detected.as_ref(),
-                &snap,
-                self.log.path(),
-                self.write_error.take(),
-                at,
-            );
-            self.emit_after_recovery(&report, stall_log::with_runtime(&detail, self.runtime));
-        } else if self.baseline_schedule.due(self.tracker.in_stall()) {
+            self.finish_stall(&report, now);
+            return;
+        }
+        // Mid-stall the log pipeline may be blocked: flush nothing then.
+        if !self.tracker.in_stall() {
+            if let Some(held) = self.gate.take_due(now) {
+                self.emit_aggregate(&held);
+            }
+        }
+        if self.baseline_schedule.due(self.tracker.in_stall()) {
             self.baseline = Some((now, resources::sample()));
         }
+    }
+
+    /// The runtime answered again: write `stall_end`, then log and (by tier
+    /// and throttle) audit it. The log pipeline is safe from here.
+    fn finish_stall(&mut self, report: &StallReport, now: Instant) {
+        let snap = resources::sample();
+        let at = WallAnchor::read();
+        let tier = StallTier::of(report.duration, &self.config);
+        let tier_json = serde_json::json!({ "tier": tier.as_str() });
+        self.write(&tiers::with_fields(
+            &stall_log::stall_end_record(report, &snap, at),
+            &tier_json,
+        ));
+        let detected = self.open.take();
+        // Taken whatever the verdict: a later stall's row reports only
+        // errors from ITS OWN records.
+        let write_error = self.write_error.take();
+        match self.gate.on_stall_end(now, report.duration) {
+            verdict @ (StallVerdict::LogOnly | StallVerdict::HeldBack) => {
+                log::info!(
+                    "{}",
+                    tiers::unaudited_line(
+                        self.runtime,
+                        report,
+                        tier,
+                        verdict,
+                        self.log.path(),
+                        write_error.as_deref(),
+                    )
+                );
+            }
+            StallVerdict::Audit { suppressed } => {
+                let detail = stall_log::audit_detail(
+                    report,
+                    detected.as_ref(),
+                    &snap,
+                    self.log.path(),
+                    write_error,
+                    at,
+                );
+                let extra = serde_json::json!({
+                    "tier": tier.as_str(),
+                    "held_back_before": suppressed.map(|s| s.to_json("ms")),
+                });
+                let detail = tiers::with_fields(&detail, &extra);
+                self.emit_after_recovery(report, stall_log::with_runtime(&detail, self.runtime));
+            }
+        }
+    }
+
+    /// Flush the stalls the throttle held back as one aggregate row.
+    fn emit_aggregate(&self, held: &Suppressed) {
+        log::warn!(
+            "process stalls held back by the audit rate limit: runtime={} count={} max_duration_ms={} total_duration_ms={} evidence={}",
+            self.runtime,
+            held.count,
+            held.max,
+            held.total,
+            self.log.path().display()
+        );
+        let detail = tiers::aggregate_detail(held, self.log.path());
+        self.send_audit(stall_log::with_runtime(&detail, self.runtime));
     }
 
     fn write(&mut self, record: &Value) {
@@ -761,8 +880,9 @@ impl Detector {
     /// pipeline and the audit channel are safe to use from here.
     fn emit_after_recovery(&self, report: &StallReport, detail: Value) {
         log::warn!(
-            "process stall: runtime={} class={} duration_ms={} trigger={} detector_max_late_ms={} detector_total_late_ms={} evidence={} evidence_write_error={}",
+            "process stall: runtime={} tier={} class={} duration_ms={} trigger={} detector_max_late_ms={} detector_total_late_ms={} evidence={} evidence_write_error={}",
             self.runtime,
+            detail["tier"].as_str().unwrap_or("major"),
             report.class.as_str(),
             stall_log::ms(report.duration),
             report.trigger.as_str(),
@@ -771,6 +891,10 @@ impl Detector {
             self.log.path().display(),
             detail["stall_log_error"].as_str().unwrap_or("none")
         );
+        self.send_audit(detail);
+    }
+
+    fn send_audit(&self, detail: Value) {
         if let Some(tx) = &self.audit_tx {
             // `audit::record` may `tokio::spawn` a retry for a Warn row on a full
             // channel; entering the runtime gives that spawn its context.

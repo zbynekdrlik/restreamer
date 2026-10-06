@@ -1,9 +1,11 @@
 pub mod audit;
+pub mod audit_throttle;
 pub mod config;
 pub mod config_redact;
 pub mod db;
 pub mod endpoint_lifecycle;
 pub mod error;
+pub mod ingest_gaps;
 pub mod log_buffer;
 pub mod log_capture;
 pub mod long_stream;

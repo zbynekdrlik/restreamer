@@ -167,7 +167,8 @@ echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-Local
   single `e2e-obs-youtube-test → e2e-gate` range spans BOTH OBS-streaming jobs, so
   `grep -q StopRecord` on it passes if only ONE has the teardown. Split into
   `obs-youtube→fb-push` and `fb-push→e2e-gate` and assert each (real #361 review
-  finding — the one-range guard did not encode "both jobs").
+  finding — the one-range guard did not encode "both jobs"). (The StopRecord teardown itself is
+  gone since #374: CI never controls OBS recording; the per-job lesson stands.)
 - Pin the discriminating flags in a firewall/rule assertion (`-Direction Inbound`
   … `-Action Allow`), or the grep also passes an Outbound/Block rule.
 - A negative directive ("we must NEVER do X") is a whole-file `grep -q` that EXITs

@@ -213,7 +213,28 @@ pub enum Action {
     /// PRE-stall reading), resources_at_detect (mid-stall for runtime_starved,
     /// right after the freeze for whole_process), resources_at_end, stall_log,
     /// stall_log_error}. The same evidence is in `logs/stall.log`.
+    ///
+    /// Since #368 the threshold is tiered (`config.stall_detector`): a stall
+    /// of 700 ms or more gets this row (`tier: "major"`, or `"severe"` from
+    /// 5 s; 500-700 ms stalls stay in stall.log only). Detail adds `runtime`,
+    /// `tier` and `held_back_before` (the stalls the rate limit held back
+    /// since the previous row: {count, max, total, unit, span_ms}, or null).
+    /// At most one row per `audit_min_interval_ms` (10 s); a held-back
+    /// aggregate with no later stall to carry it is flushed as its own row
+    /// `{aggregate: true, runtime, held_back, stall_log}`.
     ProcessStall,
+    /// Inpoint-side (#368): a gap in the frames reaching the ingest. Emitted
+    /// by the `MediaReceiver` on the ingest runtime. Severity::Warn,
+    /// Source::Inpoint. `kind` is `arrival_gap` (no media frame arrived for
+    /// 300 ms or more: {gap_ms, resumed_at_ms, stream_identifier}) or
+    /// `source_ts_jump` (the publisher's video timestamps jumped by more than
+    /// 1.5 frame intervals, i.e. OBS dropped frames before sending:
+    /// {from_ts, to_ts, delta_ms, frame_interval_ms, dropped_frames, at_ms,
+    /// stream_identifier}). `*_at_ms` are Unix-epoch ms. Rate-limited per
+    /// kind to one row per 10 s; `held_back_before` carries what was held
+    /// back since the previous row, and an aggregate the stream did not
+    /// carry is flushed as `{kind, aggregate: true, held_back}`.
+    IngestFrameGap,
     /// Local chunk-store volume crossed a disk-pressure threshold on the
     /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
     /// chunks are never dropped (continuity guarantee). Detail JSON:
@@ -329,6 +350,34 @@ pub enum Action {
     /// silent 2026-06-19 event 9316 case). Detail JSON: {event_id, event_name}.
     /// Pairs with the dashboard `NoRescueVideoBanner`.
     NoRescueVideoConfigured,
+    /// #357: a YouTube A/V-gate session was created: broadcast inserted and
+    /// bound, test event activated, delivery started. Info, `Source::System`.
+    /// Detail: {session_id, requester, broadcast_id, stream_id, event_id}.
+    /// Every `AvGateSession*` row carries `session_id`.
+    AvGateSessionStarted,
+    /// #357: delivery is delivering, the YouTube stream is active and the
+    /// broadcast was transitioned to `live`. Info. Detail: {session_id,
+    /// broadcast_id}.
+    AvGateSessionReady,
+    /// #357: the caller asked the session to stop; the cache drain begins.
+    /// Info. Detail: {session_id, drain_secs}.
+    AvGateSessionStopRequested,
+    /// #357: broadcast completed, delivery stopped, event deactivated, zero
+    /// Hetzner servers left; waiting for YouTube to process the VOD. Info.
+    /// Detail: {session_id, broadcast_id}.
+    AvGateSessionProcessing,
+    /// #357: YouTube finished processing the VOD. Info. Detail: {session_id,
+    /// vod_id}.
+    AvGateSessionDone,
+    /// #357: the session ended without a VOD. Warn. Detail: {session_id,
+    /// reason}. The teardown already ran (or its own failures are in
+    /// `reason`).
+    AvGateSessionFailed,
+    /// #357: the reaper tore a session down on its own: no stop within the
+    /// idle timeout (`cause: "idle_timeout"`), a session found unfinished at
+    /// boot (`"boot_reconcile"`), or a driver task that died
+    /// (`"driver_died"`). Warn. Detail: {session_id, cause}.
+    AvGateSessionReaped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,6 +613,28 @@ mod tests {
             serde_json::to_string(&Action::NoRescueVideoConfigured).unwrap(),
             r#""no_rescue_video_configured""#
         );
+        // #357: the A/V-gate callers (both CI gates) read these from
+        // /api/v1/audit?action=…, so their strings are a contract.
+        for (action, wire) in [
+            (Action::AvGateSessionStarted, "av_gate_session_started"),
+            (Action::AvGateSessionReady, "av_gate_session_ready"),
+            (
+                Action::AvGateSessionStopRequested,
+                "av_gate_session_stop_requested",
+            ),
+            (
+                Action::AvGateSessionProcessing,
+                "av_gate_session_processing",
+            ),
+            (Action::AvGateSessionDone, "av_gate_session_done"),
+            (Action::AvGateSessionFailed, "av_gate_session_failed"),
+            (Action::AvGateSessionReaped, "av_gate_session_reaped"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&action).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
     }
 
     #[test]
@@ -733,6 +804,14 @@ mod tests {
         let a = Action::ProcessStall;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"process_stall\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_ingest_frame_gap_serdes() {
+        let a = Action::IngestFrameGap;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"ingest_frame_gap\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 
