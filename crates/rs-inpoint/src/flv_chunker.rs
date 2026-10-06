@@ -40,6 +40,8 @@ const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024;
 
 /// Maximum pending disk writes before dropping chunks.
 const MAX_PENDING_WRITES: u32 = 20;
+/// How often `wait_for_writes` looks at the pending-write count.
+const WRITE_DRAIN_POLL: Duration = Duration::from_millis(10);
 
 /// FLV tag type constants.
 const FLV_TAG_AUDIO: u8 = 8;
@@ -629,6 +631,23 @@ impl FlvChunkSink {
         let chunk_tx = self.chunk_tx.clone();
         Self::do_write_and_notify(pending, chunk_tx).await;
     }
+
+    /// Wait until every background chunk write (`spawn_write`) has written
+    /// its file AND reported its chunk, for at most `limit`. Returns the
+    /// writes still pending.
+    ///
+    /// Call it before the runtime running those writes shuts down (#368:
+    /// the ingest runtime's shutdown cancels a write still in flight, and its
+    /// chunk would never reach the DB, so it would never be uploaded).
+    pub async fn wait_for_writes(&self, limit: Duration) -> u32 {
+        let _ = tokio::time::timeout(limit, async {
+            while self.pending_writes.load(Ordering::Relaxed) > 0 {
+                tokio::time::sleep(WRITE_DRAIN_POLL).await;
+            }
+        })
+        .await;
+        self.pending_writes.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -673,3 +692,7 @@ mod wall_clock_tests {
 #[cfg(test)]
 #[path = "flv_chunker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "flv_chunker_drain_tests.rs"]
+mod drain_tests;

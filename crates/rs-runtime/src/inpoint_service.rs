@@ -14,7 +14,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 
-use crate::ingest_runtime::IngestRuntime;
+use crate::ingest_runtime::{INGEST_SHUTDOWN_TIMEOUT, IngestRuntime};
 
 /// Everything the inpoint supervision loop needs.
 pub(crate) struct InpointParams {
@@ -31,6 +31,10 @@ pub(crate) struct InpointParams {
 pub(crate) struct InpointService {
     supervisor: Option<JoinHandle<()>>,
     ingest: Option<IngestRuntime>,
+    /// The chunker, whose background writes run on the ingest runtime and
+    /// must finish before it stops. Released by `stop`, so the chunk
+    /// forwarder's channel can close.
+    sink: Option<Arc<FlvChunkSink>>,
 }
 
 impl InpointService {
@@ -38,6 +42,7 @@ impl InpointService {
     /// runtime. Call it inside a tokio runtime.
     pub(crate) fn start(p: InpointParams) -> std::io::Result<Self> {
         let ingest = IngestRuntime::start()?;
+        let sink = Arc::clone(&p.flv_chunk_sink);
         let supervisor = tokio::spawn(crate::orchestrator::run_inpoint_loop(
             p.bind,
             p.port,
@@ -51,6 +56,7 @@ impl InpointService {
         Ok(Self {
             supervisor: Some(supervisor),
             ingest: Some(ingest),
+            sink: Some(sink),
         })
     }
 
@@ -67,13 +73,20 @@ impl InpointService {
     }
 
     /// Wait for the supervision loop to end (send the shutdown signal
-    /// first; the loop stops the RTMP server and flushes the chunker), then
-    /// shut the ingest runtime down and wait for its thread.
+    /// first; the loop stops the RTMP server and flushes the chunker), let
+    /// the chunk writes still running finish, then shut the ingest runtime
+    /// down and wait for its thread.
     pub(crate) async fn stop(&mut self) -> Result<(), JoinError> {
         let supervised = match self.supervisor.take() {
             Some(task) => task.await,
             None => Ok(()),
         };
+        // Shutting the runtime down cancels its tasks: a chunk still being
+        // written would never be reported, so never reach the DB/uploader.
+        if let Some(sink) = self.sink.take() {
+            let pending = sink.wait_for_writes(INGEST_SHUTDOWN_TIMEOUT).await;
+            log::info!("inpoint stop: chunk writes still running after the drain: {pending}");
+        }
         if let Some(mut ingest) = self.ingest.take() {
             // Joining the thread blocks: never on an async worker.
             if let Err(e) = tokio::task::spawn_blocking(move || ingest.shutdown()).await {
