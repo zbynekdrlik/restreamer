@@ -281,16 +281,16 @@ def _closed_port() -> int:
 
 
 class FakeObs64:
-    """A long-running process whose process name is `obs64` (Get-Process -Name obs64)."""
+    """A long-running process named `obs64` (Get-Process -Name obs64), or another name."""
 
-    def __init__(self, tmp: Path, count: int = 1) -> None:
+    def __init__(self, tmp: Path, count: int = 1, name: str = "obs64") -> None:
         self.procs: list[subprocess.Popen] = []
         if os.name == "nt":
-            exe = tmp / "obs64.exe"
+            exe = tmp / f"{name}.exe"
             shutil.copy(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "ping.exe", exe)
             args = [str(exe), "-n", "3600", "127.0.0.1"]
         else:
-            exe = tmp / "obs64"
+            exe = tmp / name
             shutil.copy(shutil.which("sleep") or "/bin/sleep", exe)
             exe.chmod(0o755)
             args = [str(exe), "3600"]
@@ -326,6 +326,8 @@ class Case:
     max_stops: int = 1
     ours_age_s: float | None = None  # our recorded start, seconds ago (None = no record)
     pre_actions: list[list[str]] = field(default_factory=list)  # run first, each must exit 0
+    host: bool = False                # a fake Restreamer.exe (just restarted) for Rebaseline
+    rebaseline_window_s: float | None = None
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
@@ -385,17 +387,21 @@ CASES = [
          ObsState(streaming=True, stream_age_s=120), 1, "newer than ours", ["false"],
          may_stop=True, ours_age_s=1200, forbid_requests={"StopStream"}),
     Case("rebaseline after the reconnect, then stop -> stopped", OS_, STOP,
-         ObsState(streaming=True, stream_age_s=120), 0, "OBS stream stopped", [],
-         may_stop=True, may_change_state=True, ours_age_s=1200, pre_actions=[REBASELINE],
-         require_requests={"StopStream"}),
+         ObsState(streaming=True, stream_age_s=900, reconnecting=True, reconnect_ends_after_s=0.5), 0,
+         "OBS stream stopped", [], may_stop=True, may_change_state=True, ours_age_s=1200, pre_actions=[REBASELINE],
+         require_requests={"StopStream"}, host=True),
     Case("rebaseline waits out a reconnect in progress, then stop -> stopped", OS_, STOP,
-         ObsState(streaming=True, stream_age_s=900, reconnecting=True, reconnect_ends_after_s=2.0), 0,
+         ObsState(streaming=True, stream_age_s=900, reconnecting=True, reconnect_ends_after_s=3.0), 0,
          "OBS stream stopped", [], may_stop=True, may_change_state=True, ours_age_s=1200,
-         pre_actions=[REBASELINE], require_requests={"StopStream"}),
+         pre_actions=[REBASELINE], require_requests={"StopStream"}, host=True),
     Case("rebaseline: OBS gave up reconnecting -> marker false, nothing stopped", OS_, REBASELINE,
-         ObsState(), 0, "no longer active", ["false"], ours_age_s=1200),
-    Case("rebaseline: active -> re-anchored, read-only", OS_, REBASELINE,
-         ObsState(streaming=True, stream_age_s=30), 0, "re-anchored", [], ours_age_s=1200,
+         ObsState(), 0, "no longer active", ["false"], ours_age_s=1200, host=True),
+    Case("rebaseline: the session began long after the host restart (camera-box) -> not adopted", OS_, REBASELINE,
+         ObsState(streaming=True, stream_age_s=900, reconnecting=True, reconnect_ends_after_s=3.0), 1,
+         "not our reconnect, not adopting it", [], ours_age_s=1200, host=True, rebaseline_window_s=1,
+         forbid_requests={"StopStream", "StartStream"}, may_change_state=True),
+    Case("rebaseline: no Restreamer process -> not adopted", OS_, REBASELINE,
+         ObsState(streaming=True, stream_age_s=0), 1, "Restreamer.exe is not running", [], ours_age_s=1200,
          forbid_requests={"StopStream", "StartStream"}),
     Case("assert: not streaming -> ok", OS_, ASSERT, ObsState(), 0, "not streaming - good", [],
          forbid_requests={"StopStream", "StartStream"}),
@@ -458,6 +464,7 @@ def run_case(case: Case) -> list[str]:
         obs = None if case.obs_down else MockObs(case.state)
         lease = MockLease(case.lease) if case.lease else None
         fake = FakeObs64(tmp, case.obs64) if case.obs64 else None
+        host = FakeObs64(tmp, 1, "Restreamer") if case.host else None
         env_file = tmp / "github_env"
         env_file.write_text("", encoding="utf-8")
         ours = case.ours_age_s if case.ours_age_s is not None else (
@@ -472,6 +479,7 @@ def run_case(case: Case) -> list[str]:
             "RIG_LEASE_URL": lease.url if lease else f"http://127.0.0.1:{_closed_port()}/rig-lease.json",
             "GITHUB_ENV": str(env_file),
             "RUNNER_TEMP": str(tmp),
+            "OBS_REBASELINE_WINDOW_S": str(case.rebaseline_window_s or ""),
         })
         try:
             pre_out = ""
@@ -490,6 +498,8 @@ def run_case(case: Case) -> list[str]:
         finally:
             if fake:
                 fake.close()
+            if host:
+                host.close()
             if obs:
                 obs.close()
             if lease:

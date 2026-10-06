@@ -17,8 +17,12 @@
 #   -Action Rebaseline         read-only, right after every step that kills/restarts
 #                              Restreamer.exe while we stream: OBS reconnects, which
 #                              RESETS outputDuration. Waits out the reconnect, then
-#                              re-records when our (reconnected) session began; an
-#                              output that went inactive is gone: marker=false.
+#                              re-records when our (reconnected) session began -- only
+#                              if it began within OBS_REBASELINE_WINDOW_S (180) of the
+#                              Restreamer.exe (re)start, i.e. it is OBS's reconnect and
+#                              not a session camera-box started after ours gave up;
+#                              otherwise exit 1 and keep the record (the teardown then
+#                              refuses). An output that went inactive is gone: marker=false.
 #   -Action AssertNotStreaming read-only: fails when OBS is streaming (into the inpoint
 #                              it would keep rtmp_connected true) or rejects us; only an
 #                              unreachable OBS is a warning (a down OBS streams nothing).
@@ -188,8 +192,22 @@ function Invoke-Rebaseline {
         return
       }
       if (-not $data.outputReconnecting) {
+        $host0 = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Sort-Object StartTime)[-1]
+        $window = $env:OBS_REBASELINE_WINDOW_S -as [double]
+        if ($null -eq $window -or $window -le 0) { $window = 180 }
+        $began = (Get-NowEpoch) - ([double]$data.outputDuration / 1000.0)
+        if ($null -eq $host0) {
+          Write-Host "::error::Restreamer.exe is not running; cannot tell whether the active OBS session is our reconnect -- not adopting it"
+          exit 1
+        }
+        $hostStart = ([DateTimeOffset]$host0.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() / 1000.0
+        $lag = $began - $hostStart
+        if ($lag -lt -10 -or $lag -gt $window) {
+          Write-Host "::error::the active OBS session began $([math]::Round($lag))s after the Restreamer restart (window ${window}s) -- not our reconnect, not adopting it; see .claude/skills/obs-recovery"
+          exit 1
+        }
         Set-StartedAt $data
-        Write-Host "OBS stream re-anchored after the Restreamer restart (outputDuration $([math]::Round([double]$data.outputDuration / 1000))s)"
+        Write-Host "OBS stream re-anchored after the Restreamer restart (session began $([math]::Round($lag))s after it)"
         return
       }
       Start-Sleep -Seconds 1

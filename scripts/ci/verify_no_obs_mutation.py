@@ -471,7 +471,8 @@ def check_obs_stream_shape(root: Path) -> list[str]:
         errs.append(f"{OBS_STREAM}: Stop-OurStream must refuse a newer session that appears while ours stops")
     reb = body_of(code, "Invoke-Rebaseline") or ""
     if not re.search(r'if \(-not \(Get-ObsActive "GetStreamStatus" \$data\)\) \{\s*\n\s*Set-StartedMarker "false"', reb) \
-            or "if (-not $data.outputReconnecting) {" not in reb or "StopStream" in reb or "StartStream" in reb:
+            or "if (-not $data.outputReconnecting) {" not in reb or "StopStream" in reb or "StartStream" in reb \
+            or "if ($lag -lt -10 -or $lag -gt $window) {" not in reb:
         errs.append(f"{OBS_STREAM}: Rebaseline must wait out the reconnect, re-anchor, and mark a gone stream false (read-only)")
     if "Set-StartedAt $active" not in (body_of(code, "Start-OurStream") or ""):
         errs.append(f"{OBS_STREAM}: Start-OurStream must record when our stream began")
@@ -664,6 +665,8 @@ STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Start forgets when our stream began", "    Set-StartedAt $active\n", "", "must record when our stream began"),
     ("Rebaseline anchors without waiting out the reconnect", "      if (-not $data.outputReconnecting) {",
      "      if ($true) {", "Rebaseline must wait out the reconnect"),
+    ("Rebaseline adopts any session (no restart window)", "        if ($lag -lt -10 -or $lag -gt $window) {",
+     "        if ($false) {", "Rebaseline must wait out the reconnect"),
     ("Republish keeps the marker true across the gap", '      Stop-OurStream\n      Set-StartedMarker "false"\n',
      "      Stop-OurStream\n", "Republish must write the marker false"),
     ("AssertNotStreaming stops a foreign stream",
