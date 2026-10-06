@@ -6,6 +6,8 @@ paths:
   - "crates/rs-runtime/src/orchestrator.rs"
   - "crates/rs-endpoint/src/disk_pressure.rs"
   - "crates/rs-inpoint/src/flv_chunker_drain_tests.rs"
+  - "crates/rs-inpoint/src/media_receiver.rs"
+  - "crates/rs-core/src/stable_since*.rs"
 ---
 
 # The dedicated ingest runtime and the Windows priorities (#368)
@@ -27,13 +29,17 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
 - Chunks and events cross to the main runtime through the existing tokio
   channels, which work across runtimes. Never `Handle::current()` or
   `tokio::spawn` main-runtime work from the ingest path, and never make the
-  ingest path await something only the main runtime drives. One known
-  exception is left: `InpointState::mark_connected`/`mark_disconnected` await
-  the `rtmp_stable_since` tokio `Mutex` that API handlers also lock. A starved
-  main-runtime waiter can hold up the receiver at a session start or end.
-  Frames are safe, because xiu's channels are unbounded. The type is shared
-  with rs-api's `AppState` and the Tauri tray state (since #234), so changing
-  it is a follow-up of its own.
+  ingest path await something only the main runtime drives.
+- **Never share an awaited lock between the ingest path and the API.** The
+  publisher-stable cell (`rtmp_stable_since`) is `rs_core::stable_since::
+  StableSince`: one `AtomicI64` of nanoseconds from an `Instant` anchor
+  (monotonic, never wall-clock), `i64::MIN` = no publisher. Its methods are
+  synchronous, so `InpointState::mark_connected`/`mark_disconnected` are too.
+  It used to be a tokio `Mutex` that API handlers also locked: while an API
+  task held it, a connecting publisher's first frame waited the whole hold
+  (3.0 s in the RED test), and a session shorter than the hold was LOST,
+  because the receiver subscribes only after `mark_connected` returns.
+  Frames that arrive before the subscription are not buffered.
 - `RtmpServer::serve`'s own `flush()` runs on the ingest runtime when the
   server stops. The loop's `flush()` afterwards (main runtime) finds the
   buffer empty.
@@ -64,10 +70,20 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   below Normal (a task registered before #368, e.g. a box upgraded by the
   in-app updater) and switches EcoQoS throttling off. It NEVER raises above
   Normal: stream OBS runs BelowNormal (camera-box's domain).
-- It restores the CPU class ONLY. Task priority 7 also sets memory priority
-  2 and I/O priority Low (measured on stream.lan, #368
-  issuecomment-6012351712). Those stay low until the task is re-registered
-  with `-Priority 4` (install.ps1 or the CI deploy).
+- Task priority 7 also sets memory priority 2 (LOW) and I/O priority 1
+  (Low) (measured on stream.lan, #368 issuecomment-6012351712), so startup
+  restores those too (`apply_level`, issuecomment-6013075985):
+  - memory: `SetProcessInformation(ProcessMemoryPriority)`, from windows-sys;
+  - I/O: `NtSetInformationProcess(ProcessIoPriority = 33)`. windows-sys 0.61
+    has no `NtSetInformationProcess` (and `NtQueryInformationProcess` only
+    behind a WDK feature), so both are declared in a
+    `#[link(name = "ntdll", kind = "raw-dylib")]` block in
+    `ingest_priority_windows.rs`. No import library is needed.
+  - Each level is raised only from a KNOWN value below Normal
+    (`ProcessLevel::action`): never lowered (I/O High/Critical stays), never
+    above Normal. It is read back after the set. The startup line shows
+    before and after, and warns when a read failed, the set was refused, or
+    the value did not reach Normal.
 - Only the `restreamer-ingest` thread gets `THREAD_PRIORITY_HIGHEST`. It is
   raised ON that thread (`SetThreadPriority(GetCurrentThread())`), before
   its runtime is built.
@@ -111,6 +127,15 @@ thread, never one per tick. Do the same for any new blocking call.
   that path (Unix only). The write blocks until the test opens the read end
   (`stop_still_reports_a_chunk_that_is_being_written`,
   `flv_chunker_drain_tests.rs`).
+- **Prove the ingest never waits for the API side**
+  (`ingest_never_waits_for_an_api_task_holding_the_stable_since_cell`):
+  1. Run a short warm-up session, then let it settle for 500 ms, so no read
+     from its last chunk lands in the measured window.
+  2. Have an API-side task on the main runtime take the shared cell and stay
+     in the "handler" for 3 s.
+  3. Publish a session LONGER than that hold. If the session is shorter,
+     the old bug shows as a lost session, not as a measured wait.
+  4. Assert that the first processed frame comes within 1 s of the connect.
 - **Prove that a stop JOINED the thread**, not only dropped it: a 300 ms
   `spawn_blocking` task on the ingest handle must be finished when `stop`
   returns. `is_ingest_running()` is false either way, so it proves nothing.
