@@ -67,8 +67,10 @@ What to do:
 3. Re-run the failed job (`gh run rerun <id> --failed`) once camera-box reports the rig is back in
    TEST mode, or work on something else meanwhile.
 
-The rig lease (`scripts/ci/rig-lease-wait.ps1`, #349) still waits out a camera-box hold before
-OBS streaming; the readiness check is the hard read-only gate after it.
+The rig lease (`scripts/ci/rig-lease-wait.ps1`, #349) still waits out a camera-box hold early in
+the job and then proceeds; `obs-stream.ps1 -Action Start` then FAILS (never streams over it) if
+the lease is still held and not stale. The mid-run gates restart our stream with
+`-Action Republish`, which re-runs the same checks.
 
 ## Runner Offline Detection
 
