@@ -328,10 +328,7 @@ impl SkewTracker {
         // leaves at least one chunk-to-chunk jump ≥ SKEW_STEP_JUMP_MS, a DRIFT
         // reaches the threshold with every per-chunk delta well below it.
         if let Some(prev) = self.prev_skew_ms {
-            let delta = (skew - prev).abs();
-            if delta > self.max_abs_step_ms {
-                self.max_abs_step_ms = delta;
-            }
+            self.max_abs_step_ms = self.max_abs_step_ms.max((skew - prev).abs());
         }
         self.prev_skew_ms = Some(skew);
 

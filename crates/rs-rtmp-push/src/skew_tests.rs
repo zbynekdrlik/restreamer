@@ -548,3 +548,136 @@ fn genuine_step_trips_once_recovers_and_decays() {
     );
     assert_eq!(t.mode(), GuardMode::Normal);
 }
+
+// ----- #367: the exact threshold boundaries, pinned for cargo-mutants -----
+
+/// Capture a 0 baseline: both tracks at ts `at`.
+fn align_at(t: &mut SkewTracker, at: u32, now_ms: u64) {
+    t.observe_video(at);
+    t.observe_audio(at);
+    assert_eq!(t.evaluate_chunk(now_ms), SkewDecision::Continue);
+    assert_eq!(t.current_skew_ms(), 0);
+}
+
+/// One chunk whose baseline-relative skew is EXACTLY `skew_ms`: audio at
+/// `a`, video `skew_ms` ahead of it.
+fn chunk_with_skew(t: &mut SkewTracker, a: u32, skew_ms: i64, now_ms: u64) -> SkewDecision {
+    t.observe_audio(a);
+    t.observe_video((i64::from(a) + skew_ms) as u32);
+    assert_eq!(t.current_skew_ms(), skew_ms);
+    t.evaluate_chunk(now_ms)
+}
+
+/// "Over the threshold" is strictly over: a skew of exactly MAX_AV_SKEW_MS
+/// never trips; one ms more trips after the debounce.
+#[test]
+fn a_skew_exactly_at_the_threshold_never_trips() {
+    let mut t = SkewTracker::default();
+    align_at(&mut t, 0, 0);
+    for i in 1..=2 * SKEW_DEBOUNCE_CHUNKS {
+        assert_eq!(
+            chunk_with_skew(&mut t, i * 1_000, MAX_AV_SKEW_MS, u64::from(i) * 1_000),
+            SkewDecision::Continue,
+            "exactly {MAX_AV_SKEW_MS} ms is not over the threshold"
+        );
+    }
+    let mut last = SkewDecision::Continue;
+    for i in 1..=SKEW_DEBOUNCE_CHUNKS {
+        let a = (2 * SKEW_DEBOUNCE_CHUNKS + i) * 1_000;
+        last = chunk_with_skew(&mut t, a, MAX_AV_SKEW_MS + 1, u64::from(a));
+    }
+    assert_eq!(
+        last,
+        SkewDecision::TripRecovery,
+        "one ms over trips after the debounce"
+    );
+}
+
+/// A tracker in DriftHold (the #359 hold), re-anchored on a fresh
+/// connection. Returns the `now_ms` the next chunk may use.
+fn drift_held_tracker() -> (SkewTracker, u64) {
+    let mut t = SkewTracker::default();
+    drive_drift(&mut t, 100, 600);
+    assert_eq!(t.mode(), GuardMode::DriftHold);
+    t.reset_tracks();
+    let now = 600 * 2_000 + 2_000;
+    align_at(&mut t, 0, now);
+    (t, now)
+}
+
+/// The hold decays only while the skew is NOT over MAX_AV_SKEW_MS. Exactly
+/// the threshold is not over it, so after the loop window the guard returns
+/// to Normal.
+#[test]
+fn drift_hold_decays_while_the_skew_sits_exactly_at_the_threshold() {
+    let (mut t, start) = drift_held_tracker();
+    let chunks = (SKEW_LOOP_WINDOW_MS / 2_000) as u32 + 10;
+    for i in 1..=chunks {
+        let now = start + u64::from(i) * 2_000;
+        let d = chunk_with_skew(&mut t, i * 1_000, MAX_AV_SKEW_MS, now);
+        assert_eq!(d, SkewDecision::Continue);
+    }
+    assert_eq!(
+        t.mode(),
+        GuardMode::Normal,
+        "the hold decays after the window"
+    );
+}
+
+/// A live drift (over MAX_AV_SKEW_MS, under the hold's hard cap) keeps the
+/// hold engaged: it neither decays nor trips.
+#[test]
+fn drift_hold_persists_while_the_skew_stays_over_the_threshold() {
+    let (mut t, start) = drift_held_tracker();
+    let trips_before = t.trip_count();
+    let chunks = (SKEW_LOOP_WINDOW_MS / 2_000) as u32 + 10;
+    for i in 1..=chunks {
+        let now = start + u64::from(i) * 2_000;
+        let d = chunk_with_skew(&mut t, i * 1_000, MAX_AV_SKEW_MS + 2_000, now);
+        assert_eq!(
+            d,
+            SkewDecision::Continue,
+            "under the {SKEW_HOLD_MAX_MS} ms hard cap"
+        );
+    }
+    assert_eq!(
+        t.mode(),
+        GuardMode::DriftHold,
+        "a live drift keeps the hold"
+    );
+    assert_eq!(t.trip_count(), trips_before);
+}
+
+/// The reconnect rate limit is a floor: a trip exactly
+/// SKEW_RECOVERY_MIN_INTERVAL_MS after the previous one is allowed.
+#[test]
+fn a_new_trip_is_allowed_at_exactly_the_min_interval() {
+    let mut t = SkewTracker::default();
+    align_at(&mut t, 0, 0);
+    let mut first = None;
+    for i in 1..=SKEW_DEBOUNCE_CHUNKS {
+        let now = u64::from(i) * 1_000;
+        if chunk_with_skew(&mut t, i * 1_000, 25_500, now) == SkewDecision::TripRecovery {
+            first = Some(now);
+        }
+    }
+    let first = first.expect("a STEP trips after the debounce");
+
+    // The reconnect re-anchors and the same STEP comes back. The debounce
+    // fills before the interval ends; its last chunk lands exactly on it.
+    t.reset_tracks();
+    align_at(&mut t, 100_000, first + 1);
+    for k in 1..SKEW_DEBOUNCE_CHUNKS {
+        let now = first + 1 + u64::from(k);
+        let d = chunk_with_skew(&mut t, 100_000 + k * 1_000, 25_500, now);
+        assert_eq!(d, SkewDecision::Continue, "debounce not yet full");
+    }
+    let at_interval = chunk_with_skew(
+        &mut t,
+        100_000 + SKEW_DEBOUNCE_CHUNKS * 1_000,
+        25_500,
+        first + SKEW_RECOVERY_MIN_INTERVAL_MS,
+    );
+    assert_eq!(at_interval, SkewDecision::TripRecovery);
+    assert_eq!(t.trip_count(), 2);
+}

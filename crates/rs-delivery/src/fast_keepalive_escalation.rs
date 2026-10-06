@@ -37,6 +37,19 @@ pub(crate) enum KeepaliveOutcome {
     EscalateToRescue,
 }
 
+/// When the keepalive loop next re-checks the escalation gate: AT the
+/// deadline while it is still ahead (escalation lands exactly on it, never up
+/// to one `poll` late, #124), then every `poll`. At the deadline itself the
+/// next check is a full `poll` later, never a zero-length wait that would
+/// spin the loop.
+pub(crate) fn next_escalation_tick(
+    now: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+    poll: std::time::Duration,
+) -> tokio::time::Instant {
+    if now < deadline { deadline } else { now + poll }
+}
+
 /// Keep the existing rust session alive during a fast-endpoint producer gap.
 /// Returns `KeepaliveOutcome::Chunk` when a real chunk arrives,
 /// `KeepaliveOutcome::Stop` on stop/closed channel, or
@@ -126,12 +139,11 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     // resumes so a later stall is still observed promptly.
     let escalation_deadline = started + escalate_after;
     let next_tick = || {
-        let now = tokio::time::Instant::now();
-        if now < escalation_deadline {
-            escalation_deadline
-        } else {
-            now + ESCALATION_POLL
-        }
+        next_escalation_tick(
+            tokio::time::Instant::now(),
+            escalation_deadline,
+            ESCALATION_POLL,
+        )
     };
     // Shared exit bookkeeping. `resume` => record the TRUE gap for the
     // producer's adaptive controller and return the chunk; otherwise (stop) =>

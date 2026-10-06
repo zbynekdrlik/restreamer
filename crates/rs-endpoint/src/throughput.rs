@@ -127,11 +127,11 @@ impl Inner {
             });
         }
         // Zero-fill idle buckets strictly between `open` and `b`, clamped to
-        // the window floor so ancient buckets are skipped.
-        let mut s = (open + SAMPLE_INTERVAL_MS).max(window_floor);
-        while s < b {
-            self.push(Sample { t_ms: s, mbps: 0.0 });
-            s += SAMPLE_INTERVAL_MS;
+        // the window floor so ancient buckets are skipped. A stepped range,
+        // not a hand-advanced `while` counter: it cannot run away (#367).
+        let first = (open + SAMPLE_INTERVAL_MS).max(window_floor);
+        for t_ms in (first..b).step_by(SAMPLE_INTERVAL_MS as usize) {
+            self.push(Sample { t_ms, mbps: 0.0 });
         }
         self.open_start_ms = Some(b);
         self.open_bytes = 0;
@@ -160,12 +160,11 @@ impl ThroughputHistory {
                 g.open_start_ms = Some(b);
                 g.open_bytes = bytes;
             }
-            Some(open) => {
-                if b > open {
-                    g.finalize_up_to(b);
-                }
-                // After finalize (or same/earlier bucket) accumulate into the
-                // open bucket.
+            Some(_) => {
+                // Closes the open bucket when `b` is a later one; a no-op for
+                // the same or an earlier bucket. Then accumulate into the
+                // (possibly re-opened) open bucket.
+                g.finalize_up_to(b);
                 g.open_bytes = g.open_bytes.saturating_add(bytes);
             }
         }

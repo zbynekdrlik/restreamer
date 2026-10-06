@@ -804,7 +804,13 @@ mod fast_upload_gap_regression {
         // 8s — is what proves the anchor is the last-real-chunk 6s value, not
         // the raw 8s threshold (never slower than before #124, never later).
         advance_in_steps(Duration::from_millis(200), 4).await; // → ~6.6s total
-        let outcome = task.await.expect("keepalive task panicked");
+        // Bounded: a keepalive that never escalates keeps pushing freeze
+        // frames forever, so an unbounded await would hang the test (a
+        // cargo-mutants TIMEOUT, #367) instead of failing it.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the bridge must have escalated by ~6.6s, not keep freezing")
+            .expect("keepalive task panicked");
         match outcome {
             KeepaliveOutcome::EscalateToRescue => {}
             KeepaliveOutcome::Chunk(_) => panic!(
@@ -816,6 +822,74 @@ mod fast_upload_gap_regression {
                  fresh-reconnect rescue once the stall crosses the anchor"
             ),
         }
+    }
+
+    /// #124 precision, pure-wait mode (no chunk delivered yet, so no freeze
+    /// pushes): the only wakeups are the escalation ticks, and a stalled
+    /// producer escalates AT the anchor (2.5 s here), not at the next 1 s
+    /// poll (3 s).
+    #[tokio::test(start_paused = true)]
+    async fn no_first_chunk_wait_escalates_exactly_at_the_anchor() {
+        let mut pusher = RecordingPusher {
+            pushes: Arc::new(Mutex::new(Vec::new())),
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let (_tx, mut rx) = mpsc::channel::<PrefetchedChunk>(10);
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let none: Option<Arc<Vec<u8>>> = None;
+        let audit_ring: Option<Arc<crate::audit_ring::AuditRing>> = None;
+        let stats: crate::endpoint_stats::Stats = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::endpoint_stats::EndpointStats::default(),
+        ));
+        let buffer_state = Arc::new(crate::buffer_state::BufferState::new());
+        buffer_state.producer_active.store(false, Ordering::Relaxed);
+        let buffer_state_task = buffer_state.clone();
+        let task = tokio::spawn(async move {
+            keepalive_until_chunk(
+                &mut pusher,
+                &mut rx,
+                &none,
+                "nofirst-escalate",
+                &audit_ring,
+                &mut stop_rx,
+                &stats,
+                &buffer_state_task,
+                Duration::from_millis(2500),
+            )
+            .await
+        });
+
+        advance_in_steps(Duration::from_millis(100), 24).await; // 2.4 s
+        assert!(!task.is_finished(), "no escalation before the 2.5 s anchor");
+        advance_in_steps(Duration::from_millis(100), 2).await; // 2.6 s
+        assert!(
+            task.is_finished(),
+            "a stalled producer escalates AT the 2.5 s anchor, not at the next 1 s poll"
+        );
+        match task.await.expect("keepalive task panicked") {
+            KeepaliveOutcome::EscalateToRescue => {}
+            KeepaliveOutcome::Chunk(_) => panic!("no chunk was ever sent"),
+            KeepaliveOutcome::Stop => panic!("no stop was ever sent"),
+        }
+    }
+
+    /// The escalation gate's wake-up rule: the deadline while it is ahead,
+    /// then one poll after "now", and a full poll (never a zero wait that
+    /// would spin the loop) when "now" is exactly the deadline.
+    #[test]
+    fn next_escalation_tick_is_the_deadline_then_every_poll() {
+        use super::super::super::fast_keepalive_escalation::next_escalation_tick;
+        let t0 = tokio::time::Instant::now();
+        let poll = Duration::from_secs(1);
+        let deadline = t0 + Duration::from_millis(2500);
+        assert_eq!(next_escalation_tick(t0, deadline, poll), deadline);
+        assert_eq!(
+            next_escalation_tick(deadline, deadline, poll),
+            deadline + poll,
+            "at the deadline the next check is a full poll later"
+        );
+        let later = deadline + Duration::from_millis(300);
+        assert_eq!(next_escalation_tick(later, deadline, poll), later + poll);
     }
 
     /// Advance virtual time in `count` steps of `step`, yielding to the
