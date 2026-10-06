@@ -1192,7 +1192,7 @@ jobs:
           # 3. The plan sizes the matrix from the diff and caps it.
           plan = mut_jobs.get("mutation-plan", {})
           outs = plan.get("outputs") or {}
-          if outs.get("shards") != "${{ steps.plan.outputs.shards }}" or outs.get("total") != "${{ steps.plan.outputs.total }}":
+          if outs.get("shards") != "$" "{{ steps.plan.outputs.shards }}" or outs.get("total") != "$" "{{ steps.plan.outputs.total }}":
               errors.append("mutation-plan must export shards/total from its `plan` step")
           plan_run = "\n".join(s.get("run") or "" for s in plan.get("steps", []))
           per = re.search(r"^\s*MUTANTS_PER_SHARD=([0-9]+)\s*$", plan_run, re.M)
@@ -1212,14 +1212,14 @@ jobs:
           strat = mt.get("strategy") or {}
           if strat.get("fail-fast") is not False:
               errors.append("mutation-testing must set strategy.fail-fast: false")
-          if (strat.get("matrix") or {}).get("shard") != "${{ fromJSON(needs.mutation-plan.outputs.shards) }}":
+          if (strat.get("matrix") or {}).get("shard") != "$" "{{ fromJSON(needs.mutation-plan.outputs.shards) }}":
               errors.append("mutation-testing matrix.shard must come from mutation-plan's shards output")
           runs = [c for c in commands(mt) if "--list" not in c[1]]
           if len(runs) != 1:
               errors.append(f"mutation-testing must run cargo-mutants exactly once, found {len(runs)}")
           for step, cmd, nxt, before in runs:
-              if "--shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}" not in cmd:
-                  errors.append("the shard must run --shard ${{ matrix.shard }}/${{ needs.mutation-plan.outputs.total }}")
+              if "--shard $" "{{ matrix.shard }}/$" "{{ needs.mutation-plan.outputs.total }}" not in cmd:
+                  errors.append("the shard must run --shard $" "{{ matrix.shard }}/$" "{{ needs.mutation-plan.outputs.total }}")
               for flag in ("--in-diff pr.diff", "--baseline=run", "--in-place"):
                   if flag not in cmd:
                       errors.append(f"the shard's cargo-mutants command must pass {flag}")
