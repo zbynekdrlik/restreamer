@@ -25,7 +25,8 @@ auto-load on their `paths:` — you do not invoke those.
 - Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
-- OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
+- OBS degraded / CI runner offline (stream OBS is camera-box's: never restart/reconfigure it) → `.claude/skills/obs-recovery`
+- CI's stream-OBS contract (Start/Stop + reads only, readiness check, no-mutation guard) → `.claude/rules/stream-obs-ci.md` (auto)
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
 - Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`

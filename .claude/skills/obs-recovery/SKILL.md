@@ -42,7 +42,8 @@ when ci.yml or scripts/ contain any of the above.
 
 ## When a CI job fails with "stream OBS not ready"
 
-`scripts/ci/obs-readiness-check.ps1` runs read-only before every CI StartStream. It fails with
+`scripts/ci/obs-readiness-check.ps1` (early, read-only) and `scripts/ci/obs-stream.ps1 -Action Start`
+(the only CI start, same checks in the start session) fail with
 `stream OBS not ready (<what>) -- camera-box owns it, not touching it` or
 `stream OBS is recording -- not touching it` when camera-box's TEST mode is not in place:
 
@@ -54,6 +55,8 @@ when ci.yml or scripts/ contain any of the above.
 | `stream service is ... not the restreamer inpoint` | OBS points elsewhere (YouTube, a test URL) |
 | `OBS is already streaming` | someone else's stream; never stopped by us |
 | `stream OBS is recording` | a recording camera-box or the owner started |
+| `camera-box holds the rig lease: <job> (<run>)` | `obs-stream.ps1 -Action Start` saw a live lease at start time |
+| `StartStream refused: code ...` | OBS refused the start (usually camera-box started streaming first) |
 
 What to do:
 

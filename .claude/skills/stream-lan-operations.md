@@ -99,7 +99,8 @@ the restreamer ticket that hit it) and wait or work on something else.
 
 ### What CI expects from camera-box's TEST mode
 
-`scripts/ci/obs-readiness-check.ps1` runs before every CI StartStream and FAILS with
+`scripts/ci/obs-readiness-check.ps1` (early) and `scripts/ci/obs-stream.ps1 -Action Start` (the only
+CI start: rig lease + the same checks + a checked StartStream, in one session) FAIL with
 `stream OBS not ready (<what>) -- camera-box owns it, not touching it` unless:
 
 - exactly one obs64 runs and `ws://127.0.0.1:4455` answers;
