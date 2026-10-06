@@ -359,9 +359,10 @@ impl HetznerClient {
         user_data: &str,
         labels: std::collections::HashMap<String, String>,
     ) -> Result<Server> {
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
+        // A bounded range, not a hand-advanced counter: the loop cannot run
+        // away (#367). `max_attempts >= 1` (`with_retry` clamps it), and the
+        // last attempt always returns, so the end of the range is unreachable.
+        for attempt in 1..=self.max_attempts {
             let err = match self
                 .create_server_inner(
                     name,
@@ -432,6 +433,7 @@ impl HetznerClient {
             );
             tokio::time::sleep(backoff).await;
         }
+        unreachable!("create_server: the last of max_attempts (>= 1) attempts always returns")
     }
 
     /// One `POST /servers` attempt (no retry). See [`create_server`].
