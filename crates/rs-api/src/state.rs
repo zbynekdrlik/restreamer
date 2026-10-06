@@ -96,6 +96,9 @@ pub struct AppState {
     /// reaper the SAME Arc via a clone taken before `api_state` is moved, so the
     /// sweep and the status handler share one source of truth.
     pub vps_orphan_count: Arc<std::sync::atomic::AtomicU8>,
+    /// YouTube A/V-gate sessions (#357): the one-session-at-a-time registry.
+    /// Shared by every clone, so every handler sees the same holder.
+    pub av_gate: Arc<crate::av_gate::AvGateHub>,
 }
 
 impl AppState {
@@ -152,6 +155,7 @@ impl AppState {
             disk_critical,
             disk_pressure_level,
             vps_orphan_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            av_gate: Arc::new(crate::av_gate::AvGateHub::default()),
         }
     }
 

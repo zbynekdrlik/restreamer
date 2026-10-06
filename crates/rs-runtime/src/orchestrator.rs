@@ -369,6 +369,7 @@ impl ServiceCore {
         // before `api_state` is moved into `serve`, so the runtime orphan reaper
         // (below) publishes into the exact atomic the dashboard banner polls.
         let boot_orphan_count = std::sync::Arc::clone(&api_state.vps_orphan_count);
+        let boot_av_gate_state = api_state.clone();
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
@@ -435,6 +436,12 @@ impl ServiceCore {
                 }
             });
         }
+
+        // #357: tear down an A/V-gate session a crash left running. After the
+        // delivery reconcile above, so the delivery it re-attached is stopped.
+        tokio::spawn(rs_api::av_gate_rig::reconcile_av_gate_on_boot(
+            boot_av_gate_state,
+        ));
 
         // Chunk directory
         tokio::fs::create_dir_all(&self.chunk_dir).await?;

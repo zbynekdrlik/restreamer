@@ -2,6 +2,10 @@ pub mod access;
 #[cfg(test)]
 mod access_tests;
 pub mod audit_handlers;
+pub mod av_gate;
+pub mod av_gate_driver;
+pub mod av_gate_handlers;
+pub mod av_gate_rig;
 pub(crate) mod cache_ttl;
 pub mod clock_skew_probe;
 #[cfg(test)]

@@ -224,6 +224,14 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             get(crate::diagnostics_pacing::get_pacing),
         )
         .route("/diag/dump", post(crate::diag::diag_dump_handler))
+        // YouTube A/V-gate session API (#357). On top of the access gate every
+        // handler requires a LAN origin AND the av-gate bearer token.
+        .route("/av-gate/session", post(crate::av_gate_handlers::create))
+        .route("/av-gate/session/{id}", get(crate::av_gate_handlers::get))
+        .route(
+            "/av-gate/session/{id}/stop",
+            post(crate::av_gate_handlers::stop),
+        )
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
         .route("/_test/s3-unblock", post(handlers::test_s3_unblock))
