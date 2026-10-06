@@ -5,9 +5,72 @@ paths:
   - "scripts/ci/**"
   - "crates/rs-inpoint/src/media_receiver.rs"
   - "crates/rs-inpoint/src/flv_chunker*.rs"
+  - "crates/rs-api/src/av_gate*.rs"
+  - "crates/rs-youtube/src/manage*.rs"
 ---
 
 # YouTube-measured A/V + frame-continuity session (the #357 gate, done by hand in #367)
+
+## The session API automates the YouTube leg (#357 part 1)
+
+Steps 1-3, 7 and 8 of the hand recipe below are now `/api/v1/av-gate/session` inside
+Restreamer (`crates/rs-api/src/av_gate*.rs`). Both release gates (restreamer CI and
+camera-box) call it; the caller still drives OBS, the recording, the trigger and the
+measurement.
+
+- `POST /api/v1/av-gate/session` `{"requester": "...", "title"?: "..."}` -> `201
+  {session_id, broadcast_id}`. `409 {error:"busy", holder:{session_id, requester}}` while
+  another session holds the rig; `429` over the rolling-24 h quota budget
+  (`av_gate.daily_quota_budget`, default 4000, ~400 per session); `409
+  {error:"cleanup_pending", sessions}` while an earlier teardown is being retried; `502
+  {session_id, state:"failed", reason}` when a start step failed (already torn down);
+  `503 not_provisioned` without a usable token or oauth file; `503 starting_up` until
+  the boot reconcile ran. The start runs in its own task, so a client that drops the
+  POST does not abort it: the session runs on (and is reaped); the 409 names its id.
+- `GET /api/v1/av-gate/session/{id}` -> `{session_id, state, requester, title,
+  broadcast_id, vod_id, reason, quota_units, cleanup_pending, timestamps{created, ready,
+  stop_requested, processing, finished}}`. Poll it: `starting` -> `ready` (delivery delivering + stream
+  `active` + broadcast `live`) -> after stop `processing` -> `done` (`vod_id` = the
+  broadcast id) or `failed` (`reason`).
+- `POST /api/v1/av-gate/session/{id}/stop` -> `202` (handed to the session); `200` when it
+  is already past the stop (a retry is harmless); `409` for an unfinished row nobody
+  runs (the boot reconcile owns it). The stop drains the event cache (`cache_delay_secs`
+  + 15 s) BEFORE completing the broadcast, so `done` arrives ~2.5 min + YouTube's
+  processing after the stop.
+- **Auth:** LAN origin only (a tunneled request is refused even with an Access JWT)
+  AND `Authorization: Bearer <token>` where the token is the content of
+  `av_gate.api_token_file` (default `C:\ProgramData\Restreamer\av-gate\api-token`,
+  >= 32 chars, not in `config.json`). No file = the API answers 503. The old
+  `api.diag_token` the design mentioned no longer exists (#336/#273).
+- **Cleanup on every exit path:** a failed start step, a readiness failure, a stop
+  before ready, the idle reaper (`av_gate.idle_timeout_secs`, default 45 min from
+  creation), a dead driver task, and the boot reconcile (`starting`/`ready` rows are
+  torn down and failed, a `processing` row resumes its VOD wait). Teardown = complete
+  the broadcast if it is `live`/`testing` (never a never-live one), `stop-stream` the
+  event, then poll Hetzner (`app=restreamer,client_uuid=<box>,event_id=<id>`) until 0.
+  A teardown with any problem sets `cleanup_pending`; the maintenance task
+  (`run_av_gate_maintenance`, spawned by the runtime after the delivery reconcile)
+  retries it with backoff (5 min doubling, 2 h cap) until clean. Audit rows:
+  `av_gate_session_{started,ready,stop_requested,processing,done,failed,reaped}`
+  (`reaped.cause`: `idle_timeout`, `boot_reconcile`, `driver_died`, `cleanup_retry`).
+- **Safety:** the rig refuses while ANY event is active, the CI event included (another
+  run owns it: restreamer's own CI E2E uses `E2E-Test` too), and without a Hetzner
+  token, both before any YouTube write. It uses the dashboard's own
+  `start_stream`/`stop_stream` (single-event guard, #354 skew gate), binds only a
+  reusable stream, and never touches OBS. The event id is persisted before the start.
+- **Quota:** the manage client draws from the same project bucket as the health
+  polling (`delivery_status::youtube_quota_tracker`), on top of the av-gate budget.
+- **VOD done** = `processingDetails.processingStatus == succeeded` OR
+  `status.uploadStatus == processed` (both read: which one a live archive reports is
+  undocumented). UNVERIFIED against the real channel until part 2's first run.
+- **Config** (`av_gate`, immutable through `PATCH /config`): `oauth_file`,
+  `api_token_file`, `event_name` ("E2E-Test"), `stream_title` ("e2e rtmp"),
+  `idle_timeout_secs`, `processing_timeout_secs` (2 h), `daily_quota_budget`.
+- **Testing:** the session tests use a scripted rig (`FakeRig`) and a stateful wiremock
+  YouTube (`fake_youtube` in `av_gate_driver_tests.rs`; a transition updates the
+  life cycle the next read returns). The production rig is tested on its own against the
+  real DB + stream handlers + a wiremock Hetzner. `ManageClient` takes its endpoints as
+  constructor arguments, so no process-global URL override and no test lock.
 
 The only proof that A/V sync and frame continuity hold is a measurement ON YOUTUBE: the VOD against stream
 OBS's own program recording. Restreamer telemetry (`av_skew_ms`, chunk relations) cannot see
