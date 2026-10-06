@@ -56,15 +56,28 @@ impl std::fmt::Debug for DailyLogFile {
 /// `restreamer.<day>.log`, or `restreamer.<day>.<n>.log` for `n > 0` (a
 /// second archive of the same day, e.g. after a wall-clock step back).
 pub fn archive_name(day: NaiveDate, n: u32) -> String {
-    let _ = (day, n);
-    String::new()
+    if n == 0 {
+        format!("{LOG_STEM}.{}.log", day.format("%Y-%m-%d"))
+    } else {
+        format!("{LOG_STEM}.{}.{n}.log", day.format("%Y-%m-%d"))
+    }
 }
 
 /// The day of an archive file name, `None` for any other file (the live
 /// file, the legacy `restreamer.log.old`, foreign files).
 pub fn archive_day(name: &str) -> Option<NaiveDate> {
-    let _ = name;
-    None
+    let middle = name
+        .strip_prefix(LOG_STEM)?
+        .strip_prefix('.')?
+        .strip_suffix(".log")?;
+    let (date, n) = match middle.split_once('.') {
+        Some((date, n)) => (date, Some(n)),
+        None => (middle, None),
+    };
+    if n.is_some_and(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
 impl DailyLogFile {
@@ -86,7 +99,11 @@ impl DailyLogFile {
             clock,
         };
         let mut note = None;
-        let _ = (Self::live_file_day, Self::archive_live, &mut note);
+        if let Some(day) = log.live_file_day() {
+            if day < today {
+                note = log.archive_live(day).err();
+            }
+        }
         log.file = Some(log.open_live()?);
         if let Some(e) = note {
             log.note(&format!(
@@ -139,7 +156,26 @@ impl DailyLogFile {
     /// Delete archives whose day is not among the newest `keep_days`.
     /// Returns the files deleted.
     pub fn prune(&self) -> io::Result<Vec<PathBuf>> {
-        Ok(Vec::new())
+        let mut archives: Vec<(NaiveDate, PathBuf)> = fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                Some((archive_day(&name)?, e.path()))
+            })
+            .collect();
+        let mut days: Vec<NaiveDate> = archives.iter().map(|(d, _)| *d).collect();
+        days.sort_unstable_by(|a, b| b.cmp(a));
+        days.dedup();
+        let Some(&oldest_kept) = days.get(self.keep_days.saturating_sub(1)) else {
+            return Ok(Vec::new());
+        };
+        archives.retain(|(d, _)| *d < oldest_kept);
+        let mut removed = Vec::new();
+        for (_, path) in archives {
+            fs::remove_file(&path)?;
+            removed.push(path);
+        }
+        Ok(removed)
     }
 
     fn prune_and_note(&mut self) {
@@ -161,7 +197,22 @@ impl DailyLogFile {
 
     /// Start a new day: archive the live file under the day it covers.
     fn roll(&mut self, today: NaiveDate) {
-        self.day = today;
+        let covered = std::mem::replace(&mut self.day, today);
+        if let Some(mut f) = self.file.take() {
+            let _ = f.flush();
+        }
+        let archived = self.archive_live(covered);
+        match self.open_live() {
+            Ok(f) => self.file = Some(f),
+            Err(_) => return,
+        }
+        if let Err(e) = archived {
+            self.note(&format!(
+                "archiving {} failed ({e}); this file continues it",
+                archive_name(covered, 0)
+            ));
+        }
+        self.prune_and_note();
     }
 }
 

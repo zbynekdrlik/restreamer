@@ -40,29 +40,22 @@ fn data_dir() -> PathBuf {
 fn init_tracing(log_buffer: &LogBuffer) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // Log file path
+    // #368: `restreamer.log` rolls daily (UTC) into
+    // `restreamer.<YYYY-MM-DD>.log`, kept 14 days, so a restart never
+    // discards the evidence of a production (the old 1 MB rename at startup
+    // lost Sunday 2026-10-04's). The live file keeps its fixed name.
     let log_path = data_dir().join("restreamer.log");
-
-    // Ensure directory exists
-    let _ = std::fs::create_dir_all(data_dir());
-
-    // Simple rotation: rename to .old if > 1MB
-    if let Ok(meta) = std::fs::metadata(&log_path) {
-        if meta.len() > 1_000_000 {
-            let _ = std::fs::rename(&log_path, log_path.with_extension("log.old"));
-        }
-    }
 
     // File layer with non-blocking writer.
     // Previously used std::sync::Mutex<File> which blocked ALL tokio tasks
     // when the file write stalled (Windows Defender, disk flush, etc.).
     // tracing_appender::non_blocking writes on a dedicated background thread
-    // so logging never blocks the calling async task.
-    let (file_layer, guard) = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    // (the daily rotation runs there too) so logging never blocks the
+    // calling task, the ingest runtime included.
+    let (file_layer, guard) = match rs_runtime::daily_log::DailyLogFile::open(
+        &data_dir(),
+        rs_runtime::daily_log::KEEP_DAYS,
+    ) {
         Ok(file) => {
             let (non_blocking, guard) = tracing_appender::non_blocking(file);
             let layer = tracing_subscriber::fmt::layer()
