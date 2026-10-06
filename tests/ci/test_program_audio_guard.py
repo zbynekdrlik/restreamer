@@ -15,7 +15,11 @@ PowerShell functions:
     Restreamer's obs status CONFIRMS OBS stopped (the POST only queues it), then
     exits; Assert-NoProgramAudioBreach then fails with the reason in the job summary;
     a dead or hung watchdog fails the assert too; music while the stream is not ours
-    is never stopped (#374); -BeforeStart refuses after a breach or a dead watchdog.
+    is never stopped (#374); -BeforeStart refuses after a breach or a dead watchdog;
+  * the delivery cut (ROZHODNUTE 2026-10-07): on a breach the watchdog also stops the
+    CI event's delivery and deactivates it (the 120 s cache would keep sending the
+    music), confirms no delivery instance of that event is left, and never touches
+    an event that is not a CI-owned E2E event.
 
 Every step runs the way GitHub Actions runs `shell: powershell` (the 'stop'
 prelude, `-command ". '<file>'"`), so `exit 1` inside a function behaves as in CI.
@@ -29,6 +33,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -72,10 +77,23 @@ class MockState:
     gets: int = 0
     stops: list[float] = field(default_factory=list)
     accepted_stops: int = 0
+    # Restreamer's events + delivery (the breach also cuts the CI event's delivery).
+    events: list[dict] = field(default_factory=lambda: [dict(CI_EVENT), dict(CHURCH_EVENT)])
+    instances: list[dict] = field(default_factory=lambda: [
+        {"id": "vps-ci", "event_id": CI_EVENT["id"], "status": "delivering"},
+        {"id": "vps-church", "event_id": CHURCH_EVENT["id"], "status": "delivering"}])
+    delivery_stop_status: list[int] = field(default_factory=lambda: [200])  # per call; the last repeats
+    delivery_stops: list[object] = field(default_factory=list)   # event_id of each POST
+    deactivates: list[int] = field(default_factory=list)          # event id of each POST
+
+
+CI_EVENT = {"id": 9278, "name": "E2E-Test", "receiving_activated": True, "delivering_activated": True}
+CHURCH_EVENT = {"id": 5, "name": "Nedelna bohosluzba", "receiving_activated": True, "delivering_activated": True}
 
 
 class MockServer:
-    """Serves the sampler and Restreamer's obs status (GET) + stop-stream (POST) on one port."""
+    """Serves the sampler and a mock Restreamer API on one port: obs status + stop-stream,
+    events + deactivate, delivery instances + delivery stop."""
 
     def __init__(self, state: MockState) -> None:
         self.state = state
@@ -94,6 +112,12 @@ class MockServer:
                     self._send(json_reply({"connected": st.obs_connected, "streaming": st.obs_streaming,
                                            "recording": False, "stream_timecode": None}))
                     return
+                if self.path == "/api/v1/events":
+                    self._send(json_reply(st.events))
+                    return
+                if self.path == "/api/v1/delivery/instances":
+                    self._send(json_reply(st.instances))
+                    return
                 st.gets += 1
                 if st.sampler_fail_next > 0:
                     st.sampler_fail_next -= 1
@@ -103,8 +127,29 @@ class MockServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 n = int(self.headers.get("Content-Length") or 0)
-                if n:
-                    self.rfile.read(n)
+                raw = self.rfile.read(n) if n else b""
+                if self.path == "/api/v1/delivery/stop":
+                    try:
+                        eid = json.loads(raw or b"{}").get("event_id")
+                    except ValueError:
+                        eid = None
+                    st.delivery_stops.append(eid)
+                    code = st.delivery_stop_status[min(len(st.delivery_stops) - 1, len(st.delivery_stop_status) - 1)]
+                    if code < 300:
+                        st.instances = [i for i in st.instances if i["event_id"] != eid]
+                    self._send(json_reply({"stopped": code < 300}, code))
+                    return
+                m = re.fullmatch(r"/api/v1/events/(\d+)/deactivate", self.path)
+                if m:
+                    st.deactivates.append(int(m.group(1)))
+                    for e in st.events:
+                        if e["id"] == int(m.group(1)):
+                            e["receiving_activated"] = e["delivering_activated"] = False
+                    self._send(json_reply({"ok": True}))
+                    return
+                if self.path != "/api/v1/obs/stop-stream":
+                    self._send(Reply(404, b""))
+                    return
                 st.stops.append(time.time())
                 code = st.stop_status[min(len(st.stops) - 1, len(st.stop_status) - 1)]
                 if code < 300:
@@ -120,8 +165,7 @@ class MockServer:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         port = self.server.server_address[1]
         self.sampler_url = f"http://127.0.0.1:{port}/program-audio.json"
-        self.stop_url = f"http://127.0.0.1:{port}/api/v1/obs/stop-stream"
-        self.status_url = f"http://127.0.0.1:{port}/api/v1/obs/status"
+        self.api_base = f"http://127.0.0.1:{port}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -147,7 +191,7 @@ def interpreter() -> list[str]:
 class Env:
     """One job: its own RUNNER_TEMP, step summary and knobs."""
 
-    def __init__(self, tmp: Path, sampler_url: str, stop_url: str, status_url: str) -> None:
+    def __init__(self, tmp: Path, sampler_url: str, api_base: str) -> None:
         self.tmp = tmp
         self.summary = tmp / "step_summary.md"
         self.summary.write_text("", encoding="utf-8")
@@ -156,9 +200,10 @@ class Env:
             "RUNNER_TEMP": str(tmp),
             "GITHUB_STEP_SUMMARY": str(self.summary),
             "PROGRAM_AUDIO_URL": sampler_url,
-            "PROGRAM_AUDIO_STOP_URL": stop_url,
-            "PROGRAM_AUDIO_OBS_STATUS_URL": status_url,
+            "PROGRAM_AUDIO_API_BASE": api_base,
             "PROGRAM_AUDIO_POLL_S": "1",
+            "PROGRAM_AUDIO_DELIVERY_BUDGET_S": "10",
+            "EVENT_NAME": CI_EVENT["name"],   # the job env of e2e-obs-youtube-test
         })
 
     def run(self, body: str, timeout: int = 90) -> subprocess.CompletedProcess:
@@ -249,7 +294,7 @@ def verdict_case(reply: Reply | None, expect_exit: int, expect_text: str) -> lis
     try:
         with tempfile.TemporaryDirectory() as tmp_s:
             url = srv.sampler_url if reply is not None else f"http://127.0.0.1:{closed_port()}/program-audio.json"
-            job = Env(Path(tmp_s), url, srv.stop_url, srv.status_url)
+            job = Env(Path(tmp_s), url, srv.api_base)
             p = job.run(PROBE)
     finally:
         srv.close()
@@ -427,8 +472,8 @@ def wd_not_our_stream_is_never_stopped(job: Env, st: MockState, srv: MockServer)
         return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
     time.sleep(3.5)
     probs = []
-    if st.stops:
-        probs.append("stopped a session that is not ours")
+    if st.stops or st.delivery_stops or st.deactivates:
+        probs.append("stopped a session / cut a delivery that is not ours")
     if job.path("program-audio-breach.txt").exists():
         probs.append("music on a stream that is not ours counted as a breach")
     if "not our stream, nothing to stop: FOREIGN" not in job.path("program-audio-watchdog.log").read_text(encoding="ascii"):
@@ -556,6 +601,106 @@ def wd_no_runner_temp(job: Env, st: MockState, srv: MockServer) -> list[str]:
     return []
 
 
+def wait_breach(job: Env, text: str, seconds: float) -> bool:
+    breach = job.path("program-audio-breach.txt")
+    return wait_for(lambda: breach.exists() and text in breach.read_text(encoding="ascii"), seconds)
+
+
+def wd_foreign_cuts_ci_delivery(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    probs = []
+    if not wait_breach(job, "delivery CUT CONFIRMED", 40):
+        probs.append("the CI event's delivery was not cut (no `delivery CUT CONFIRMED`)")
+    if st.delivery_stops != [CI_EVENT["id"]]:
+        probs.append(f"delivery/stop called for {st.delivery_stops}, expected exactly [{CI_EVENT['id']}]")
+    if st.deactivates != [CI_EVENT["id"]]:
+        probs.append(f"deactivate called for {st.deactivates}, expected exactly [{CI_EVENT['id']}]")
+    if not any(i["event_id"] == CHURCH_EVENT["id"] for i in st.instances):
+        probs.append("the non-CI event's delivery instance was touched")
+    text = job.path("program-audio-breach.txt").read_text(encoding="ascii")
+    order = ["BREACH: FOREIGN", "stop CONFIRMED", f"delivery stop OK: event E2E-Test (id {CI_EVENT['id']})",
+             f"event E2E-Test (id {CI_EVENT['id']}) deactivated", "delivery CUT CONFIRMED"]
+    pos = [text.find(x) for x in order]
+    if -1 in pos or pos != sorted(pos):
+        probs.append(f"breach marker lacks the steps in order {order}: {text!r}")
+    a = job.run("Assert-NoProgramAudioBreach")
+    summary = job.summary.read_text(encoding="utf-8")
+    if a.returncode != 1 or "delivery CUT CONFIRMED" not in summary or "deactivated" not in summary:
+        probs.append(f"the step summary lacks the delivery cut steps: {summary!r}")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_non_ci_event_is_never_touched(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # A job whose EVENT_NAME is not a CI-owned E2E event (e.g. the church service).
+    job.env["EVENT_NAME"] = CHURCH_EVENT["name"]
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    probs = []
+    if not wait_breach(job, "REFUSED", 30):
+        probs.append("no REFUSED line for a non-CI event")
+    time.sleep(2)
+    if st.delivery_stops or st.deactivates:
+        probs.append(f"touched a non-CI event: delivery_stops={st.delivery_stops} deactivates={st.deactivates}")
+    if not wait_breach(job, "stop CONFIRMED", 10):
+        probs.append("the OBS stop itself must still happen")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_no_event_name_is_refused(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    job.env.pop("EVENT_NAME")
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    probs = []
+    if not wait_breach(job, "REFUSED", 30):
+        probs.append("no REFUSED line without EVENT_NAME")
+    time.sleep(2)
+    if st.delivery_stops or st.deactivates:
+        probs.append(f"cut a delivery with no CI event name: {st.delivery_stops} {st.deactivates}")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_delivery_stop_retried(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    st.delivery_stop_status = [503, 200]
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    probs = []
+    if not wait_breach(job, "delivery CUT CONFIRMED", 60):
+        probs.append("delivery not cut after a failed first delivery/stop")
+    if st.delivery_stops != [CI_EVENT["id"], CI_EVENT["id"]]:
+        probs.append(f"delivery/stop calls {st.delivery_stops}, expected two for {CI_EVENT['id']}")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_delivery_cut_even_if_obs_stop_unconfirmed(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # Restreamer's OBS client is disconnected, so the OBS stop never confirms: the
+    # buffered cache must not keep going out meanwhile.
+    st.obs_connected = False
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    probs = []
+    if not wait_breach(job, "delivery CUT CONFIRMED", 40):
+        probs.append("delivery not cut while the OBS stop is unconfirmed")
+    if "CONFIRMED: Restreamer reports OBS" in job.path("program-audio-breach.txt").read_text(encoding="ascii"):
+        probs.append("OBS stop confirmed on a disconnected status")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
 WATCHDOG_CASES = [
     ("watchdog: clean program -> polls, no stop, clean teardown", wd_clean_run_stays_quiet),
     ("watchdog: music starts (FOREIGN) -> marker, ONE stop call, exit, assert fails", wd_foreign_stops_stream),
@@ -566,6 +711,12 @@ WATCHDOG_CASES = [
     ("watchdog: back on air after the confirmed stop -> stopped again", wd_back_on_air_is_stopped_again),
     ("watchdog: Restreamer's OBS client disconnected -> not a confirmation", wd_disconnected_status_is_not_a_confirmation),
     ("watchdog: music while the stream is not ours -> no stop, no breach", wd_not_our_stream_is_never_stopped),
+    ("delivery cut: FOREIGN -> delivery/stop + deactivate of the CI event only, CUT CONFIRMED",
+     wd_foreign_cuts_ci_delivery),
+    ("delivery cut: a non-CI EVENT_NAME is REFUSED, nothing of it touched", wd_non_ci_event_is_never_touched),
+    ("delivery cut: no EVENT_NAME is REFUSED", wd_no_event_name_is_refused),
+    ("delivery cut: delivery/stop fails once -> retried", wd_delivery_stop_retried),
+    ("delivery cut: happens even while the OBS stop is unconfirmed", wd_delivery_cut_even_if_obs_stop_unconfirmed),
     ("watchdog: unconfirmed stop keeps going, ends when our stream ends", wd_stop_ends_when_our_stream_ends),
     ("start gate: an earlier breach refuses the next start", wd_start_refused_after_breach),
     ("start gate: a dead watchdog refuses the next start", wd_start_refused_with_dead_watchdog),
@@ -582,7 +733,7 @@ def watchdog_case(fn) -> list[str]:
     srv = MockServer(state)
     try:
         with tempfile.TemporaryDirectory() as tmp_s:
-            job = Env(Path(tmp_s), srv.sampler_url, srv.stop_url, srv.status_url)
+            job = Env(Path(tmp_s), srv.sampler_url, srv.api_base)
             try:
                 probs = fn(job, state, srv)
             finally:

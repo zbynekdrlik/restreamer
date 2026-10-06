@@ -271,7 +271,7 @@ class MockLease:
 
 
 class MockRestreamerApi:
-    """Counts POSTs to Restreamer's stop-stream API: obs-stream.ps1 must never use it."""
+    """Counts POSTs to the Restreamer API (stop-stream, delivery stop, deactivate): obs-stream.ps1 must never use it."""
 
     def __init__(self) -> None:
         self.posts = 0
@@ -288,7 +288,7 @@ class MockRestreamerApi:
                 return
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/v1/obs/stop-stream"
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self) -> None:
@@ -534,8 +534,8 @@ def run_case(case: Case) -> list[str]:
             "OBS_REBASELINE_WINDOW_S": str(case.rebaseline_window_s or ""),
             "PROGRAM_AUDIO_URL": (audio.url.replace("rig-lease.json", "program-audio.json") if audio
                                   else f"http://127.0.0.1:{_closed_port()}/program-audio.json"),
-            # obs-stream.ps1 never stops through Restreamer's API (asserted: 0 POSTs).
-            "PROGRAM_AUDIO_STOP_URL": api.url,
+            # obs-stream.ps1 never POSTs to Restreamer's API (asserted: 0 POSTs).
+            "PROGRAM_AUDIO_API_BASE": api.url,
         })
         try:
             pre_out = ""
@@ -572,7 +572,7 @@ def run_case(case: Case) -> list[str]:
     if case.expect_text not in out:
         problems.append(f"output lacks {case.expect_text!r}")
     if api.posts:
-        problems.append(f"POSTed Restreamer's stop-stream API {api.posts}x (only the #379 watchdog may)")
+        problems.append(f"POSTed the Restreamer API {api.posts}x (only the #379 watchdog may)")
     # #379: the stream-owned record mirrors the last marker; a confirmed Stop clears it.
     want_owned = "false" if case.args == STOP and proc.returncode == 0 else (got[-1] if got else None)
     if (owned or None) != want_owned:
