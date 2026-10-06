@@ -690,7 +690,7 @@ impl MediaReceiver {
             // A replayed AVC sequence header carries its original ts (OBS:
             // 0): it is an arrival, but not a step of the video timeline.
             FrameData::Video { timestamp, data } => {
-                let sequence_header = data.len() > 1 && data[1] == 0x00;
+                let sequence_header = data.get(1) == Some(&0x00);
                 self.note_gaps((!sequence_header).then_some(*timestamp));
             }
             FrameData::Audio { .. } => self.note_gaps(None),

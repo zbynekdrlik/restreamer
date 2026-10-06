@@ -812,15 +812,19 @@ impl Detector {
         // errors from ITS OWN records.
         let write_error = self.write_error.take();
         match self.gate.on_stall_end(now, report.duration) {
-            StallVerdict::LogOnly => {
-                self.log_unaudited(report, tier, "stall log only", &write_error)
+            verdict @ (StallVerdict::LogOnly | StallVerdict::HeldBack) => {
+                log::info!(
+                    "{}",
+                    tiers::unaudited_line(
+                        self.runtime,
+                        report,
+                        tier,
+                        verdict,
+                        self.log.path(),
+                        write_error.as_deref(),
+                    )
+                );
             }
-            StallVerdict::HeldBack => self.log_unaudited(
-                report,
-                tier,
-                "audit row held back by the rate limit",
-                &write_error,
-            ),
             StallVerdict::Audit { suppressed } => {
                 let detail = stall_log::audit_detail(
                     report,
@@ -838,25 +842,6 @@ impl Detector {
                 self.emit_after_recovery(report, stall_log::with_runtime(&detail, self.runtime));
             }
         }
-    }
-
-    /// The log line of a stall that gets no audit row.
-    fn log_unaudited(
-        &self,
-        report: &StallReport,
-        tier: StallTier,
-        why: &str,
-        write_error: &Option<String>,
-    ) {
-        log::info!(
-            "process stall: runtime={} tier={} class={} duration_ms={} ({why}) evidence={} evidence_write_error={}",
-            self.runtime,
-            tier.as_str(),
-            report.class.as_str(),
-            stall_log::ms(report.duration),
-            self.log.path().display(),
-            write_error.as_deref().unwrap_or("none")
-        );
     }
 
     /// Flush the stalls the throttle held back as one aggregate row.

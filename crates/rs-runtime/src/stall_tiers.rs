@@ -22,7 +22,9 @@ use rs_core::audit_throttle::{Admission, AuditThrottle, Suppressed};
 use rs_core::config::StallDetectorSettings;
 use serde_json::{Value, json};
 
-use super::{STALL_LOG_MAX_BYTES, StallDetectorConfig, stall_log, stall_log_file_name};
+use super::{
+    STALL_LOG_MAX_BYTES, StallDetectorConfig, StallReport, stall_log, stall_log_file_name,
+};
 
 /// The shortest probe interval the settings may ask for.
 pub const MIN_PROBE_INTERVAL: Duration = Duration::from_millis(10);
@@ -211,6 +213,31 @@ pub fn with_fields(record: &Value, extra: &Value) -> Value {
         }
     }
     out
+}
+
+/// The log line of a finished stall, with why it got no audit row (or
+/// `audited`) and any evidence-write error of THIS stall.
+pub fn unaudited_line(
+    runtime: &str,
+    report: &StallReport,
+    tier: StallTier,
+    verdict: StallVerdict,
+    evidence: &Path,
+    write_error: Option<&str>,
+) -> String {
+    let why = match verdict {
+        StallVerdict::LogOnly => "stall log only",
+        StallVerdict::HeldBack => "audit row held back by the rate limit",
+        StallVerdict::Audit { .. } => "audited",
+    };
+    format!(
+        "process stall: runtime={runtime} tier={} class={} duration_ms={} ({why}) evidence={} evidence_write_error={}",
+        tier.as_str(),
+        report.class.as_str(),
+        stall_log::ms(report.duration),
+        evidence.display(),
+        write_error.unwrap_or("none")
+    )
 }
 
 /// Detail of the aggregate `ProcessStall` row flushed for stalls the

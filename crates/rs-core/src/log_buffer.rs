@@ -91,10 +91,12 @@ mod tests {
     fn push_never_waits_for_a_held_lock() {
         let buf = LogBuffer::new(10);
         buf.push(entry("before"));
+        assert_eq!(buf.dropped(), 0);
         let held = buf.inner.lock().unwrap();
         buf.push(entry("while a reader holds it"));
+        buf.push(entry("still held"));
         drop(held);
-        assert_eq!(buf.dropped(), 1);
+        assert_eq!(buf.dropped(), 2);
         buf.push(entry("after"));
         let got: Vec<String> = buf
             .recent("rs_inpoint", 10)
@@ -102,7 +104,7 @@ mod tests {
             .map(|e| e.message)
             .collect();
         assert_eq!(got, vec!["after", "before"]);
-        assert_eq!(buf.dropped(), 1);
+        assert_eq!(buf.dropped(), 2);
     }
 
     #[test]

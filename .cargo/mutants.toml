@@ -78,6 +78,10 @@ exclude_re = [
     "RtmpPusher::push_flv_bytes",
     "RtmpPusher::close",
     "<impl Pushable for RtmpPusher>",
+    # #368: std::fs::File is unbuffered, so DailyLogFile's flush (a
+    # delegation to File::flush, a no-op) has only the equivalent mutant
+    # `Ok(())`.
+    "<impl Write for DailyLogFile>::flush",
 ]
 
 # Whole files excluded from mutation (moved verbatim from the ci.yml `-e` list,

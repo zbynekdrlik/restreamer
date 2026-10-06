@@ -227,3 +227,45 @@ fn take_pending_hands_over_the_aggregate_at_once() {
     assert_eq!((held.count, held.max), (1, 900));
     assert_eq!(gate.take_pending(), None);
 }
+
+#[test]
+fn an_unaudited_stall_line_says_why_and_names_its_own_write_error() {
+    let t0 = Instant::now();
+    let report = StallReport {
+        started_at: t0,
+        ended_at: t0 + ms(600),
+        duration: ms(600),
+        class: super::super::StallClass::RuntimeStarved,
+        trigger: super::super::StallTrigger::ProbeOverdue,
+        detector_max_late: Duration::ZERO,
+        detector_total_late: Duration::ZERO,
+    };
+    let evidence = Path::new("/x/logs/stall-ingest.log");
+    assert_eq!(
+        unaudited_line(
+            "ingest",
+            &report,
+            StallTier::Minor,
+            StallVerdict::LogOnly,
+            evidence,
+            None
+        ),
+        "process stall: runtime=ingest tier=minor class=runtime_starved duration_ms=600 \
+         (stall log only) evidence=/x/logs/stall-ingest.log evidence_write_error=none"
+    );
+    assert!(
+        unaudited_line("main", &report, StallTier::Major, StallVerdict::HeldBack, evidence, Some("disk full"))
+            .ends_with("tier=major class=runtime_starved duration_ms=600 (audit row held back by the rate limit) evidence=/x/logs/stall-ingest.log evidence_write_error=disk full")
+    );
+    assert!(
+        unaudited_line(
+            "main",
+            &report,
+            StallTier::Major,
+            StallVerdict::Audit { suppressed: None },
+            evidence,
+            None
+        )
+        .contains("(audited)")
+    );
+}

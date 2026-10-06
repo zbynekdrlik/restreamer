@@ -142,10 +142,12 @@ async fn a_frame_stall_and_its_resubscription_are_one_measured_gap() {
     next_accepted(&mut log_rx, FRAME_TIMEOUT + Duration::from_secs(5))
         .await
         .expect("the stalled subscription must be re-subscribed");
-    // xiu replays the GOP from an older timestamp: no jump, no discontinuity
-    // counted; the arrival gap is.
+    // The publisher went on sending while nobody was subscribed: its next
+    // frames are 2 s ahead. Those frames were lost on OUR side, not dropped
+    // by OBS, so the re-subscription starts the video timeline over: no
+    // jump. The arrival gap is counted.
     for k in 0..10 {
-        tx_again.send(a_frame(ts30(k))).unwrap();
+        tx_again.send(a_frame(ts30(k + 90))).unwrap();
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
     let gaps = state.ingest_gaps().snapshot();
@@ -177,8 +179,13 @@ async fn a_sequence_header_is_no_video_step() {
         timestamp: 0,
         data: bytes::BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01][..]),
     };
+    let before = state.ingest_gaps().snapshot().frame_interval_us;
     tx.send(header).unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
+    // As a video step, ts 0 would be a backward discontinuity, which drops
+    // the frame-interval estimate.
+    assert_eq!(state.ingest_gaps().snapshot().frame_interval_us, before);
+    assert!(before > 0);
     // The next frame 20 s "after" the header would be a counted jump if the
     // header were a step; it is the next normal frame instead.
     for k in 60..90 {
