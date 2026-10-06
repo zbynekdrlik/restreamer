@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { broadcastMetricsSamples, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -38,9 +39,8 @@ test("endpoint history sparkline renders after metrics samples arrive", async ({
 
   // Emit several MetricsSample events for alias "yt1" so the sparkline
   // has ≥2 points to draw a path.
-  await request.post("http://127.0.0.1:8910/api/v1/_test/emit-metrics-sample", {
-    data: { alias: "yt1", count: 5 },
-  });
+  await waitForWsClient(page, request);
+  await broadcastMetricsSamples(request, "yt1", 5);
 
   // Toggle the per-card History panel open.
   await page.locator(".btn-endpoint-history").first().click();

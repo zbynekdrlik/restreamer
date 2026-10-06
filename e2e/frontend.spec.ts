@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { broadcast, waitForWsClient } from "./lib/ws";
 import * as fs from "fs";
 import * as path from "path";
 import { assertYtHealthGood } from "./yt-health";
@@ -314,41 +315,40 @@ test.describe("Operator Dashboard", () => {
     // Simulate delivery with TWO endpoints so removing the first one hits
     // the regular ConfirmModal (the last-endpoint type-to-confirm modal
     // only triggers when endpoints.len() <= 1 during active delivery).
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 10,
-              bytes_processed_total: 1000,
-              chunks_processed: 10,
-              chunk_delay_secs: 5.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-            {
-              alias: "Facebook Page",
-              alive: true,
-              current_chunk_id: 10,
-              bytes_processed_total: 1000,
-              chunks_processed: 10,
-              chunk_delay_secs: 5.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "test-vps",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 10,
+            bytes_processed_total: 1000,
+            chunks_processed: 10,
+            chunk_delay_secs: 5.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+          {
+            alias: "Facebook Page",
+            alive: true,
+            current_chunk_id: 10,
+            bytes_processed_total: 1000,
+            chunks_processed: 10,
+            chunk_delay_secs: 5.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -385,41 +385,40 @@ test.describe("Operator Dashboard", () => {
 
     // Two endpoints so removing the first one uses the regular confirm
     // flow, not the last-endpoint type-to-confirm flow.
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 10,
-              bytes_processed_total: 1000,
-              chunks_processed: 10,
-              chunk_delay_secs: 5.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-            {
-              alias: "Facebook Page",
-              alive: true,
-              current_chunk_id: 10,
-              bytes_processed_total: 1000,
-              chunks_processed: 10,
-              chunk_delay_secs: 5.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "test-vps",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 10,
+            bytes_processed_total: 1000,
+            chunks_processed: 10,
+            chunk_delay_secs: 5.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+          {
+            alias: "Facebook Page",
+            alive: true,
+            current_chunk_id: 10,
+            bytes_processed_total: 1000,
+            chunks_processed: 10,
+            chunk_delay_secs: 5.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -475,15 +474,14 @@ test.describe("Operator Dashboard", () => {
       { timeout: 10000 },
     );
 
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "InpointStatus",
       data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: 1024,
-          chunk_count: 5,
-        },
+        state: "receiving",
+        rtmp_connected: true,
+        received_bytes: 1024,
+        chunk_count: 5,
       },
     });
 
@@ -509,15 +507,14 @@ test.describe("Operator Dashboard", () => {
     });
 
     // Connect RTMP (without OBS WebSocket, shows "RTMP Only")
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "InpointStatus",
       data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: 1024,
-          chunk_count: 5,
-        },
+        state: "receiving",
+        rtmp_connected: true,
+        received_bytes: 1024,
+        chunk_count: 5,
       },
     });
     await expect(page.locator(".pipeline-node-metric").nth(0)).toHaveText(
@@ -526,15 +523,13 @@ test.describe("Operator Dashboard", () => {
     );
 
     // Disconnect
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "InpointStatus",
       data: {
-        type: "InpointStatus",
-        data: {
-          state: "idle",
-          rtmp_connected: false,
-          received_bytes: 1024,
-          chunk_count: 5,
-        },
+        state: "idle",
+        rtmp_connected: false,
+        received_bytes: 1024,
+        chunk_count: 5,
       },
     });
     await expect(page.locator(".pipeline-node-metric").nth(0)).toHaveText(
@@ -557,15 +552,14 @@ test.describe("Operator Dashboard", () => {
     await expect(page.locator(".pipeline")).toBeVisible({ timeout: 10000 });
 
     const FIVE_GB: number = 5_000_000_000;
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "InpointStatus",
       data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: FIVE_GB,
-          chunk_count: 5000,
-        },
+        state: "receiving",
+        rtmp_connected: true,
+        received_bytes: FIVE_GB,
+        chunk_count: 5000,
       },
     });
 
@@ -593,29 +587,28 @@ test.describe("Operator Dashboard", () => {
     );
 
     // Simulate delivery status via WebSocket so endpoint tree appears
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 10,
-              bytes_processed_total: 1000,
-              chunks_processed: 10,
-              chunk_delay_secs: 5.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "test-vps",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 10,
+            bytes_processed_total: 1000,
+            chunks_processed: 10,
+            chunk_delay_secs: 5.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -643,16 +636,15 @@ test.describe("Operator Dashboard", () => {
     );
 
     // Simulate delivery running
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "test-vps",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
 
@@ -691,16 +683,15 @@ test.describe("Operator Dashboard", () => {
       { timeout: 5000 },
     );
 
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "test-vps",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
 
@@ -995,41 +986,38 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast DeliveryStatus with an endpoint that has chunk_delay_secs
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "e2e rtmp",
-              alive: true,
-              current_chunk_id: 20,
-              bytes_processed_total: 1000000,
-              chunks_processed: 20,
-              chunk_delay_secs: 90.0,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "e2e rtmp",
+            alive: true,
+            current_chunk_id: 20,
+            bytes_processed_total: 1000000,
+            chunks_processed: 20,
+            chunk_delay_secs: 90.0,
+            is_fast: false,
+          },
+        ],
       },
     });
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 20,
-          cache_duration_secs: 90.0,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 20,
+        cache_duration_secs: 90.0,
       },
     });
 
@@ -1057,60 +1045,57 @@ test.describe("Per-Endpoint Cache Bar", () => {
     // DIFFERENT from both endpoint delays below. If the dashboard
     // accidentally uses this global value for per-endpoint cache bars,
     // both endpoints would show "75s" instead of their individual delays.
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 38,
-          cache_duration_secs: 75.0,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 38,
+        cache_duration_secs: 75.0,
       },
     });
 
     // Two endpoints with very different per-endpoint delays:
     //   - YT stable:  chunk_delay_secs = 118s (healthy)
     //   - FB drifted: chunk_delay_secs = 35s (critical, e.g., stale key)
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YT Stable",
-              alive: true,
-              current_chunk_id: 500,
-              bytes_processed_total: 2000000,
-              chunks_processed: 500,
-              chunk_delay_secs: 118.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-            {
-              alias: "FB Drifted",
-              alive: true,
-              current_chunk_id: 535,
-              bytes_processed_total: 1500000,
-              chunks_processed: 500,
-              chunk_delay_secs: 35.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 12,
-              last_error: "ffmpeg stdin closed",
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YT Stable",
+            alive: true,
+            current_chunk_id: 500,
+            bytes_processed_total: 2000000,
+            chunks_processed: 500,
+            chunk_delay_secs: 118.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+          {
+            alias: "FB Drifted",
+            alive: true,
+            current_chunk_id: 535,
+            bytes_processed_total: 1500000,
+            chunks_processed: 500,
+            chunk_delay_secs: 35.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 12,
+            last_error: "ffmpeg stdin closed",
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -1146,41 +1131,38 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.waitForTimeout(1000);
 
     // Warning level: cache_duration_secs = 60 (50% of 120, between 40-75%)
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 20,
-          cache_duration_secs: 60.0,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 20,
+        cache_duration_secs: 60.0,
       },
     });
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "e2e rtmp",
-              alive: true,
-              current_chunk_id: 20,
-              bytes_processed_total: 1000000,
-              chunks_processed: 20,
-              chunk_delay_secs: 60.0,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "e2e rtmp",
+            alive: true,
+            current_chunk_id: 20,
+            bytes_processed_total: 1000000,
+            chunks_processed: 20,
+            chunk_delay_secs: 60.0,
+            is_fast: false,
+          },
+        ],
       },
     });
     const warningBar = page.locator(".endpoint-node .buffer-bar-fill.warning");
@@ -1190,41 +1172,37 @@ test.describe("Per-Endpoint Cache Bar", () => {
     // per-endpoint delay and the pipeline cache_duration_secs. The cache bar
     // now reads per-endpoint chunk_delay_secs (see commit 018af89), so a
     // pipeline-only update is insufficient.
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 22,
-          cache_duration_secs: 10.0,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 22,
+        cache_duration_secs: 10.0,
       },
     });
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "e2e rtmp",
-              alive: true,
-              current_chunk_id: 22,
-              bytes_processed_total: 1100000,
-              chunks_processed: 22,
-              chunk_delay_secs: 10.0,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "e2e rtmp",
+            alive: true,
+            current_chunk_id: 22,
+            bytes_processed_total: 1100000,
+            chunks_processed: 22,
+            chunk_delay_secs: 10.0,
+            is_fast: false,
+          },
+        ],
       },
     });
     const criticalBar = page.locator(
@@ -1240,43 +1218,40 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast PipelineState with S3 chunks buffered and real cache duration
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 20,
-          cache_duration_secs: 100.0,
-        },
+        state: "buffering",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 20,
+        cache_duration_secs: 100.0,
       },
     });
 
     // Broadcast endpoint with alive=false, chunks_processed=0
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "creating",
-          server_ip: null,
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "e2e rtmp",
-              alive: false,
-              current_chunk_id: 0,
-              bytes_processed_total: 0,
-              chunks_processed: 0,
-              chunk_delay_secs: 0.0,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "e2e-vps",
+        status: "creating",
+        server_ip: null,
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "e2e rtmp",
+            alive: false,
+            current_chunk_id: 0,
+            bytes_processed_total: 0,
+            chunks_processed: 0,
+            chunk_delay_secs: 0.0,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -1302,33 +1277,30 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast PipelineState in buffering state with S3 chunks and real cache duration
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Test Event",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 16,
-          cache_duration_secs: 16.5,
-        },
+        state: "buffering",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 16,
+        cache_duration_secs: 16.5,
       },
     });
 
     // Broadcast DeliveryStatus with no alive endpoints
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "e2e-vps",
-          status: "creating",
-          server_ip: null,
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "e2e-vps",
+        status: "creating",
+        server_ip: null,
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
 
@@ -1348,41 +1320,40 @@ test.describe("Pending Endpoint State", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast DeliveryStatus with placeholder endpoints (alive=false, chunks=0)
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "creating",
-          server_ip: null,
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: false,
-              current_chunk_id: 0,
-              bytes_processed_total: 0,
-              chunks_processed: 0,
-              chunk_delay_secs: 0.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              lifecycle: "pending",
-            },
-            {
-              alias: "Facebook Page",
-              alive: false,
-              current_chunk_id: 0,
-              bytes_processed_total: 0,
-              chunks_processed: 0,
-              chunk_delay_secs: 0.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              lifecycle: "pending",
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "creating",
+        server_ip: null,
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: false,
+            current_chunk_id: 0,
+            bytes_processed_total: 0,
+            chunks_processed: 0,
+            chunk_delay_secs: 0.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            lifecycle: "pending",
+          },
+          {
+            alias: "Facebook Page",
+            alive: false,
+            current_chunk_id: 0,
+            bytes_processed_total: 0,
+            chunks_processed: 0,
+            chunk_delay_secs: 0.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            lifecycle: "pending",
+          },
+        ],
       },
     });
 
@@ -1396,29 +1367,28 @@ test.describe("Pending Endpoint State", () => {
     await page.waitForTimeout(1000);
 
     // Start with pending endpoints
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "creating",
-          server_ip: null,
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: false,
-              current_chunk_id: 0,
-              bytes_processed_total: 0,
-              chunks_processed: 0,
-              chunk_delay_secs: 0.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              lifecycle: "pending",
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "creating",
+        server_ip: null,
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: false,
+            current_chunk_id: 0,
+            bytes_processed_total: 0,
+            chunks_processed: 0,
+            chunk_delay_secs: 0.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            lifecycle: "pending",
+          },
+        ],
       },
     });
     await expect(page.locator(".endpoint-node.pending")).toHaveCount(1, {
@@ -1426,29 +1396,27 @@ test.describe("Pending Endpoint State", () => {
     });
 
     // Transition to alive
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 42,
-              bytes_processed_total: 1048576,
-              chunks_processed: 100,
-              chunk_delay_secs: 45.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              lifecycle: "live",
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 42,
+            bytes_processed_total: 1048576,
+            chunks_processed: 100,
+            chunk_delay_secs: 45.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            lifecycle: "live",
+          },
+        ],
       },
     });
 
@@ -1470,29 +1438,28 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast running delivery status
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 42,
-              bytes_processed_total: 1000000,
-              chunks_processed: 40,
-              chunk_delay_secs: 15.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 42,
+            bytes_processed_total: 1000000,
+            chunks_processed: 40,
+            chunk_delay_secs: 15.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -1509,29 +1476,28 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast running delivery status
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 42,
-              bytes_processed_total: 1000000,
-              chunks_processed: 40,
-              chunk_delay_secs: 15.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 42,
+            bytes_processed_total: 1000000,
+            chunks_processed: 40,
+            chunk_delay_secs: 15.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -1545,16 +1511,15 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast idle delivery status to clear any leftover state from previous tests
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "",
-          status: "none",
-          server_ip: null,
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "",
+        status: "none",
+        server_ip: null,
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
     await page.waitForTimeout(500);
@@ -1578,44 +1543,41 @@ test.describe("Pipeline Node Data", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast PipelineState with buffer data
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Sunday Service",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 5,
-          s3_queue_chunks: 42,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Sunday Service",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 5,
+        s3_queue_chunks: 42,
       },
     });
 
     // Also broadcast delivery status
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 1200,
-              bytes_processed_total: 5000000,
-              chunks_processed: 1203,
-              chunk_delay_secs: 96.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 1200,
+            bytes_processed_total: 5000000,
+            chunks_processed: 1203,
+            chunk_delay_secs: 96.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+          },
+        ],
       },
     });
 
@@ -1633,15 +1595,14 @@ test.describe("Pipeline Node Data", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast chunk stats via EndpointStatus (idle, no delivery)
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "EndpointStatus",
       data: {
-        type: "EndpointStatus",
-        data: {
-          state: "uploading",
-          pending_chunks: 8,
-          active_uploads: 1,
-          buffer_duration: "00:00:30",
-        },
+        state: "uploading",
+        pending_chunks: 8,
+        active_uploads: 1,
+        buffer_duration: "00:00:30",
       },
     });
 
@@ -1668,18 +1629,17 @@ test.describe("Pipeline Node Data", () => {
     await page.waitForTimeout(1000);
 
     // Streaming state — S3 dot shows active when delivery is running
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
       data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test",
-          target_delay_secs: 120,
-          session_start: null,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 53,
-        },
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 53,
       },
     });
 
@@ -1692,28 +1652,27 @@ test.describe("Pipeline Node Data", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "rs-delivery-1",
-          status: "running",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "YouTube Main",
-              alive: true,
-              current_chunk_id: 42,
-              bytes_processed_total: 1000000,
-              chunks_processed: 40,
-              chunk_delay_secs: 15.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-            },
-          ],
-        },
+        instance_name: "rs-delivery-1",
+        status: "running",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "YouTube Main",
+            alive: true,
+            current_chunk_id: 42,
+            bytes_processed_total: 1000000,
+            chunks_processed: 40,
+            chunk_delay_secs: 15.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+          },
+        ],
       },
     });
 
@@ -1744,16 +1703,15 @@ test.describe("Pipeline Node Data", () => {
     // The mock's default WS-connect payload reports an active delivery
     // (status="running") for other tests' convenience -- force idle so the
     // "" | "none" branch under test is actually reached.
-    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, request);
+    await broadcast(request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "",
-          status: "none",
-          server_ip: null,
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "",
+        status: "none",
+        server_ip: null,
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
     await page.waitForTimeout(1000);
@@ -1779,16 +1737,15 @@ test.describe("Pipeline Node Data", () => {
     });
 
     // Force idle -- see the previous test for why.
-    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, request);
+    await broadcast(request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "",
-          status: "none",
-          server_ip: null,
-          endpoint_count: 0,
-          endpoints: [],
-        },
+        instance_name: "",
+        status: "none",
+        server_ip: null,
+        endpoint_count: 0,
+        endpoints: [],
       },
     });
     await page.waitForTimeout(1000);
@@ -1831,41 +1788,40 @@ test.describe("Endpoint Tree", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YT-Main",
-              alive: true,
-              current_chunk_id: 100,
-              bytes_processed_total: 1000000,
-              chunks_processed: 100,
-              chunk_delay_secs: 12.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-            {
-              alias: "FB-Stream",
-              alive: true,
-              current_chunk_id: 95,
-              bytes_processed_total: 800000,
-              chunks_processed: 95,
-              chunk_delay_secs: 45.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-          ],
-        },
+        instance_name: "test-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YT-Main",
+            alive: true,
+            current_chunk_id: 100,
+            bytes_processed_total: 1000000,
+            chunks_processed: 100,
+            chunk_delay_secs: 12.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+          {
+            alias: "FB-Stream",
+            alive: true,
+            current_chunk_id: 95,
+            bytes_processed_total: 800000,
+            chunks_processed: 95,
+            chunk_delay_secs: 45.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+        ],
       },
     });
 
@@ -1884,41 +1840,40 @@ test.describe("Endpoint Tree", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
       data: {
-        type: "DeliveryStatus",
-        data: {
-          instance_name: "test-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 2,
-          endpoints: [
-            {
-              alias: "YT-Main",
-              alive: true,
-              current_chunk_id: 100,
-              bytes_processed_total: 1000000,
-              chunks_processed: 100,
-              chunk_delay_secs: 12.0,
-              stall_reason: null,
-              ffmpeg_restart_count: 0,
-              last_error: null,
-              is_fast: false,
-            },
-            {
-              alias: "YT-Monitor",
-              alive: false,
-              current_chunk_id: 80,
-              bytes_processed_total: 500000,
-              chunks_processed: 80,
-              chunk_delay_secs: 0.0,
-              stall_reason: "chunk_miss",
-              ffmpeg_restart_count: 3,
-              last_error: null,
-              is_fast: true,
-            },
-          ],
-        },
+        instance_name: "test-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 2,
+        endpoints: [
+          {
+            alias: "YT-Main",
+            alive: true,
+            current_chunk_id: 100,
+            bytes_processed_total: 1000000,
+            chunks_processed: 100,
+            chunk_delay_secs: 12.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: false,
+          },
+          {
+            alias: "YT-Monitor",
+            alive: false,
+            current_chunk_id: 80,
+            bytes_processed_total: 500000,
+            chunks_processed: 80,
+            chunk_delay_secs: 0.0,
+            stall_reason: "chunk_miss",
+            ffmpeg_restart_count: 3,
+            last_error: null,
+            is_fast: true,
+          },
+        ],
       },
     });
 
@@ -2436,53 +2391,44 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "PipelineState",
-          data: {
-            state: "streaming",
-            event_id: 1,
-            event_name: "Test Event",
-            target_delay_secs: 120,
-            session_start: null,
-            local_buffer_chunks: 0,
-            s3_queue_chunks: 0,
-            cache_duration_secs: 0.0,
-          },
-        },
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
+      data: {
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 0,
+        cache_duration_secs: 0.0,
       },
-    );
+    });
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "e2e-vps",
-            status: "delivering",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "Kiko Fast",
-                alive: true,
-                current_chunk_id: 100,
-                bytes_processed_total: 0,
-                chunks_processed: 10,
-                chunk_delay_secs: 2.0,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: true,
-              },
-            ],
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
+      data: {
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "Kiko Fast",
+            alive: true,
+            current_chunk_id: 100,
+            bytes_processed_total: 0,
+            chunks_processed: 10,
+            chunk_delay_secs: 2.0,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: true,
           },
-        },
+        ],
       },
-    );
+    });
 
     const fastCard = page.locator(
       '[data-testid="endpoint-card"][data-is-fast="true"]',
@@ -2513,55 +2459,46 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "PipelineState",
-          data: {
-            state: "streaming",
-            event_id: 1,
-            event_name: "Test Event",
-            target_delay_secs: 120,
-            session_start: null,
-            local_buffer_chunks: 0,
-            s3_queue_chunks: 0,
-            cache_duration_secs: 0.0,
-          },
-        },
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
+      data: {
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 0,
+        cache_duration_secs: 0.0,
       },
-    );
+    });
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "e2e-vps",
-            status: "delivering",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "Kiko Fast",
-                alive: true,
-                current_chunk_id: 100,
-                bytes_processed_total: 0,
-                chunks_processed: 10,
-                // Tracking a ratcheted 30s target: the #294 design working.
-                chunk_delay_secs: 30.0,
-                fast_delay_target_secs: 30,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: true,
-              },
-            ],
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
+      data: {
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "Kiko Fast",
+            alive: true,
+            current_chunk_id: 100,
+            bytes_processed_total: 0,
+            chunks_processed: 10,
+            // Tracking a ratcheted 30s target: the #294 design working.
+            chunk_delay_secs: 30.0,
+            fast_delay_target_secs: 30,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: true,
           },
-        },
+        ],
       },
-    );
+    });
 
     const fastCard = page.locator(
       '[data-testid="endpoint-card"][data-is-fast="true"]',
@@ -2586,55 +2523,46 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "PipelineState",
-          data: {
-            state: "streaming",
-            event_id: 1,
-            event_name: "Test Event",
-            target_delay_secs: 120,
-            session_start: null,
-            local_buffer_chunks: 0,
-            s3_queue_chunks: 0,
-            cache_duration_secs: 0.0,
-          },
-        },
+    await waitForWsClient(page, page.request);
+    await broadcast(page.request, {
+      type: "PipelineState",
+      data: {
+        state: "streaming",
+        event_id: 1,
+        event_name: "Test Event",
+        target_delay_secs: 120,
+        session_start: null,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 0,
+        cache_duration_secs: 0.0,
       },
-    );
+    });
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
-        data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "e2e-vps",
-            status: "delivering",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "Kiko Fast",
-                alive: true,
-                current_chunk_id: 100,
-                bytes_processed_total: 0,
-                chunks_processed: 10,
-                // 3x its 10s target = genuine starvation/drift.
-                chunk_delay_secs: 30.0,
-                fast_delay_target_secs: 10,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: true,
-              },
-            ],
+    await broadcast(page.request, {
+      type: "DeliveryStatus",
+      data: {
+        instance_name: "e2e-vps",
+        status: "delivering",
+        server_ip: "1.2.3.4",
+        endpoint_count: 1,
+        endpoints: [
+          {
+            alias: "Kiko Fast",
+            alive: true,
+            current_chunk_id: 100,
+            bytes_processed_total: 0,
+            chunks_processed: 10,
+            // 3x its 10s target = genuine starvation/drift.
+            chunk_delay_secs: 30.0,
+            fast_delay_target_secs: 10,
+            stall_reason: null,
+            ffmpeg_restart_count: 0,
+            last_error: null,
+            is_fast: true,
           },
-        },
+        ],
       },
-    );
+    });
 
     const fastCard = page.locator(
       '[data-testid="endpoint-card"][data-is-fast="true"]',
@@ -2652,42 +2580,39 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       // warning. No local console capture needed.
 
       await page.goto("/");
-      // Give the WS client time to connect before broadcasting; otherwise
-      // the test broadcast fires before any subscriber exists and the
-      // DeliveryStatus is dropped.
-      await page.waitForTimeout(1000);
+      // Wait for the page's WebSocket to be broadcast-ready (#377) — a
+      // broadcast before that is dropped by the mock.
+      await waitForWsClient(page, page.request);
 
       // Deterministically broadcast a DeliveryStatus carrying youtube_health.bad.
-      await page.request.post("/api/v1/_test/ws-broadcast", {
+      await broadcast(page.request, {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "inst-1",
-            status: "delivering",
-            server_ip: "127.0.0.1",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "ytbb",
-                alive: true,
-                current_chunk_id: 0,
-                bytes_processed_total: 0,
-                chunks_processed: 0,
-                chunk_delay_secs: 0.0,
-                ffmpeg_restart_count: 0,
-                reconnect_count: 0,
-                is_fast: false,
-                youtube_health: {
-                  stream_status: "active",
-                  health_status: "bad",
-                  top_issue: "videoIngestionStarved",
-                  resolution: "1920x1080",
-                  frame_rate: "30.0",
-                  age_secs: 3,
-                },
+          instance_name: "inst-1",
+          status: "delivering",
+          server_ip: "127.0.0.1",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "ytbb",
+              alive: true,
+              current_chunk_id: 0,
+              bytes_processed_total: 0,
+              chunks_processed: 0,
+              chunk_delay_secs: 0.0,
+              ffmpeg_restart_count: 0,
+              reconnect_count: 0,
+              is_fast: false,
+              youtube_health: {
+                stream_status: "active",
+                health_status: "bad",
+                top_issue: "videoIngestionStarved",
+                resolution: "1920x1080",
+                frame_rate: "30.0",
+                age_secs: 3,
               },
-            ],
-          },
+            },
+          ],
         },
       });
 

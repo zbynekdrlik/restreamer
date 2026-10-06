@@ -10,6 +10,36 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// #377 broadcast-readiness bookkeeping, read by GET /api/v1/_test/ws-clients.
+// The app's WS-connect path (leptos-ui/src/ws.rs `connect_with_backoff`)
+// also runs `load_initial_state`, five SEQUENTIAL HTTP fetches whose
+// responses overwrite store state a test broadcast may have set
+// (`/status` -> inpoint_connected, `/delivery/status/cached` -> delivery).
+// Its LAST fetch is `GET /api/v1/obs/status` (no mock route: it falls through
+// to the SPA catch-all, which is fine, the client only needs it answered; a
+// JSON route here would add a store write landing AFTER readiness).
+// A page load is a document navigation (Accept: text/html, non-API path).
+// Each socket gets a connection number; its `load_initial_state` is done
+// once an `obs/status` arrives for the same page load with a connection
+// number >= the socket's own (the chain starts right after
+// `WebSocket::open`, and a WS reconnect re-runs it). See isWsClientReady().
+let pageLoadSeq = 0; // incremented per document navigation
+let wsConnSeq = 0; // incremented per WebSocket connection
+let obsStatusMark = { pageLoad: -1, conn: -1 }; // the last `obs/status` arrival
+app.use((req, _res, next) => {
+  if (req.method === "GET") {
+    if (req.path === "/api/v1/obs/status") {
+      obsStatusMark = { pageLoad: pageLoadSeq, conn: wsConnSeq };
+    } else if (
+      !req.path.startsWith("/api/") &&
+      (req.headers.accept || "").includes("text/html")
+    ) {
+      pageLoadSeq += 1;
+    }
+  }
+  next();
+});
+
 // Serve the WASM frontend from dist/ for unified WebSocket + static serving
 const distDir = path.join(__dirname, "..", "dist");
 app.use(express.static(distDir));
@@ -1307,8 +1337,11 @@ app.post("/api/v1/_test/emit-metrics-sample", (req, res) => {
   const alias = req.body.alias || "yt1";
   const count = req.body.count || 5;
   const base_ts = Date.now();
+  // #377: report the minimum reach across the samples (0 = some were lost).
+  let delivered = Infinity;
+  let ready = Infinity;
   for (let i = 0; i < count; i++) {
-    broadcastWs({
+    const reached = broadcastWs({
       type: "MetricsSample",
       data: {
         ts_ms: base_ts + i * 1000,
@@ -1321,14 +1354,47 @@ app.post("/api/v1/_test/emit-metrics-sample", (req, res) => {
         alive: true,
       },
     });
+    delivered = Math.min(delivered, reached.delivered);
+    ready = Math.min(ready, reached.ready);
   }
-  res.json({ emitted: count });
+  if (delivered === Infinity) delivered = 0;
+  if (ready === Infinity) ready = 0;
+  console.log(`[ws] _test/emit-metrics-sample alias=${alias} count=${count} delivered_to=${delivered} ready=${ready}`);
+  res.json({ emitted: count, delivered, ready });
 });
 
-// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests
+// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests.
+// Specs MUST NOT post here directly -- go through `broadcast()` in
+// e2e/lib/ws.ts after `waitForWsClient()` (#377; enforced by
+// e2e/check-ws-broadcast.js). A message sent before the page's socket is
+// connected is silently dropped.
 app.post("/api/v1/_test/ws-broadcast", (req, res) => {
-  broadcastWs(req.body);
-  res.json({ status: "ok" });
+  const { delivered, ready } = broadcastWs(req.body);
+  console.log(`[ws] _test/ws-broadcast type=${req.body && req.body.type} delivered_to=${delivered} ready=${ready}`);
+  res.json({ status: "ok", delivered, ready });
+});
+
+// Test-only (#377): how many WebSocket clients can safely receive a
+// `_test/ws-broadcast` right now (`count`, see isWsClientReady()). `open`
+// (every OPEN socket), `snapshot_sent` (latest-page sockets whose snapshot
+// went out), `page_load` and `obs_status` are diagnostics for a failed wait.
+app.get("/api/v1/_test/ws-clients", (_req, res) => {
+  let open = 0;
+  let snapshotSent = 0;
+  let ready = 0;
+  wss.clients.forEach((client) => {
+    if (client.readyState !== 1) return;
+    open += 1;
+    if (client.pageLoadSeq === pageLoadSeq && client.snapshotSent) snapshotSent += 1;
+    if (isWsClientReady(client)) ready += 1;
+  });
+  res.json({
+    count: ready,
+    open,
+    snapshot_sent: snapshotSent,
+    page_load: pageLoadSeq,
+    obs_status: obsStatusMark,
+  });
 });
 
 // Test-only: simulate VPS disconnect — cache bar drains at real-time rate
@@ -1383,18 +1449,57 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
 
-// Broadcast a message to all connected WebSocket clients
+// #377: a client can safely receive a test push only when ALL hold:
+//  - it is OPEN;
+//  - it belongs to the LATEST page load (a socket left over from a previous
+//    test's page or from before a page.reload() never counts);
+//  - its connect-time snapshot (sent 200 ms after `connection`, see
+//    wss.on("connection")) already went out, so it cannot overwrite the push;
+//  - its page's `load_initial_state` HTTP chain finished (the bookkeeping
+//    middleware at the top), so no in-flight initial fetch can overwrite it.
+// The page's FIRST socket may connect before or after its chain's
+// `obs/status` arrives (both start together), so the page load is the key for
+// it. A RECONNECT socket of the same page re-runs the chain, so it also needs
+// an `obs/status` that arrived after it connected.
+function isWsClientReady(client) {
+  return (
+    client.readyState === 1 &&
+    client.pageLoadSeq === pageLoadSeq &&
+    client.snapshotSent === true &&
+    obsStatusMark.pageLoad === pageLoadSeq &&
+    (client.firstOfPageLoad || obsStatusMark.conn >= client.connSeq)
+  );
+}
+let lastConnPageLoad = -1; // page load of the most recent WebSocket connection
+
+// Broadcast a message to all connected WebSocket clients. Returns how many
+// OPEN clients it was sent to (`delivered`, 0 = dropped on the floor) and how
+// many of those were broadcast-ready (`ready`, the number lib/ws.ts asserts).
 function broadcastWs(message) {
   const data = JSON.stringify(message);
+  let delivered = 0;
+  let ready = 0;
   wss.clients.forEach((client) => {
     if (client.readyState === 1) {
+      if (isWsClientReady(client)) ready += 1;
       client.send(data);
+      delivered += 1;
     }
   });
+  return { delivered, ready };
 }
 
 wss.on("connection", (ws) => {
-  console.log("[ws] Client connected");
+  // #377: tie the socket to the page load that opened it and number it
+  // (see isWsClientReady()).
+  ws.pageLoadSeq = pageLoadSeq;
+  wsConnSeq += 1;
+  ws.connSeq = wsConnSeq;
+  ws.firstOfPageLoad = lastConnPageLoad !== pageLoadSeq;
+  lastConnPageLoad = pageLoadSeq;
+  console.log(
+    `[ws] Client connected (page_load=${pageLoadSeq} conn=${wsConnSeq} first_of_page=${ws.firstOfPageLoad})`,
+  );
 
   // Choose the initial delivery payload based on the active scenario.
   let deliveryData;
@@ -1508,6 +1613,10 @@ wss.on("connection", (ws) => {
       if (pipelineData) {
         ws.send(JSON.stringify({ type: "PipelineState", data: pipelineData }));
       }
+      // #377: from here on a `_test/ws-broadcast` can no longer be
+      // overwritten by this connect-time snapshot -- /_test/ws-clients
+      // counts this client as ready.
+      ws.snapshotSent = true;
     }
   }, 200);
 
