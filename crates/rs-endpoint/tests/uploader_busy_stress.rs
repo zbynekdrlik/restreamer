@@ -62,11 +62,24 @@ fn is_sqlite_busy(e: &rs_core::error::CoreError) -> bool {
     s.contains("database is locked") || s.contains("(code: 5") || s.contains("(code: 517")
 }
 
-/// Upper bound on the whole claim phase. It is NOT a throughput target: a
-/// correct picker drains 800 chunks in well under a second on a normal host
-/// and in seconds on a starved one. Only a hang (a pick that never returns, a
-/// pool deadlock) or a picker throttled to a crawl gets anywhere near it.
-const LIVENESS_CAP: Duration = Duration::from_secs(60);
+/// Floor of the liveness cap on the whole claim phase. It is NOT a throughput
+/// target: a correct picker drains 800 chunks in about 0.5 s on a normal host.
+const LIVENESS_CAP_FLOOR: Duration = Duration::from_secs(60);
+
+/// How many seed-phase durations the claim phase may take before the cap
+/// trips. Seeding is 800 serial INSERTs; draining is at least 2 serialised
+/// writes per seeded chunk (the claim UPDATE + `record_upload_success`) plus
+/// the committer writes, so a correct picker needs about 2-3x the seed time.
+const LIVENESS_CAP_SEED_FACTOR: u32 = 10;
+
+/// The liveness cap, scaled to THIS runner's measured write speed. A starved
+/// CI runner (#382: a Windows job whose seeding alone took ~80 s) gets a
+/// proportionally longer cap, so only a real hang (a pick that never returns,
+/// a pool deadlock) or a picker serialised to a crawl relative to the runner
+/// (the #120 coordinator backlog) trips it, never plain runner slowness.
+fn liveness_cap(seed_elapsed: Duration) -> Duration {
+    LIVENESS_CAP_FLOOR.max(seed_elapsed * LIVENESS_CAP_SEED_FACTOR)
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn picker_no_busy_storm_under_production_write_mix() {
@@ -80,6 +93,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         .await
         .unwrap();
     const SEED: usize = 800;
+    let seed_started = Instant::now();
     let mut seeded_ids = HashSet::with_capacity(SEED);
     for i in 0..SEED {
         let id = db::insert_chunk(
@@ -94,6 +108,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         .unwrap();
         seeded_ids.insert(id);
     }
+    let seed_elapsed = seed_started.elapsed();
+    let cap = liveness_cap(seed_elapsed);
     assert_eq!(seeded_ids.len(), SEED, "seeding produced duplicate ids");
     let seeded_ids = Arc::new(seeded_ids);
 
@@ -101,6 +117,12 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     let (ws_tx, _ws_rx) = broadcast::channel(1024);
 
     let busy_hits = Arc::new(AtomicU32::new(0));
+    // Non-BUSY picker errors. Not part of the #256 signature, but counted so a
+    // persistent one shows up in the output instead of looping silently.
+    let other_errors = Arc::new(AtomicU32::new(0));
+    // Completed committer rounds: proves the write mix really ran against the
+    // claimers, so the zero-BUSY result is not an uncontended run.
+    let committer_rounds = Arc::new(AtomicU32::new(0));
     // Records every chunk id each claimer won (seeded AND committer-inserted),
     // to detect double-claims.
     let claims: Arc<Mutex<HashMap<i64, u32>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -113,6 +135,9 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     // contended for the whole claim phase and no longer.
     let workers_done = Arc::new(AtomicBool::new(false));
 
+    // Elapsed covers the whole claim phase, from the first spawn.
+    let started = Instant::now();
+
     // --- 8 claimer workers (production = adaptive 2..8) ---
     // Each tightly loops the picker. On a successful claim it marks the chunk
     // sent (mirrors record_upload_success after the slow S3 PUT) so the queue
@@ -121,6 +146,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     for _ in 0..8 {
         let pool = pool.clone();
         let busy_hits = Arc::clone(&busy_hits);
+        let other_errors = Arc::clone(&other_errors);
         let claims = Arc::clone(&claims);
         let seeded_ids = Arc::clone(&seeded_ids);
         let seeded_claimed = Arc::clone(&seeded_claimed);
@@ -161,6 +187,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                     Err(e) => {
                         if is_sqlite_busy(&e) {
                             busy_hits.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            other_errors.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -178,6 +206,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         let pool = pool.clone();
         let ws_tx = ws_tx.clone();
         let workers_done = Arc::clone(&workers_done);
+        let committer_rounds = Arc::clone(&committer_rounds);
         committers.push(tokio::spawn(async move {
             let mut n = 0i64;
             while !workers_done.load(Ordering::SeqCst) {
@@ -209,6 +238,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                 let _ = db::update_received_bytes(&pool, event_id, 1024).await;
 
                 n += 1;
+                committer_rounds.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }));
@@ -223,8 +253,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         .chain(committers.iter())
         .map(|h| h.abort_handle())
         .collect();
-    let started = Instant::now();
-    let phase = tokio::time::timeout(LIVENESS_CAP, async {
+    let phase = tokio::time::timeout(cap, async {
         for h in workers {
             h.await.expect("claimer worker panicked");
         }
@@ -243,22 +272,36 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     }
 
     let busy = busy_hits.load(Ordering::Relaxed);
+    let other = other_errors.load(Ordering::Relaxed);
+    let rounds = committer_rounds.load(Ordering::Relaxed);
     let seeded_done = seeded_claimed.load(Ordering::SeqCst);
     let map = claims.lock().await;
     let total_claims: u32 = map.values().copied().sum();
+    let mut missing: Vec<i64> = seeded_ids
+        .iter()
+        .filter(|id| !map.contains_key(*id))
+        .copied()
+        .collect();
+    missing.sort_unstable();
     println!(
         "uploader_busy_stress: {seeded_done}/{SEED} seeded chunks claimed, \
          {total_claims} claims in total (incl. committer-inserted), \
-         {busy} BUSY, elapsed {elapsed:?}"
+         {busy} BUSY, {other} other picker errors, {rounds} committer rounds, \
+         elapsed {elapsed:?} (seed {seed_elapsed:?}, cap {cap:?})"
     );
 
     // Liveness: a distinct message, so a hang is never mistaken for the BUSY
-    // storm or for a lost row.
+    // storm or for a lost row. It carries those counts too, because a stranded
+    // seeded row or a BUSY storm can also keep the workers from finishing.
     assert!(
         !cap_hit,
         "liveness cap hit: only {seeded_done}/{SEED} seeded chunks claimed after \
-         {LIVENESS_CAP:?} — the picker or a committer hung or deadlocked, or \
-         the atomic claim serialised to a crawl (the #120 backlog failure)"
+         {cap:?} (seeding took {seed_elapsed:?}) — the picker or a committer hung \
+         or deadlocked, or the atomic claim serialised to a crawl (the #120 \
+         backlog failure). {busy} BUSY, {other} other picker errors, {} seeded \
+         ids never claimed (first: {:?})",
+        missing.len(),
+        &missing[..missing.len().min(10)]
     );
 
     // ZERO tolerance: the storm is the bug. The fix (single atomic claim
@@ -269,6 +312,13 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         "picker surfaced {busy} SQLITE_BUSY/BUSY_SNAPSHOT errors under the \
          production write mix — the #256 storm is back (deferred read->write \
          picker, or busy_timeout failing to cover 517)"
+    );
+
+    // The write mix must really have run while the workers claimed; otherwise
+    // the zero-BUSY result above proves nothing about contention.
+    assert!(
+        rounds > 0,
+        "the committer write mix completed no round during the claim phase"
     );
 
     // Correctness: every claimed chunk was claimed EXACTLY once. A picker that
@@ -288,12 +338,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     // chunks were drained by 8 workers racing one another under the committer
     // mix. That is what makes the zero-double-claim result above a real claim
     // race and not a vacuous, under-contended run.
-    let mut missing: Vec<i64> = seeded_ids
-        .iter()
-        .filter(|id| !map.contains_key(*id))
-        .copied()
-        .collect();
-    missing.sort_unstable();
     assert!(
         missing.is_empty(),
         "{} of {SEED} seeded chunks were never claimed (lost rows): {missing:?}",
