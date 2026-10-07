@@ -202,6 +202,8 @@ def check_workflows(root: Path) -> list[str]:
 BREACH_API = ("/api/v1/delivery/stop", "/deactivate")
 CUT_FN = "Invoke-ProgramAudioDeliveryCut"
 CUT_CALLER = "Invoke-ProgramAudioBreachStop"
+# The bounded retry once our stream is over; itself only called from the breach path.
+CUT_RETRY = "Invoke-ProgramAudioDeliveryCutUntilDone"
 CI_EVENTS = re.compile(r'(?m)^\$script:ProgramAudioCiEvents = @\((?P<names>[^)\n]*)\)\s*$')
 CI_GATE = re.compile(r'if \(\$script:ProgramAudioCiEvents -cnotcontains \$name\) \{[^}]*?return \$true\s*\}', re.S)
 
@@ -218,22 +220,30 @@ def check_breach_api(root: Path, event_names: set[str]) -> list[str]:
         if len(hits) != 1 or owner_at(spans, hits[0]) != CUT_FN:
             errs.append(f"{GUARD}: `{api}` must appear exactly ONCE, inside {CUT_FN} "
                         f"(found {len(hits)}x, in {[owner_at(spans, h) for h in hits]})")
-    calls = [m.start() for m in re.finditer(rf"(?<![\w-]){re.escape(CUT_FN)}(?![\w-])", code)]
-    callers = [owner_at(spans, c) for c in calls if not re.match(r"function\s", code[max(0, c - 9):c + 1])]
-    callers = [c for c in callers if c != CUT_FN]
-    if not callers or any(c != CUT_CALLER for c in callers):
-        errs.append(f"{GUARD}: {CUT_FN} may only be called from {CUT_CALLER} (the breach path); callers: {callers}")
+    def callers_of(fn: str) -> list[str | None]:
+        calls = [m.start() for m in re.finditer(rf"(?<![\w-]){re.escape(fn)}(?![\w-])", code)]
+        found = [owner_at(spans, c) for c in calls if not re.match(r"function\s", code[max(0, c - 9):c + 1])]
+        return [c for c in found if c != fn]
+
+    for fn, allowed in ((CUT_FN, {CUT_CALLER, CUT_RETRY}), (CUT_RETRY, {CUT_CALLER})):
+        callers = callers_of(fn)
+        if not callers or any(c not in allowed for c in callers):
+            errs.append(f"{GUARD}: {fn} may only be called from {sorted(allowed)} (the breach path); "
+                        f"callers: {callers}")
     body = next((code[a:b] for n, a, b in spans if n == CUT_FN), "")
     gate = CI_GATE.search(body)
-    first_http = body.find("Invoke-RestMethod")
-    if not gate or (first_http >= 0 and gate.start() > first_http):
+    https = [i for i in (body.find("Invoke-RestMethod"), body.find("Invoke-WebRequest")) if i >= 0]
+    if not gate or (https and gate.start() > min(https)):
         errs.append(f"{GUARD}: {CUT_FN} must REFUSE a non-CI EVENT_NAME (-cnotcontains ... return $true) "
                     "before any Restreamer call")
     m = CI_EVENTS.search(code)
     listed = set(re.findall(r'"([^"]+)"', m.group("names"))) if m else set()
     if not m:
         errs.append(f"{GUARD}: $script:ProgramAudioCiEvents (the CI-owned E2E events) is missing")
-    elif listed != event_names:
+    if any(not n.startswith("E2E-") for n in listed | event_names):
+        errs.append(f"{GUARD}: CI-owned event names {sorted(listed | event_names)} (the list + the streaming jobs' "
+                    "EVENT_NAME) must all start with `E2E-` (a production event is never cut)")
+    if m and listed != event_names:
         errs.append(f"{GUARD}: $script:ProgramAudioCiEvents {sorted(listed)} must equal the OBS-streaming jobs' "
                     f"EVENT_NAME {sorted(event_names)} (only CI-owned events may ever be cut)")
     for f in sorted((root / SCRIPTS / "ci").glob("*.ps1")):
@@ -350,6 +360,12 @@ GUARD_MUTATIONS: list[tuple[str, str, str, str]] = [
      '  Add-ProgramAudioBreachLine "event $name (id $id) deactivated"', "`/deactivate` must appear exactly ONCE"),
     ("the watchdog cuts delivery outside the breach path", '      Write-ProgramAudioLog "ok"',
      '      Write-ProgramAudioLog "ok"\n      $null = Invoke-ProgramAudioDeliveryCut', "may only be called from"),
+    ("a request before the non-CI refusal", "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {",
+     '  $null = Invoke-WebRequest -Uri "$(Get-ProgramAudioApiBase)/api/v1/status" -UseBasicParsing\n'
+     "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {", "must REFUSE a non-CI EVENT_NAME"),
+    ("the bounded cut retry runs outside the breach path", '      Write-ProgramAudioLog "ok"',
+     '      Write-ProgramAudioLog "ok"\n      Invoke-ProgramAudioDeliveryCutUntilDone',
+     "Invoke-ProgramAudioDeliveryCutUntilDone may only be called from"),
     ("the non-CI refusal is gone", "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {", "  if ($false) {",
      "must REFUSE a non-CI EVENT_NAME"),
     ("a non-CI event is added to the CI list", '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")',
@@ -399,6 +415,9 @@ def self_test(root: Path) -> int:
             else:
                 text = real[rel].replace(old, new, 1)
             run_case(desc, {rel: text}, expect)
+    run_case("a coordinated rename of the FB event + the CI list to a production name",
+             {CI: real[CI].replace('      EVENT_NAME: "E2E-FB-Test"', '      EVENT_NAME: "Nedelna bohosluzba"', 1),
+              GUARD: real[GUARD].replace('"E2E-FB-Test")', '"Nedelna bohosluzba")', 1)}, "must all start with `E2E-`")
     run_case("another scripts/ci file cuts a delivery", {Path(EXTRA_SCRIPT[0]): EXTRA_SCRIPT[1]},
              "is allowed only in")
     if failures:

@@ -133,8 +133,15 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
 - **`scripts/ci/program-audio-guard.ps1`** (dot-sourced):
   - `Test-ProgramAudio` returns `$null` (OK) only when all of these hold:
     - the verdict is MEASUREMENT or SILENT;
-    - `0 <= age_s <= 10`;
-    - there was no FOREIGN in the last 15 s (`last_foreign_age_s`).
+    - `-1 <= age_s <= 10` (a clock-sync step can read slightly negative, as camera-box allows);
+    - there was no FOREIGN in the last 30 s (`last_foreign_age_s`, camera-box's latch).
+
+    **Proof of music is checked FIRST.** A FOREIGN verdict counts even when it is stale,
+    and the latch beats an UNKNOWN, stale or MEASUREMENT read. That is the order of
+    camera-box's reference guard (`scripts/program_audio_guard.py`).
+    - Otherwise music could hide behind the one-poll tolerance: two decisions can be
+      ~20-25 s apart.
+    - Review of e184f6ef: `{UNKNOWN, last_foreign_age_s: 3}` was tolerated.
 
     Otherwise it returns a reason: FOREIGN, UNKNOWN, stale, unreachable or malformed. It
     fails closed.
@@ -192,8 +199,10 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     unconfirmed, and it retries until done. Every step is a line in the breach marker and a
     bullet in the step summary.
     - **Only a CI-owned E2E event is touched.** That is the job env `EVENT_NAME`, which must
-      be in `$script:ProgramAudioCiEvents` (= `E2E-Test`, `E2E-FB-Test`). Any other name, or
-      none, is `REFUSED`, so the church event is never cut.
+      be in `$script:ProgramAudioCiEvents` (= `E2E-Test`, `E2E-FB-Test`; every name starts
+      with `E2E-`). Any other name, or none, is `REFUSED`, so the church event is never cut.
+    - Once our stream is over (marker false), an unfinished cut is retried for up to the
+      delivery budget (`Invoke-ProgramAudioDeliveryCutUntilDone`).
     - `verify_program_audio_guard.py` pins all of this:
       - each of the two calls appears ONCE, inside that function;
       - only `Invoke-ProgramAudioBreachStop` calls it;

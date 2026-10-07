@@ -50,7 +50,7 @@
 # Knobs (env, for tests; no workflow may set them -- verify_program_audio_guard.py):
 #   PROGRAM_AUDIO_URL               default http://dev1:8890/program-audio.json
 #   PROGRAM_AUDIO_MAX_AGE_S         default 10   (freshness of camera-box's sample)
-#   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 15   (a FOREIGN seen between two polls)
+#   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 30   (camera-box's FOREIGN latch, checked first)
 #   PROGRAM_AUDIO_HTTP_TIMEOUT_S    default 5
 #   PROGRAM_AUDIO_POLL_S            default 10
 #   PROGRAM_AUDIO_API_BASE          default http://127.0.0.1:8910 (Restreamer's API)
@@ -149,7 +149,9 @@ function Test-ProgramAudio([switch]$BeforeStart) {
 function Read-ProgramAudioVerdict {
   $url = Get-ProgramAudioUrl
   $maxAge = Get-ProgramAudioKnob "PROGRAM_AUDIO_MAX_AGE_S" 10
-  $foreignWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FOREIGN_WINDOW_S" 15
+  # 30 s like camera-box's reference guard: with one tolerated poll, two decisions can
+  # be ~20-25 s apart, and a FOREIGN window between them must still be seen.
+  $foreignWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FOREIGN_WINDOW_S" 30
   $timeout = Get-ProgramAudioKnob "PROGRAM_AUDIO_HTTP_TIMEOUT_S" 5
   try {
     $resp = Invoke-WebRequest -Uri $url -Method GET -UseBasicParsing -TimeoutSec $timeout -Headers @{ "Cache-Control" = "no-cache" }
@@ -169,11 +171,23 @@ function Read-ProgramAudioVerdict {
   }
   $verdict = [string]$j.verdict
   $age = $j.age_s -as [double]
-  if (-not $verdict -or $null -eq $j.age_s -or $j.age_s -is [bool] -or $null -eq $age -or $age -lt 0) {
-    return "malformed: $url has no verdict / non-negative numeric age_s"
+  # >= -1 s like camera-box: a clock-sync step can make a fresh sample read slightly negative.
+  if (-not $verdict -or $null -eq $j.age_s -or $j.age_s -is [bool] -or $null -eq $age -or $age -lt -1) {
+    return "malformed: $url has no verdict / numeric age_s >= -1"
   }
   $line = "verdict=$verdict age_s=$age rms_dbfs=$($j.rms_dbfs) outside_band_pct=$($j.outside_band_pct) " +
-    "markers_decoded=$($j.markers_decoded) marker_chain=$($j.marker_chain) source=$($j.source)"
+    "markers_decoded=$($j.markers_decoded) marker_chain=$($j.marker_chain) " +
+    "last_foreign_age_s=$($j.last_foreign_age_s) source=$($j.source)"
+  # Proof of music FIRST, before anything tolerable: a FOREIGN verdict counts even when
+  # stale, and camera-box's FOREIGN latch beats an UNKNOWN / stale / MEASUREMENT read
+  # (as in camera-box's reference guard). Otherwise music could hide behind the
+  # one-poll tolerance and air between two decisions unseen.
+  if ($verdict -ceq "FOREIGN") { return "FOREIGN: program audio is not the measurement signal -- $line" }
+  $foreignAge = $j.last_foreign_age_s -as [double]
+  if ($null -ne $j.last_foreign_age_s -and $j.last_foreign_age_s -isnot [bool] -and $null -ne $foreignAge -and
+      $foreignAge -le $foreignWindow) {
+    return "FOREIGN: foreign audio ${foreignAge}s ago (window ${foreignWindow}s) -- $line"
+  }
   if ($age -gt $maxAge) { return "stale: sample is ${age}s old (max ${maxAge}s) -- $line" }
   if ($script:ProgramAudioOkVerdicts -notcontains $verdict) { return "${verdict}: program audio is not the measurement signal -- $line" }
   # camera-box (dev dfccef2f8): MEASUREMENT means a QPSK marker chain >= 4 over 4 s.
@@ -181,10 +195,6 @@ function Read-ProgramAudioVerdict {
   # treat it the same here in case such a sampler is ever back.
   if ($verdict -eq "MEASUREMENT" -and $null -eq $j.marker_chain) {
     return "UNKNOWN: MEASUREMENT without marker_chain (an old sampler) -- $line"
-  }
-  $foreignAge = $j.last_foreign_age_s -as [double]
-  if ($null -ne $j.last_foreign_age_s -and $null -ne $foreignAge -and $foreignAge -le $foreignWindow) {
-    return "FOREIGN: foreign audio ${foreignAge}s ago (window ${foreignWindow}s) -- $line"
   }
   Write-Host "[program-audio] OK: $line"
   return $null
@@ -357,6 +367,23 @@ function Test-ProgramAudioObsStopped {
   return $false
 }
 
+# When our OBS stream is already over but the cut is not done (e.g. Restreamer was down
+# in a crash gate): keep trying, bounded by PROGRAM_AUDIO_DELIVERY_BUDGET_S, before the
+# watchdog stops watching. The breach marker records how it ended.
+function Invoke-ProgramAudioDeliveryCutUntilDone {
+  $p = Get-ProgramAudioPaths
+  $budget = Get-ProgramAudioKnob "PROGRAM_AUDIO_DELIVERY_BUDGET_S" 120
+  $deadline = (Get-ProgramAudioNow) + $budget
+  while (-not (Invoke-ProgramAudioDeliveryCut)) {
+    if ((Get-ProgramAudioNow) -ge $deadline) {
+      Add-ProgramAudioBreachLine "delivery cut GAVE UP after ${budget}s once our stream was over -- the job's teardown stops the delivery"
+      return
+    }
+    Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
+    Start-Sleep -Seconds 5
+  }
+}
+
 # After a breach: ask for the stop until Restreamer CONFIRMS OBS stopped, then KEEP
 # watching while the stream is ours: a lost StopStream or an OBS reconnect can put it
 # back on air, and then the stop is re-issued. Never gives up while our stream is
@@ -375,7 +402,7 @@ function Invoke-ProgramAudioBreachStop {
     if (-not (Test-ProgramAudioStreamOwned)) {
       Add-ProgramAudioBreachLine "our stream already ended (marker false) -- not stopping a session that is not ours"
       # The CI event's cached delivery is still ours (by name) and still sends the music.
-      if (-not $cutDone) { $null = Invoke-ProgramAudioDeliveryCut }
+      if (-not $cutDone) { Invoke-ProgramAudioDeliveryCutUntilDone }
       return
     }
     $attempt++
@@ -396,7 +423,7 @@ function Invoke-ProgramAudioBreachStop {
       while ($true) {
         Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
         if (-not (Test-ProgramAudioStreamOwned)) {
-          if (-not $cutDone) { $null = Invoke-ProgramAudioDeliveryCut }
+          if (-not $cutDone) { Invoke-ProgramAudioDeliveryCutUntilDone }
           Write-ProgramAudioLog "our stream is over (marker false) -- watch ended"
           return
         }
