@@ -294,6 +294,14 @@ VERDICT_CASES: list[tuple[str, Reply | None, int, str]] = [
      "WHY=malformed: "),
     ("age_s not a number -> malformed", json_reply(sample(age="fresh")), 1, "WHY=malformed: "),
     ("age_s negative -> malformed", json_reply(sample(age=-3)), 1, "WHY=malformed: "),
+    ("age_s -0.5 (a clock-sync step, camera-box accepts >= -1) -> ok", json_reply(sample(age=-0.5)), 0, "VERDICT-OK"),
+    ("UNKNOWN with FOREIGN 6 s ago -> FOREIGN (the latch beats UNKNOWN)",
+     json_reply(sample("UNKNOWN", markers_decoded=0, marker_chain=0, last_foreign_age_s=6.0)), 1,
+     "WHY=FOREIGN: foreign audio 6s ago"),
+    ("a stale FOREIGN -> FOREIGN (not a tolerable stale)", json_reply(sample("FOREIGN", age=12.5)), 1,
+     "WHY=FOREIGN: program audio is not the measurement signal"),
+    ("MEASUREMENT with FOREIGN 25 s ago -> FOREIGN (30 s latch window)",
+     json_reply(sample(last_foreign_age_s=25.0)), 1, "WHY=FOREIGN: foreign audio 25s ago"),
     ("age_s a JSON true -> malformed", json_reply(sample(age=True)), 1, "WHY=malformed: "),
     ("MEASUREMENT without marker_chain (an old sampler) -> UNKNOWN",
      json_reply({k: v for k, v in sample().items() if k != "marker_chain"}), 1,
@@ -773,6 +781,22 @@ def wd_foreign_after_measurement_is_immediate(job: Env, st: MockState, srv: Mock
     return probs
 
 
+def wd_latched_foreign_behind_unknown(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # camera-box heard music, then went blind (UNKNOWN, latch 8 s), then MEASUREMENT with
+    # the latch at 19 s: the music must not hide behind the UNKNOWN tolerance.
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    st.sampler_script = [json_reply(sample("UNKNOWN", markers_decoded=0, marker_chain=0, last_foreign_age_s=8.0)),
+                         json_reply(sample(last_foreign_age_s=19.0))]
+    probs = []
+    if not wait_breach(job, "BREACH: FOREIGN: foreign audio 8s ago", 10):
+        probs.append("a latched FOREIGN behind an UNKNOWN was tolerated / missed")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
 START_PROBE = PROBE.replace("Test-ProgramAudio)", "Test-ProgramAudio -BeforeStart)")
 
 
@@ -826,6 +850,7 @@ WATCHDOG_CASES = [
     ("tolerance: ONE UNKNOWN between two MEASUREMENTs -> no stop", wd_one_unknown_between_measurements),
     ("tolerance: two UNKNOWNs in a row -> stop", wd_two_unknowns_stop),
     ("tolerance: FOREIGN after MEASUREMENT -> immediate stop", wd_foreign_after_measurement_is_immediate),
+    ("tolerance: a FOREIGN latch behind an UNKNOWN -> immediate stop", wd_latched_foreign_behind_unknown),
     ("pre-start: rides over a startup UNKNOWN within the retry window", pre_start_rides_over_startup_unknown),
     ("pre-start: a lasting UNKNOWN is refused after the retry window", pre_start_refuses_lasting_unknown),
     ("pre-start: FOREIGN is refused at once (no retry)", pre_start_refuses_foreign_at_once),
