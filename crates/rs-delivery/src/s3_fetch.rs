@@ -235,6 +235,53 @@ mod tests {
         );
     }
 
+    /// A fetcher whose endpoint refuses every connection (the port was bound
+    /// and released): each request fails at once with a transport error.
+    async fn refusing_fetcher() -> S3Fetcher {
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(2)).unwrap()
+    }
+
+    /// A transport error is never "absent", even when its text contains "404":
+    /// reqwest's message carries the URL, so a failed GET of chunk 404 / 1404 /
+    /// 4041 read as a clean 404 = genuine exhaustion on the VPS (a false rescue
+    /// while the stream still exists on S3). Main CI 37686250955 hit the same
+    /// misread through a random port containing "404".
+    #[tokio::test]
+    async fn a_failed_get_of_chunk_404_is_an_error_not_absent() {
+        let fetcher = refusing_fetcher().await;
+        for chunk_id in [404, 1404, 4041] {
+            let r = fetcher.fetch_chunk_with_meta(chunk_id).await;
+            assert!(
+                matches!(r, Err(S3FetchError::Fetch(_))),
+                "chunk {chunk_id}: a refused GET must be Err(Fetch), got {:?}",
+                r.map(|o| o.is_some())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_head_of_chunk_404_is_an_error_not_absent() {
+        let fetcher = refusing_fetcher().await;
+        for chunk_id in [404, 1404, 4041] {
+            let r = fetcher.head_chunk_duration(chunk_id).await;
+            assert!(
+                matches!(r, Err(S3FetchError::Fetch(_))),
+                "chunk {chunk_id}: a refused HEAD must be Err(Fetch), got {r:?}"
+            );
+        }
+    }
+
     #[test]
     fn chunk_data_has_lifecycle_header_fields() {
         // Compile-time assertion: ChunkData carries host_emit_ts and

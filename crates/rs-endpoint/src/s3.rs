@@ -591,6 +591,22 @@ mod tests {
         .unwrap()
     }
 
+    /// A transport error is never "absent", even when its text contains "404"
+    /// or "not found": reqwest's message carries the URL (key + port), so a
+    /// refused GET of `delivery-logs/vps-404.log` used to read as Ok(None).
+    #[tokio::test]
+    async fn get_object_string_refused_is_an_error_not_absent() {
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = test_s3_client(&format!("http://127.0.0.1:{port}"));
+        for key in ["delivery-logs/vps-404.log", "delivery-logs/not found.log"] {
+            let r = client.get_object_string(key).await;
+            assert!(r.is_err(), "{key}: a refused GET must be Err, got {r:?}");
+        }
+    }
+
     #[test]
     fn rescue_video_key_from_url_extracts_key_for_own_bucket() {
         let client = test_s3_client("http://localhost:9000");
