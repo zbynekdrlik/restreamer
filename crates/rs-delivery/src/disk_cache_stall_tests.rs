@@ -298,8 +298,9 @@ fn rescue_activated(ring: &Arc<AuditRing>) -> bool {
 async fn run_real_cache_until_rescue(
     backend: Arc<dyn S3Backend>,
     alias: &str,
-) -> (Arc<AuditRing>, Stats) {
+) -> (Arc<AuditRing>, Stats, String) {
     tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let tmp = tempfile::tempdir().expect("tempdir");
     let fetcher = real_fetcher(backend, &tmp, alias, None).await;
 
@@ -307,6 +308,7 @@ async fn run_real_cache_until_rescue(
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
     let buffer_state = Arc::new(BufferState::new());
     let (stop_tx, stop_rx) = watch::channel(false);
+    let bs_probe = buffer_state.clone();
 
     let stats_clone = stats.clone();
     let ring_clone = ring.clone();
@@ -339,10 +341,26 @@ async fn run_real_cache_until_rescue(
         }
     }
 
+    // What the endpoint did, for the assertion message: this test missed its
+    // rescue once under tarpaulin (Coverage, PR run 37573325249) and printed
+    // nothing else (tracing is not initialised in tests).
+    let diag = {
+        let (rows, _) = ring.since(0);
+        let s = stats.lock().await;
+        format!(
+            "after {:?} virtual: producer_active={}, delivery_mode={:?}, audit actions={:?}",
+            started.elapsed(),
+            bs_probe.producer_active.load(AtomicOrdering::Relaxed),
+            s.delivery_mode,
+            rows.iter()
+                .map(|r| format!("{:?}", r.action))
+                .collect::<Vec<_>>()
+        )
+    };
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     // `tmp` dropped here — after the endpoint task has been joined/aborted.
-    (ring, stats)
+    (ring, stats, diag)
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +500,7 @@ async fn erroring_s3_activates_rescue_through_real_disk_cache_path() {
     // errors persistently. Rescue MUST activate through the REAL
     // DiskCacheFetcher path (the mock-fetcher Group B equivalent passed
     // while prod was broken — the wedge is below the mock).
-    let (ring, stats) = run_real_cache_until_rescue(
+    let (ring, stats, diag) = run_real_cache_until_rescue(
         Arc::new(ServeThenErrorBackend { available_up_to: 3 }),
         "real-cache-err",
     )
@@ -491,7 +509,7 @@ async fn erroring_s3_activates_rescue_through_real_disk_cache_path() {
     assert!(
         rescue_activated(&ring),
         "#284/#280 REGRESSION: RescueActivated never emitted on an \
-         error-shaped S3 outage through the real disk-cache path"
+         error-shaped S3 outage through the real disk-cache path ({diag})"
     );
     let s = stats.lock().await;
     assert_eq!(
@@ -511,7 +529,7 @@ async fn genuine_exhaustion_404_activates_rescue_through_real_disk_cache_path() 
     // The #280 operator scenario shape: source dies, uploads stop, S3 is
     // healthy and clean-404s past the last chunk. The VPS must exhaust and
     // rescue — through the REAL DiskCacheFetcher + DownloadService path.
-    let (ring, stats) = run_real_cache_until_rescue(
+    let (ring, stats, diag) = run_real_cache_until_rescue(
         Arc::new(ExhaustingBackend { available_up_to: 3 }),
         "real-cache-404",
     )
@@ -520,7 +538,7 @@ async fn genuine_exhaustion_404_activates_rescue_through_real_disk_cache_path() 
     assert!(
         rescue_activated(&ring),
         "genuine chunk exhaustion (clean 404 past the last chunk) must \
-         activate rescue through the real disk-cache path"
+         activate rescue through the real disk-cache path ({diag})"
     );
     let s = stats.lock().await;
     assert_eq!(
