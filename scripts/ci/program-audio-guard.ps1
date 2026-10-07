@@ -53,6 +53,7 @@
 #   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 30   (camera-box's FOREIGN latch, checked first)
 #   PROGRAM_AUDIO_HTTP_TIMEOUT_S    default 5
 #   PROGRAM_AUDIO_POLL_S            default 10
+#   PROGRAM_AUDIO_FLAP_WINDOW_S     default 60   (3 tolerated non-OK polls in it = breach)
 #   PROGRAM_AUDIO_API_BASE          default http://127.0.0.1:8910 (Restreamer's API)
 #   PROGRAM_AUDIO_DELIVERY_BUDGET_S default 120  (wait for the CI event's instances to go)
 # The job env's EVENT_NAME names the CI event whose delivery a breach cuts; only the
@@ -450,17 +451,31 @@ function Invoke-ProgramAudioWatchdogLoop {
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
   Write-ProgramAudioLog "watchdog up (pid $PID, poll ${poll}s, $(Get-ProgramAudioUrl))"
   $tolerated = $null
+  # ROZHODNUTE 2026-10-07 (3rd): 3+ tolerated non-OK polls within ANY flap window
+  # (60 s) are a breach even when never two in a row -- a flapping classifier fails closed.
+  $flapWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FLAP_WINDOW_S" 60
+  $flaps = @()
   while ($true) {
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     $why = Read-ProgramAudioVerdict
-    if ($why -and (Test-ProgramAudioTolerable $why) -and $null -eq $tolerated) {
+    $tolerable = [bool]($why -and (Test-ProgramAudioTolerable $why))
+    if ($tolerable) {
+      $now = Get-ProgramAudioNow
+      $flaps = @($flaps | Where-Object { $_ -ge $now - $flapWindow }) + $now
+      if ($flaps.Count -ge 3) {
+        $why = "$why ($($flaps.Count) tolerated non-OK polls within ${flapWindow}s: a flapping classifier)"
+        $tolerable = $false      # no further tolerance: this poll is a breach
+        $tolerated = $null
+      }
+    }
+    if ($tolerable -and $null -eq $tolerated) {
       # The first non-OK poll that is not proof of music: tolerated; the next decides.
       $tolerated = $why
       Write-ProgramAudioLog "tolerating ONE poll (the next non-OK one stops): $why"
       Start-Sleep -Seconds $poll
       continue
     }
-    if ($why -and $null -ne $tolerated -and (Test-ProgramAudioTolerable $why)) {
+    if ($tolerable -and $null -ne $tolerated) {
       $why = "$why (second non-OK poll in a row; the first: $tolerated)"
     }
     $tolerated = $null

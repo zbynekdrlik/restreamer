@@ -155,7 +155,10 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     - FOREIGN, or any unexpected verdict, stops at once;
     - one UNKNOWN, stale, unreachable or malformed poll is tolerated, and the SECOND in a
       row stops (`Test-ProgramAudioTolerable`). A 4 s NDI gap does not kill a run; a real
-      classifier outage stops within ~20 s.
+      classifier outage stops within ~20 s;
+    - 3 or more tolerated polls within any 60 s window (`PROGRAM_AUDIO_FLAP_WINDOW_S`) are
+      a breach even when never two in a row (third ROZHODNUTE): a flapping classifier
+      fails closed.
   - **Before StartStream it is strict.** Start-OurStream runs `Test-ProgramAudio
     -BeforeStart` right before StartStream, after readiness. That covers Start and every
     Republish.
