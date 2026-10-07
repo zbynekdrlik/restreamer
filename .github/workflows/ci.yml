@@ -4123,12 +4123,19 @@ jobs:
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          # Phase 1: Wait for VPS warmup to complete (delivery_mode == "normal").
+          # Phase 1: Wait for VPS warmup to complete (delivery_mode normal/refilling).
           # After the start_chunk_id=live-edge fix (#118), current_chunk_id is set
           # to max_seq+1 BEFORE warmup runs, so "chunk_id > 1" is no longer a
           # reliable "warmup done" signal. Gate instead on delivery_mode flipping
-          # from "warmup" to "normal" on all non-fast endpoints.
-          Write-Host "Waiting for VPS warmup to finish (delivery_mode == 'normal')..."
+          # out of "warmup" on all non-fast endpoints.
+          # Warmup is over once the mode is "normal" OR "refilling". #296: right
+          # after the disk-cache prefill a buffered endpoint below its 120 s
+          # target delivers slightly slower to rebuild the cushion, so it goes
+          # prefill -> refilling, often within seconds. Waiting for "normal" only
+          # raced that (run 37692367442: prefill_ready 22:51:00, refill_started
+          # 22:51:38, this check began 22:51:48 and saw "refilling" for 300 s;
+          # the green runs merely polled before refill started).
+          Write-Host "Waiting for VPS warmup to finish (delivery_mode normal or refilling)..."
           $maxWait = 60
           $bufferReady = $false
           for ($i = 1; $i -le $maxWait; $i++) {
@@ -4141,7 +4148,7 @@ jobs:
                 if (-not $ep.is_fast) {
                   $foundEndpoint = $true
                   $modes += "$($ep.alias)=$($ep.delivery_mode)"
-                  if ($ep.delivery_mode -ne "normal") { $allNormal = $false }
+                  if (@("normal", "refilling") -notcontains $ep.delivery_mode) { $allNormal = $false }
                 }
               }
             }
@@ -4151,7 +4158,7 @@ jobs:
               break
             }
             if ($i % 5 -eq 0) {
-              Write-Host "  Attempt $($i)/$($maxWait): $($modes -join ', ') (waiting for all normal)"
+              Write-Host "  Attempt $($i)/$($maxWait): $($modes -join ', ') (waiting for all normal/refilling)"
             }
             Start-Sleep -Seconds 5
           }
