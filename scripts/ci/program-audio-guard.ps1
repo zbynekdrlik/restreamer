@@ -33,6 +33,10 @@
 #                                POST only queues the command), then keeps watching and
 #                                re-stops if OBS streams again. It never gives up while
 #                                the stream is ours; the teardown (or the job end) ends it.
+#                                It ALSO cuts the CI event's delivery (delivery stop +
+#                                deactivate, then no instance left), because the 120 s
+#                                cache would keep sending the music (ROZHODNUTE
+#                                2026-10-07); a non-CI event is never touched.
 #   Assert-NoProgramAudioBreach  fails the step (::error:: + job summary) when the
 #                                breach marker exists, or when the watchdog died or hung
 #                                (an unguarded stream is a failure too).
@@ -49,8 +53,10 @@
 #   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 15   (a FOREIGN seen between two polls)
 #   PROGRAM_AUDIO_HTTP_TIMEOUT_S    default 5
 #   PROGRAM_AUDIO_POLL_S            default 10
-#   PROGRAM_AUDIO_STOP_URL          default Restreamer's stop-stream API on 127.0.0.1:8910
-#   PROGRAM_AUDIO_OBS_STATUS_URL    default http://127.0.0.1:8910/api/v1/obs/status
+#   PROGRAM_AUDIO_API_BASE          default http://127.0.0.1:8910 (Restreamer's API)
+#   PROGRAM_AUDIO_DELIVERY_BUDGET_S default 120  (wait for the CI event's instances to go)
+# The job env's EVENT_NAME names the CI event whose delivery a breach cuts; only the
+# CI-owned E2E events ($script:ProgramAudioCiEvents) are ever touched.
 #
 # The stop-stream call lives ONLY in Invoke-ProgramAudioStop: the #374 guard
 # (verify_no_obs_mutation.py) bans that API everywhere else.
@@ -60,6 +66,9 @@ param([switch]$RunWatchdog)
 
 $script:ProgramAudioGuardScript = $PSCommandPath
 $script:ProgramAudioOkVerdicts = @("MEASUREMENT", "SILENT")
+# The CI-owned E2E events (ci.yml EVENT_NAME of the OBS-streaming jobs; pinned by
+# verify_program_audio_guard.py). A breach never cuts the delivery of any other event.
+$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")
 
 function Get-ProgramAudioKnob([string]$name, [int]$default) {
   # -as [int] yields $null (never throws) on a blank or non-numeric override; a $null
@@ -117,12 +126,27 @@ function Read-ProgramAudioFile([string]$path) {
   return ""
 }
 
-# One read of camera-box's verdict. $null = OK to stream; otherwise the reason.
+# Test-ProgramAudio = one read. -BeforeStart (right before every StartStream) is
+# strict: any non-OK verdict refuses. It refuses at once after an earlier breach / a
+# dead watchdog in this job, and on FOREIGN; a tolerable verdict (a startup UNKNOWN, a
+# blip) is re-read every 2 s for up to PROGRAM_AUDIO_START_RETRY_S (15) first.
 function Test-ProgramAudio([switch]$BeforeStart) {
-  if ($BeforeStart) {
-    $prior = Get-ProgramAudioGuardFailure
-    if ($prior) { return "earlier in this job: $prior" }
+  if (-not $BeforeStart) { return Read-ProgramAudioVerdict }
+  $prior = Get-ProgramAudioGuardFailure
+  if ($prior) { return "earlier in this job: $prior" }
+  $window = Get-ProgramAudioKnob "PROGRAM_AUDIO_START_RETRY_S" 15
+  $deadline = (Get-ProgramAudioNow) + $window
+  while ($true) {
+    $why = Read-ProgramAudioVerdict
+    if (-not $why -or -not (Test-ProgramAudioTolerable $why)) { return $why }
+    if ((Get-ProgramAudioNow) -ge $deadline) { return "$why (still not OK after a ${window}s pre-start retry)" }
+    Write-Host "[program-audio] not OK yet, re-reading before the start: $why"
+    Start-Sleep -Seconds 2
   }
+}
+
+# One read of camera-box's verdict. $null = OK to stream; otherwise the reason.
+function Read-ProgramAudioVerdict {
   $url = Get-ProgramAudioUrl
   $maxAge = Get-ProgramAudioKnob "PROGRAM_AUDIO_MAX_AGE_S" 10
   $foreignWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FOREIGN_WINDOW_S" 15
@@ -148,9 +172,16 @@ function Test-ProgramAudio([switch]$BeforeStart) {
   if (-not $verdict -or $null -eq $j.age_s -or $j.age_s -is [bool] -or $null -eq $age -or $age -lt 0) {
     return "malformed: $url has no verdict / non-negative numeric age_s"
   }
-  $line = "verdict=$verdict age_s=$age rms_dbfs=$($j.rms_dbfs) outside_band_pct=$($j.outside_band_pct) source=$($j.source)"
+  $line = "verdict=$verdict age_s=$age rms_dbfs=$($j.rms_dbfs) outside_band_pct=$($j.outside_band_pct) " +
+    "markers_decoded=$($j.markers_decoded) marker_chain=$($j.marker_chain) source=$($j.source)"
   if ($age -gt $maxAge) { return "stale: sample is ${age}s old (max ${maxAge}s) -- $line" }
   if ($script:ProgramAudioOkVerdicts -notcontains $verdict) { return "${verdict}: program audio is not the measurement signal -- $line" }
+  # camera-box (dev dfccef2f8): MEASUREMENT means a QPSK marker chain >= 4 over 4 s.
+  # One without `marker_chain` comes from an old sampler and is served as UNKNOWN;
+  # treat it the same here in case such a sampler is ever back.
+  if ($verdict -eq "MEASUREMENT" -and $null -eq $j.marker_chain) {
+    return "UNKNOWN: MEASUREMENT without marker_chain (an old sampler) -- $line"
+  }
   $foreignAge = $j.last_foreign_age_s -as [double]
   if ($null -ne $j.last_foreign_age_s -and $null -ne $foreignAge -and $foreignAge -le $foreignWindow) {
     return "FOREIGN: foreign audio ${foreignAge}s ago (window ${foreignWindow}s) -- $line"
@@ -159,16 +190,22 @@ function Test-ProgramAudio([switch]$BeforeStart) {
   return $null
 }
 
-# A transport-class failure (not a content verdict) is re-read once before it counts.
-function Test-ProgramAudioTransportFailure([string]$why) {
-  return ($why -like "unreachable:*" -or $why -like "stale:*" -or $why -like "malformed:*")
+# Not proof of music: UNKNOWN (camera-box's first 4 s after a sampler start or an NDI
+# receive gap), a stale sample, an unreachable or malformed sampler. ROZHODNUTE
+# 2026-10-07: while streaming, ONE such poll is tolerated and the SECOND in a row
+# stops; FOREIGN (and any unexpected verdict) stops at once.
+function Test-ProgramAudioTolerable([string]$why) {
+  return ($why -clike "UNKNOWN:*" -or $why -like "unreachable:*" -or $why -like "stale:*" -or $why -like "malformed:*")
 }
 
 # ::error:: plus the job summary, so the reason is visible without opening the log.
 function Write-ProgramAudioError([string]$context, [string]$why) {
   Write-Host "::error::program-audio guard (#379): $context -- $why"
   if ($env:GITHUB_STEP_SUMMARY) {
-    $md = "### Program-audio guard (#379): $context`n`n``$why```n"
+    # One bullet per breach-marker line (" | "-joined): every step of the stop and the
+    # delivery cut is visible in the job summary.
+    $md = "### Program-audio guard (#379): $context`n`n"
+    foreach ($line in ($why -split " \| ")) { $md += "- ``$line```n" }
     $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
   }
 }
@@ -186,13 +223,16 @@ function Test-ProgramAudioStreamOwned {
   return ((Read-ProgramAudioFile $p.Owned) -ne "false")
 }
 
+function Get-ProgramAudioApiBase {
+  if ($env:PROGRAM_AUDIO_API_BASE) { return $env:PROGRAM_AUDIO_API_BASE.TrimEnd("/") }
+  return "http://127.0.0.1:8910"
+}
+
 # The ONE call to Restreamer's stop-stream API (the #374 guard confines it here).
 # Returns "" when Restreamer accepted the command (it only QUEUES it), else the error.
 function Invoke-ProgramAudioStop {
-  $stopUrl = $env:PROGRAM_AUDIO_STOP_URL
-  if (-not $stopUrl) { $stopUrl = "http://127.0.0.1:8910/api/v1/obs/stop-stream" }
   try {
-    $null = Invoke-WebRequest -Uri $stopUrl -Method POST -UseBasicParsing -TimeoutSec 5 -Body ""
+    $null = Invoke-WebRequest -Uri "$(Get-ProgramAudioApiBase)/api/v1/obs/stop-stream" -Method POST -UseBasicParsing -TimeoutSec 5 -Body ""
     return ""
   } catch {
     return $_.Exception.Message
@@ -202,15 +242,91 @@ function Invoke-ProgramAudioStop {
 # Restreamer's read of OBS: $true / $false, or $null when it cannot tell (Restreamer
 # down, its OBS client not connected, no answer).
 function Get-ProgramAudioObsStreaming {
-  $url = $env:PROGRAM_AUDIO_OBS_STATUS_URL
-  if (-not $url) { $url = "http://127.0.0.1:8910/api/v1/obs/status" }
   try {
-    $s = Invoke-RestMethod -Uri $url -Method GET -TimeoutSec 5
+    $s = Invoke-RestMethod -Uri "$(Get-ProgramAudioApiBase)/api/v1/obs/status" -Method GET -TimeoutSec 5
   } catch {
     return $null
   }
   if ($null -eq $s -or $s.connected -ne $true -or $s.streaming -isnot [bool]) { return $null }
   return $s.streaming
+}
+
+# Delivery instances of one event still alive, or $null when Restreamer cannot answer.
+function Get-ProgramAudioEventInstances([long]$eventId) {
+  try {
+    # `(...) | ForEach-Object { $_ }` flattens: a JSON array can come back as ONE object.
+    $all = @((Invoke-RestMethod -Uri "$(Get-ProgramAudioApiBase)/api/v1/delivery/instances" -Method GET -TimeoutSec 10) |
+      ForEach-Object { $_ })
+  } catch {
+    return $null
+  }
+  # The comma keeps an EMPTY result an empty array: a function returning @() yields $null.
+  return , @($all | Where-Object { $null -ne $_ -and [string]$_.event_id -eq [string]$eventId })
+}
+
+# ROZHODNUTE 2026-10-07 (#379): stopping OBS stops NEW input only; the CI event's
+# 120 s cache would keep sending the music to the platform. So the breach also stops
+# the CI event's delivery and deactivates it, then confirms none of its delivery
+# instances is left. ONLY a CI-owned E2E event (by the job's EVENT_NAME) is ever
+# touched; anything else is REFUSED. These are the ONLY delivery-stop / deactivate
+# calls in this file (verify_program_audio_guard.py confines them here).
+# Returns $true when finished (cut confirmed, or refused), $false to retry later.
+function Invoke-ProgramAudioDeliveryCut {
+  $name = [string]$env:EVENT_NAME
+  if ($script:ProgramAudioCiEvents -cnotcontains $name) {
+    Add-ProgramAudioBreachLine ("delivery cut REFUSED: the job's EVENT_NAME '$name' is not a CI-owned E2E event " +
+      "($($script:ProgramAudioCiEvents -join ', ')) -- not touching it")
+    return $true
+  }
+  $base = Get-ProgramAudioApiBase
+  try {
+    $ev = (Invoke-RestMethod -Uri "$base/api/v1/events" -Method GET -TimeoutSec 10) | ForEach-Object { $_ } |
+      Where-Object { $null -ne $_ -and $_.name -ceq $name } | Select-Object -First 1
+  } catch {
+    Write-ProgramAudioLog "delivery cut: events unreadable: $($_.Exception.Message)"
+    return $false
+  }
+  if ($null -eq $ev) {
+    Add-ProgramAudioBreachLine "delivery cut: no event named '$name' -- nothing of ours to cut"
+    return $true
+  }
+  $id = $ev.id -as [long]
+  if ($null -eq $id -or $id -le 0) {
+    Add-ProgramAudioBreachLine "delivery cut REFUSED: event '$name' has no usable id"
+    return $true
+  }
+  try {
+    $body = @{ event_id = $id } | ConvertTo-Json -Compress
+    $null = Invoke-WebRequest -Uri "$base/api/v1/delivery/stop" -Method POST -UseBasicParsing -TimeoutSec 60 -Body $body -ContentType "application/json"
+  } catch {
+    Write-ProgramAudioLog "delivery cut: delivery stop for event $name (id $id) failed: $($_.Exception.Message)"
+    return $false
+  }
+  Add-ProgramAudioBreachLine "delivery stop OK: event $name (id $id)"
+  try {
+    $null = Invoke-WebRequest -Uri "$base/api/v1/events/$id/deactivate" -Method POST -UseBasicParsing -TimeoutSec 10 -Body ""
+  } catch {
+    Write-ProgramAudioLog "delivery cut: deactivating event $name (id $id) failed: $($_.Exception.Message)"
+    return $false
+  }
+  Add-ProgramAudioBreachLine "event $name (id $id) deactivated"
+  $budget = Get-ProgramAudioKnob "PROGRAM_AUDIO_DELIVERY_BUDGET_S" 120
+  $deadline = (Get-ProgramAudioNow) + $budget
+  $left = $null
+  while ($true) {
+    $left = Get-ProgramAudioEventInstances $id
+    if ($null -ne $left -and $left.Count -eq 0) {
+      Add-ProgramAudioBreachLine "delivery CUT CONFIRMED: no delivery instance of event $name (id $id) left"
+      return $true
+    }
+    if ((Get-ProgramAudioNow) -ge $deadline) { break }
+    Write-ProgramAudioFile (Get-ProgramAudioPaths).Heartbeat "$(Get-ProgramAudioNow)"
+    Start-Sleep -Seconds 5
+  }
+  $n = "?"
+  if ($null -ne $left) { $n = $left.Count }
+  Add-ProgramAudioBreachLine "delivery cut NOT confirmed: $n instance(s) of event $name (id $id) still listed after ${budget}s -- retrying"
+  return $false
 }
 
 function Write-ProgramAudioLog([string]$text) {
@@ -253,27 +369,38 @@ function Invoke-ProgramAudioBreachStop {
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
   $attempt = 0
   $confirmed = $false
+  $cutDone = $false
   while ($true) {
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     if (-not (Test-ProgramAudioStreamOwned)) {
       Add-ProgramAudioBreachLine "our stream already ended (marker false) -- not stopping a session that is not ours"
+      # The CI event's cached delivery is still ours (by name) and still sends the music.
+      if (-not $cutDone) { $null = Invoke-ProgramAudioDeliveryCut }
       return
     }
     $attempt++
     $err = Invoke-ProgramAudioStop
     if ($err) { Write-ProgramAudioLog "stop-stream attempt $attempt failed: $err" }
-    if (Test-ProgramAudioObsStopped) {
+    $stopped = Test-ProgramAudioObsStopped
+    if ($stopped) {
       $word = "CONFIRMED"
       if ($confirmed) { $word = "re-CONFIRMED" }
       Add-ProgramAudioBreachLine "stop ${word}: Restreamer reports OBS not streaming (stop-stream attempt $attempt)"
       $confirmed = $true
+    }
+    # Normally right after the confirmed OBS stop; but an unconfirmed stop must not keep
+    # the cached music going out either, so it runs on every round until it is done.
+    if (-not $cutDone) { $cutDone = Invoke-ProgramAudioDeliveryCut }
+    if ($stopped) {
       # Watch until our stream is over; back to the stop loop if OBS streams again.
       while ($true) {
         Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
         if (-not (Test-ProgramAudioStreamOwned)) {
+          if (-not $cutDone) { $null = Invoke-ProgramAudioDeliveryCut }
           Write-ProgramAudioLog "our stream is over (marker false) -- watch ended"
           return
         }
+        if (-not $cutDone) { $cutDone = Invoke-ProgramAudioDeliveryCut }
         Start-Sleep -Seconds $poll
         if ((Get-ProgramAudioObsStreaming) -eq $true) {
           Add-ProgramAudioBreachLine "OBS is streaming AGAIN after the confirmed stop -- re-issuing the stop"
@@ -295,14 +422,21 @@ function Invoke-ProgramAudioWatchdogLoop {
   $p = Get-ProgramAudioPaths
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
   Write-ProgramAudioLog "watchdog up (pid $PID, poll ${poll}s, $(Get-ProgramAudioUrl))"
+  $tolerated = $null
   while ($true) {
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
-    $why = Test-ProgramAudio
-    if ($why -and (Test-ProgramAudioTransportFailure $why)) {
-      Write-ProgramAudioLog "re-reading once after: $why"
-      Start-Sleep -Seconds 2
-      $why = Test-ProgramAudio
+    $why = Read-ProgramAudioVerdict
+    if ($why -and (Test-ProgramAudioTolerable $why) -and $null -eq $tolerated) {
+      # The first non-OK poll that is not proof of music: tolerated; the next decides.
+      $tolerated = $why
+      Write-ProgramAudioLog "tolerating ONE poll (the next non-OK one stops): $why"
+      Start-Sleep -Seconds $poll
+      continue
     }
+    if ($why -and $null -ne $tolerated -and (Test-ProgramAudioTolerable $why)) {
+      $why = "$why (second non-OK poll in a row; the first: $tolerated)"
+    }
+    $tolerated = $null
     if ($why -and -not (Test-ProgramAudioStreamOwned)) {
       # Not our stream (a republish gap, a refused restart, after our stop): nothing of
       # ours is on a platform, and a session that is not ours is never stopped. The

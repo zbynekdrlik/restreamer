@@ -43,7 +43,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verify_no_obs_mutation import norm_if, strip_comments  # noqa: E402  (the #374 guard's helpers)
+from verify_no_obs_mutation import function_spans, norm_if, owner_at, strip_comments  # noqa: E402  (#374 helpers)
 
 WORKFLOWS = Path(".github/workflows")
 CI = WORKFLOWS / "ci.yml"
@@ -194,8 +194,75 @@ def check_workflows(root: Path) -> list[str]:
     return errs
 
 
+# ROZHODNUTE 2026-10-07 (#379): a breach also cuts the CI event's delivery. These two
+# Restreamer calls are allowed ONCE each, in the guard's Invoke-ProgramAudioDeliveryCut
+# only, which only Invoke-ProgramAudioBreachStop may call, and which REFUSES any event
+# whose name is not in $script:ProgramAudioCiEvents -- a list that must equal the
+# EVENT_NAME of the OBS-streaming jobs exactly. No other scripts/ci file may use them.
+BREACH_API = ("/api/v1/delivery/stop", "/deactivate")
+CUT_FN = "Invoke-ProgramAudioDeliveryCut"
+CUT_CALLER = "Invoke-ProgramAudioBreachStop"
+CI_EVENTS = re.compile(r'(?m)^\$script:ProgramAudioCiEvents = @\((?P<names>[^)\n]*)\)\s*$')
+CI_GATE = re.compile(r'if \(\$script:ProgramAudioCiEvents -cnotcontains \$name\) \{[^}]*?return \$true\s*\}', re.S)
+
+
+def check_breach_api(root: Path, event_names: set[str]) -> list[str]:
+    path = root / GUARD
+    if not path.is_file():
+        return []
+    code = strip_comments(path.read_text(encoding="utf-8"))
+    spans = function_spans(code)
+    errs = []
+    for api in BREACH_API:
+        hits = [m.start() for m in re.finditer(re.escape(api), code, re.I)]
+        if len(hits) != 1 or owner_at(spans, hits[0]) != CUT_FN:
+            errs.append(f"{GUARD}: `{api}` must appear exactly ONCE, inside {CUT_FN} "
+                        f"(found {len(hits)}x, in {[owner_at(spans, h) for h in hits]})")
+    calls = [m.start() for m in re.finditer(rf"(?<![\w-]){re.escape(CUT_FN)}(?![\w-])", code)]
+    callers = [owner_at(spans, c) for c in calls if not re.match(r"function\s", code[max(0, c - 9):c + 1])]
+    callers = [c for c in callers if c != CUT_FN]
+    if not callers or any(c != CUT_CALLER for c in callers):
+        errs.append(f"{GUARD}: {CUT_FN} may only be called from {CUT_CALLER} (the breach path); callers: {callers}")
+    body = next((code[a:b] for n, a, b in spans if n == CUT_FN), "")
+    gate = CI_GATE.search(body)
+    first_http = body.find("Invoke-RestMethod")
+    if not gate or (first_http >= 0 and gate.start() > first_http):
+        errs.append(f"{GUARD}: {CUT_FN} must REFUSE a non-CI EVENT_NAME (-cnotcontains ... return $true) "
+                    "before any Restreamer call")
+    m = CI_EVENTS.search(code)
+    listed = set(re.findall(r'"([^"]+)"', m.group("names"))) if m else set()
+    if not m:
+        errs.append(f"{GUARD}: $script:ProgramAudioCiEvents (the CI-owned E2E events) is missing")
+    elif listed != event_names:
+        errs.append(f"{GUARD}: $script:ProgramAudioCiEvents {sorted(listed)} must equal the OBS-streaming jobs' "
+                    f"EVENT_NAME {sorted(event_names)} (only CI-owned events may ever be cut)")
+    for f in sorted((root / SCRIPTS / "ci").glob("*.ps1")):
+        if f.name == GUARD.name:
+            continue
+        text = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
+        for api in BREACH_API:
+            if api in text:
+                errs.append(f"scripts/ci/{f.name}: `{api}` is allowed only in {GUARD} {CUT_FN}")
+    return errs
+
+
+def streaming_event_names(root: Path) -> tuple[set[str], list[str]]:
+    wf = yaml.safe_load((root / CI).read_text(encoding="utf-8")) or {}
+    names, errs = set(), []
+    for jn, job in (wf.get("jobs") or {}).items():
+        if any("\n".join(run_lines(s)) == START_RUN for s in job.get("steps") or []):
+            name = (job.get("env") or {}).get("EVENT_NAME")
+            if not name:
+                errs.append(f"ci.yml {jn}: streams OBS but has no job env EVENT_NAME (the delivery cut needs it)")
+            else:
+                names.add(str(name))
+    return names, errs
+
+
 def check(root: Path) -> list[str]:
-    return check_obs_stream(root) + check_guard_file(root) + check_workflows(root)
+    names, errs = streaming_event_names(root)
+    return (check_obs_stream(root) + check_guard_file(root) + check_workflows(root) + errs
+            + check_breach_api(root, names))
 
 
 # ---------------------------------------------------------------- self-test --
@@ -265,13 +332,31 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      # Dedicated event", "PROGRAM_AUDIO_* knob"),
     ("a run block relaxes the freshness limit", "          Start-ProgramAudioWatchdog",
      "          $env:PROGRAM_AUDIO_MAX_AGE_S = '3600'\n          Start-ProgramAudioWatchdog", "PROGRAM_AUDIO_* knob"),
+    ("the FB job's event is renamed (not in the CI list)", '      EVENT_NAME: "E2E-FB-Test"',
+     '      EVENT_NAME: "Nedelna bohosluzba"', "must equal the OBS-streaming"),
+    ("a streaming job loses its EVENT_NAME", '      EVENT_NAME: "E2E-FB-Test"\n', "",
+     "has no job env EVENT_NAME"),
     ("the mock test is not run", "        run: python tests/ci/test_program_audio_guard.py", "        run: echo skipped",
      "must run `python tests/ci/test_program_audio_guard.py`"),
 ]
 GUARD_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("the teardown function is gone", "function Stop-ProgramAudioWatchdog {", "function Stop-Something {",
      "Stop-ProgramAudioWatchdog is missing"),
+    ("the delivery stop moves out of the cut function", "function Invoke-ProgramAudioDeliveryCut {",
+     'function Stop-AnyDelivery { Invoke-WebRequest -Method POST -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" }\n'
+     "function Invoke-ProgramAudioDeliveryCut {", "`/api/v1/delivery/stop` must appear exactly ONCE"),
+    ("a second deactivate call", '  Add-ProgramAudioBreachLine "event $name (id $id) deactivated"',
+     '  $null = Invoke-WebRequest -Uri "$base/api/v1/events/5/deactivate" -Method POST\n'
+     '  Add-ProgramAudioBreachLine "event $name (id $id) deactivated"', "`/deactivate` must appear exactly ONCE"),
+    ("the watchdog cuts delivery outside the breach path", '      Write-ProgramAudioLog "ok"',
+     '      Write-ProgramAudioLog "ok"\n      $null = Invoke-ProgramAudioDeliveryCut', "may only be called from"),
+    ("the non-CI refusal is gone", "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {", "  if ($false) {",
+     "must REFUSE a non-CI EVENT_NAME"),
+    ("a non-CI event is added to the CI list", '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")',
+     '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test", "Nedelna bohosluzba")', "must equal the OBS-streaming"),
 ]
+EXTRA_SCRIPT = ("scripts/ci/cut-anything.ps1",
+                'Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" -Body "{}"\n')
 
 
 def self_test(root: Path) -> int:
@@ -314,6 +399,8 @@ def self_test(root: Path) -> int:
             else:
                 text = real[rel].replace(old, new, 1)
             run_case(desc, {rel: text}, expect)
+    run_case("another scripts/ci file cuts a delivery", {Path(EXTRA_SCRIPT[0]): EXTRA_SCRIPT[1]},
+             "is allowed only in")
     if failures:
         print("SELF-TEST FAILED:")
         for f in failures:

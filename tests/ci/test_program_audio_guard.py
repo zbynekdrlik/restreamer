@@ -416,7 +416,7 @@ def wd_disconnected_status_is_not_a_confirmation(job: Env, st: MockState, srv: M
     probs = []
     if not wait_for(lambda: breach.exists() and "stop NOT confirmed yet" in breach.read_text(encoding="ascii"), 20):
         probs.append("a disconnected status was not treated as unconfirmed")
-    if "CONFIRMED:" in breach.read_text(encoding="ascii"):
+    if "stop CONFIRMED" in breach.read_text(encoding="ascii"):
         probs.append("confirmed on a disconnected status")
     st.obs_connected = True
     if not wait_for(lambda: "stop CONFIRMED" in breach.read_text(encoding="ascii"), 30):

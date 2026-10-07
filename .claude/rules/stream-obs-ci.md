@@ -131,12 +131,30 @@ The program's only audio input is the FOH Dante feed (owner copyright rule). cam
 classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY that verdict.
 
 - **`scripts/ci/program-audio-guard.ps1`** (dot-sourced):
-  - `Test-ProgramAudio` returns `$null` only for MEASUREMENT/SILENT with `age_s <= 10` and no
-    FOREIGN within the last 15 s (`last_foreign_age_s`). Otherwise it returns a reason:
-    FOREIGN, UNKNOWN, stale, unreachable or malformed. It fails closed.
-  - Start-OurStream runs `Test-ProgramAudio -BeforeStart` right before StartStream, after
-    readiness. That covers Start and every Republish. `-BeforeStart` also refuses after an
-    earlier breach or with a dead watchdog in this job.
+  - `Test-ProgramAudio` returns `$null` (OK) only when all of these hold:
+    - the verdict is MEASUREMENT or SILENT;
+    - `0 <= age_s <= 10`;
+    - there was no FOREIGN in the last 15 s (`last_foreign_age_s`).
+
+    Otherwise it returns a reason: FOREIGN, UNKNOWN, stale, unreachable or malformed. It
+    fails closed.
+  - The camera-box contract since its dev `dfccef2f8`:
+    - MEASUREMENT needs a QPSK marker chain of >= 4 over 4 s;
+    - the fields `markers_decoded` and `marker_chain` are additive;
+    - the first 4 s after a sampler start or an NDI receive gap read UNKNOWN;
+    - a MEASUREMENT without `marker_chain` (an old sampler) is UNKNOWN, on camera-box's
+      side and on ours.
+  - **Tolerance (ROZHODNUTE 2026-10-07).** While streaming:
+    - FOREIGN, or any unexpected verdict, stops at once;
+    - one UNKNOWN, stale, unreachable or malformed poll is tolerated, and the SECOND in a
+      row stops (`Test-ProgramAudioTolerable`). A 4 s NDI gap does not kill a run; a real
+      classifier outage stops within ~20 s.
+  - **Before StartStream it is strict.** Start-OurStream runs `Test-ProgramAudio
+    -BeforeStart` right before StartStream, after readiness. That covers Start and every
+    Republish.
+    - Any non-OK verdict refuses the start.
+    - A tolerable verdict is re-read every 2 s for up to 15 s (a startup UNKNOWN).
+    - FOREIGN refuses at once, and so do an earlier breach and a dead watchdog in this job.
   - `Set-StartedMarker` mirrors the marker into `program-audio-stream-owned`. The watchdog
     stops only OUR stream (#374). Music while the marker is false is logged and is not a
     breach: nothing of ours is live, and the next start re-checks.
@@ -164,8 +182,26 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     true. Any `streaming:true` in that window is stopped again. That includes a session
     camera-box starts there, because Restreamer's status cannot tell a reconnect from a new
     session. Copyright wins: the CI event may still be delivering to a platform.
-  - An unreachable, stale or malformed read is re-read once after 2 s. A FOREIGN or UNKNOWN
-    verdict trips at once.
+  - **The delivery cut (ROZHODNUTE 2026-10-07).** The 120 s event cache keeps sending
+    already-buffered music after the OBS stop. So the breach also runs
+    `Invoke-ProgramAudioDeliveryCut`:
+    - `POST /api/v1/delivery/stop {event_id}`, then `POST /api/v1/events/{id}/deactivate`;
+    - then it waits until `GET /api/v1/delivery/instances` lists no instance of that event.
+
+    It normally runs right after the confirmed OBS stop. It also runs while the stop stays
+    unconfirmed, and it retries until done. Every step is a line in the breach marker and a
+    bullet in the step summary.
+    - **Only a CI-owned E2E event is touched.** That is the job env `EVENT_NAME`, which must
+      be in `$script:ProgramAudioCiEvents` (= `E2E-Test`, `E2E-FB-Test`). Any other name, or
+      none, is `REFUSED`, so the church event is never cut.
+    - `verify_program_audio_guard.py` pins all of this:
+      - each of the two calls appears ONCE, inside that function;
+      - only `Invoke-ProgramAudioBreachStop` calls it;
+      - the refusal comes before any request;
+      - the list equals the streaming jobs' `EVENT_NAME`s;
+      - no other `scripts/ci` file uses these calls.
+  - The obs-scripts-test job's timeout is 20 min: the guard suite takes ~4 min on pwsh,
+    and PowerShell 5.1 is slower.
   - A dead watchdog fails the assert, and so does a hung one: a heartbeat older than
     3 x poll + 20 s.
 - **The stop-stream API carve-out.** The #374 guard allows it ONCE, in
@@ -195,3 +231,9 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     and the write side. A rename-over fails on Windows while a reader holds the file open.
   - GitHub runs `shell: powershell` as `-command ". '<file>'"`, so an `exit 3` reaches the
     runner as exit 1. Tests that mimic a step can assert only zero vs non-zero.
+  - A function that returns an EMPTY array returns `$null`. Use `return , @(...)` when
+    empty is a real answer: "no instance left" is not "Restreamer did not answer".
+  - `@(Invoke-RestMethod ...)` can nest a JSON array as ONE element, so `.id` becomes an
+    array. Flatten it with `(Invoke-RestMethod ...) | ForEach-Object { $_ }`.
+  - `tests/ci/test_program_audio_guard.py "<name part>"` runs only the matching scenarios.
+    Use it to prove a scenario RED on an older guard.
