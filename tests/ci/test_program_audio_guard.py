@@ -2,7 +2,7 @@
 """#379: run scripts/ci/program-audio-guard.ps1 against a mock camera-box sampler.
 
 The guard keeps room/FOH music off YouTube/Facebook: it reads camera-box's verdict
-(GET http://dev1:8890/program-audio.json) before every StartStream and, through a
+(GET http://10.77.9.202:8891/program-audio.json) before every StartStream and, through a
 detached watchdog, every 10 s while CI streams; on a breach the watchdog stops OBS
 streaming through Restreamer's API (POST /api/v1/obs/stop-stream). Both endpoints
 are external services, so this test serves stdlib mocks of them and runs the REAL

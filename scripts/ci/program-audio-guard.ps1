@@ -4,7 +4,7 @@
 # feed, which carries whatever plays in the room. A CI job that streams it to a
 # platform must stream only the measurement signal (or silence). camera-box samples
 # the program audio and classifies it; restreamer reads that verdict over HTTP
-# (http://dev1:8890/program-audio.json) and never reads OBS meters itself (owner
+# (http://10.77.9.202:8891/program-audio.json) and never reads OBS meters itself (owner
 # directive 2026-08-30: CI only starts and stops OBS streaming).
 #
 # Dot-source it (". scripts/ci/program-audio-guard.ps1"), then:
@@ -48,7 +48,7 @@
 # The runner reaps the detached watchdog at job end even if the teardown never ran.
 #
 # Knobs (env, for tests; no workflow may set them -- verify_program_audio_guard.py):
-#   PROGRAM_AUDIO_URL               default http://dev1:8890/program-audio.json
+#   PROGRAM_AUDIO_URL               default http://10.77.9.202:8891/program-audio.json
 #   PROGRAM_AUDIO_MAX_AGE_S         default 10   (freshness of camera-box's sample)
 #   PROGRAM_AUDIO_FOREIGN_WINDOW_S  default 30   (camera-box's FOREIGN latch, checked first)
 #   PROGRAM_AUDIO_HTTP_TIMEOUT_S    default 5
@@ -81,7 +81,7 @@ function Get-ProgramAudioKnob([string]$name, [int]$default) {
 
 function Get-ProgramAudioUrl {
   if ($env:PROGRAM_AUDIO_URL) { return $env:PROGRAM_AUDIO_URL }
-  return "http://dev1:8890/program-audio.json"
+  return "http://10.77.9.202:8891/program-audio.json"
 }
 
 # The sampler URL with its host resolved ONCE per process and pinned (IPv4 first: the

@@ -128,7 +128,10 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
 ## Program-audio guard (#379): no room/FOH music on YouTube/FB
 
 The program's only audio input is the FOH Dante feed (owner copyright rule). camera-box
-classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY that verdict.
+classifies it at `http://10.77.9.202:8891/program-audio.json` (strih-lx since 2026-10-07, owner
+decision: dev1's foreign CI load made the NDI receiver drop audio, which read as false
+UNKNOWN/FOREIGN). In strih-lx's EVENT mode the sampler is stopped and the endpoint answers
+UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
 
 - **`scripts/ci/program-audio-guard.ps1`** (dot-sourced):
   - `Test-ProgramAudio` returns `$null` (OK) only when all of these hold:
