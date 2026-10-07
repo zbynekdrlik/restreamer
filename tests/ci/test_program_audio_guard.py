@@ -797,6 +797,50 @@ def wd_latched_foreign_behind_unknown(job: Env, st: MockState, srv: MockServer) 
     return probs
 
 
+def wd_flapping_unknowns_breach(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # ROZHODNUTE 2026-10-07 (3rd): U/OK/U/OK/U -- never two in a row, but the 3rd
+    # tolerated UNKNOWN within the window is a breach (a flapping classifier fails closed).
+    job.env["PROGRAM_AUDIO_FLAP_WINDOW_S"] = "8"     # 60 s in CI; polls are 1 s here
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    ok = json_reply(sample())
+    st.sampler_script = [json_reply(UNKNOWN), ok, json_reply(UNKNOWN), ok, json_reply(UNKNOWN)]
+    probs = []
+    if not wait_breach(job, "3 tolerated non-OK polls within 8s", 15):
+        probs.append("U/OK/U/OK/U within the window did not breach")
+    elif "second non-OK poll in a row" in job.path("program-audio-breach.txt").read_text(encoding="ascii"):
+        probs.append("breached as 2-in-a-row, not as flapping")
+    if not wait_breach(job, "stop CONFIRMED", 20):
+        probs.append("no confirmed OBS stop after the flapping breach")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_spread_unknowns_do_not_breach(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # The same 3 UNKNOWNs, but spread wider than the window: no breach.
+    job.env["PROGRAM_AUDIO_FLAP_WINDOW_S"] = "8"
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    ok = json_reply(sample())
+    st.sampler_script = ([json_reply(UNKNOWN)] + [ok] * 7 + [json_reply(UNKNOWN)] + [ok] * 7
+                         + [json_reply(UNKNOWN)])
+    wait_for(lambda: not st.sampler_script, 40)
+    time.sleep(2.5)
+    probs = []
+    if st.sampler_script:
+        probs.append("the scripted reads were not all consumed")
+    if job.path("program-audio-breach.txt").exists() or st.stops:
+        probs.append("3 UNKNOWNs spread over more than the window breached")
+    s2 = job.run("Stop-ProgramAudioWatchdog\nAssert-NoProgramAudioBreach")
+    if s2.returncode != 0:
+        probs.append(f"teardown: exit {s2.returncode} {s2.stdout}{s2.stderr}")
+    return probs
+
+
 START_PROBE = PROBE.replace("Test-ProgramAudio)", "Test-ProgramAudio -BeforeStart)")
 
 
@@ -849,6 +893,8 @@ WATCHDOG_CASES = [
     ("watchdog: music while the stream is not ours -> no stop, no breach", wd_not_our_stream_is_never_stopped),
     ("tolerance: ONE UNKNOWN between two MEASUREMENTs -> no stop", wd_one_unknown_between_measurements),
     ("tolerance: two UNKNOWNs in a row -> stop", wd_two_unknowns_stop),
+    ("tolerance: flapping U/OK/U/OK/U -> breach on the 3rd UNKNOWN in the window", wd_flapping_unknowns_breach),
+    ("tolerance: the same 3 UNKNOWNs spread wider than the window -> no breach", wd_spread_unknowns_do_not_breach),
     ("tolerance: FOREIGN after MEASUREMENT -> immediate stop", wd_foreign_after_measurement_is_immediate),
     ("tolerance: a FOREIGN latch behind an UNKNOWN -> immediate stop", wd_latched_foreign_behind_unknown),
     ("pre-start: rides over a startup UNKNOWN within the retry window", pre_start_rides_over_startup_unknown),
