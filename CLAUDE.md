@@ -42,6 +42,7 @@ auto-load on their `paths:` — you do not invoke those.
 - YouTube-measured A/V + frame-continuity session (manage-scope OAuth on stream.lan, Thursday trigger, camera-box roles, pass criteria) → `.claude/rules/youtube-av-measurement.md` (auto)
 - restreamer.log daily roll + 14-day retention (fixed live file name) → `.claude/rules/log-retention.md` (auto)
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
+- stress/concurrency tests on starved CI runners (count-based stop, runner-scaled liveness cap, injection proofs) → `.claude/rules/load-robust-tests.md` (auto)
 
 ## Project Structure
 
