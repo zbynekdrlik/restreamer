@@ -66,6 +66,10 @@ def sample(verdict: str = "MEASUREMENT", age: object = 0.6, **extra: object) -> 
 class Reply:
     status: int = 200
     body: bytes = b""
+    # Seconds to hold the body after the headers went out: a server that answers and
+    # then stalls. Windows PowerShell 5.1's Invoke-WebRequest -TimeoutSec does not cover
+    # the body read (stream.lan 2026-10-07: -TimeoutSec 3 waited 45 s).
+    stall_s: float = 0.0
 
 
 def json_reply(obj: object, status: int = 200) -> Reply:
@@ -112,7 +116,13 @@ class MockServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(reply.body)))
                 self.end_headers()
-                self.wfile.write(reply.body)
+                if reply.stall_s:
+                    self.wfile.flush()
+                    time.sleep(reply.stall_s)
+                try:
+                    self.wfile.write(reply.body)
+                except OSError:
+                    pass                  # the client gave up on a stalled body
 
             def do_GET(self) -> None:  # noqa: N802 (http.server API)
                 if self.path == "/api/v1/obs/status":
@@ -456,6 +466,29 @@ def wd_sampler_gone_fails_closed(job: Env, st: MockState, srv: MockServer) -> li
     time.sleep(1.5)
     st.sampler = Reply(503, b"down")      # persistent: survives the one re-read
     return breach_checks(job, st, "BREACH: unreachable:", 1)
+
+
+def wd_stalled_sampler_body_is_bounded(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # Run 37567445540 (2026-10-07): one poll never returned, the watchdog stopped
+    # heartbeating for 15 min and the stream ran unguarded. A sampler that sends its
+    # headers and then stalls must cost one bounded poll (HTTP timeout), never a hang:
+    # two such polls in a row are a breach, and the heartbeat stays fresh meanwhile.
+    job.env["PROGRAM_AUDIO_HTTP_TIMEOUT_S"] = "2"
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    st.sampler = Reply(200, json.dumps(sample()).encode(), stall_s=60)
+    beat = job.path("program-audio-watchdog.heartbeat")
+    stale = []
+    end = time.time() + 12
+    while time.time() < end and not job.path("program-audio-breach.txt").exists():
+        age = time.time() - float(beat.read_text(encoding="ascii").strip() or 0)
+        if age > 6:
+            stale.append(round(age, 1))
+        time.sleep(0.5)
+    probs = [f"heartbeat went stale during a stalled poll: ages {stale[:5]}"] if stale else []
+    return probs + breach_checks(job, st, "BREACH: unreachable:", 1)
 
 
 def wd_stop_retried_while_restreamer_down(job: Env, st: MockState, srv: MockServer) -> list[str]:
@@ -885,6 +918,7 @@ WATCHDOG_CASES = [
     ("watchdog: clean program -> polls, no stop, clean teardown", wd_clean_run_stays_quiet),
     ("watchdog: music starts (FOREIGN) -> marker, ONE stop call, exit, assert fails", wd_foreign_stops_stream),
     ("watchdog: sampler goes away -> fail closed, stop call", wd_sampler_gone_fails_closed),
+    ("watchdog: sampler stalls mid-answer -> bounded poll, heartbeat fresh, breach", wd_stalled_sampler_body_is_bounded),
     ("watchdog: stop endpoint down once (Restreamer restarting) -> retried", wd_stop_retried_while_restreamer_down),
     ("watchdog: stop queued but OBS keeps streaming -> re-issued until CONFIRMED",
      wd_queued_stop_is_reissued_until_confirmed),
