@@ -16,6 +16,10 @@ PowerShell functions:
     exits; Assert-NoProgramAudioBreach then fails with the reason in the job summary;
     a dead or hung watchdog fails the assert too; music while the stream is not ours
     is never stopped (#374); -BeforeStart refuses after a breach or a dead watchdog;
+  * the verdict tolerance (ROZHODNUTE 2026-10-07): while streaming FOREIGN stops at
+    once, while ONE UNKNOWN / stale / unreachable poll is tolerated and the second in a
+    row stops; before the start any non-OK verdict refuses, after a retry window of up
+    to 15 s for a startup UNKNOWN (FOREIGN refuses at once);
   * the delivery cut (ROZHODNUTE 2026-10-07): on a breach the watchdog also stops the
     CI event's delivery and deactivates it (the 120 s cache would keep sending the
     music), confirms no delivery instance of that event is left, and never touches
@@ -51,7 +55,9 @@ GUARD = ROOT / "scripts" / "ci" / "program-audio-guard.ps1"
 def sample(verdict: str = "MEASUREMENT", age: object = 0.6, **extra: object) -> dict:
     body = {"schema": 1, "ts_utc": "2026-10-07T10:00:00.000Z", "age_s": age, "verdict": verdict,
             "rms_dbfs": -35.8, "outside_band_pct": 13.1, "window_s": 2.0, "source": "STREAM-SNV (stream)",
-            "last_foreign_ts_utc": None, "last_foreign_age_s": None}
+            "last_foreign_ts_utc": None, "last_foreign_age_s": None,
+            # camera-box dev dfccef2f8: MEASUREMENT needs a QPSK marker chain >= 4 over 4 s
+            "markers_decoded": 8, "marker_chain": 6}
     body.update(extra)
     return body
 
@@ -70,6 +76,7 @@ def json_reply(obj: object, status: int = 200) -> Reply:
 class MockState:
     sampler: Reply = field(default_factory=lambda: json_reply(sample()))
     sampler_fail_next: int = 0           # the next N reads answer HTTP 500 (a blip)
+    sampler_script: list[Reply] = field(default_factory=list)  # served one per read first
     stop_status: list[int] = field(default_factory=lambda: [200])  # per call; the last repeats
     stop_takes_effect_after: int = 1     # accepted (2xx) stops before OBS really stops
     obs_streaming: bool = True           # what Restreamer's GET /api/v1/obs/status reports
@@ -122,6 +129,9 @@ class MockServer:
                 if st.sampler_fail_next > 0:
                     st.sampler_fail_next -= 1
                     self._send(Reply(500, b"boom"))
+                    return
+                if st.sampler_script:
+                    self._send(st.sampler_script.pop(0))
                     return
                 self._send(st.sampler)
 
@@ -285,6 +295,9 @@ VERDICT_CASES: list[tuple[str, Reply | None, int, str]] = [
     ("age_s not a number -> malformed", json_reply(sample(age="fresh")), 1, "WHY=malformed: "),
     ("age_s negative -> malformed", json_reply(sample(age=-3)), 1, "WHY=malformed: "),
     ("age_s a JSON true -> malformed", json_reply(sample(age=True)), 1, "WHY=malformed: "),
+    ("MEASUREMENT without marker_chain (an old sampler) -> UNKNOWN",
+     json_reply({k: v for k, v in sample().items() if k != "marker_chain"}), 1,
+     "WHY=UNKNOWN: MEASUREMENT without marker_chain"),
 ]
 
 
@@ -544,8 +557,9 @@ def wd_blip_is_reread(job: Env, st: MockState, srv: MockServer) -> list[str]:
         probs.append("a single HTTP 500 blip was a breach (it must be re-read once)")
     if st.stops:
         probs.append("a blip stopped the stream")
-    if "re-reading once after: unreachable" not in job.path("program-audio-watchdog.log").read_text(encoding="ascii"):
-        probs.append("the re-read is not logged")
+    if "tolerating ONE poll (the next non-OK one stops): unreachable" not in \
+            job.path("program-audio-watchdog.log").read_text(encoding="ascii"):
+        probs.append("the tolerated poll is not logged")
     job.run("Stop-ProgramAudioWatchdog")
     return probs
 
@@ -701,6 +715,104 @@ def wd_delivery_cut_even_if_obs_stop_unconfirmed(job: Env, st: MockState, srv: M
     return probs
 
 
+UNKNOWN = sample("UNKNOWN", markers_decoded=0, marker_chain=0)
+
+
+def wd_one_unknown_between_measurements(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # A 4 s NDI receive gap reads UNKNOWN once; it must not kill a CI run.
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    st.sampler_script = [json_reply(UNKNOWN)]
+    time.sleep(4.5)
+    probs = []
+    if st.sampler_script:
+        probs.append("the scripted UNKNOWN was never read")
+    if job.path("program-audio-breach.txt").exists() or st.stops:
+        probs.append("ONE UNKNOWN between MEASUREMENTs stopped the stream")
+    if "tolerating ONE poll (the next non-OK one stops): UNKNOWN" not in \
+            job.path("program-audio-watchdog.log").read_text(encoding="ascii"):
+        probs.append("the tolerated UNKNOWN is not logged")
+    s = job.run("Stop-ProgramAudioWatchdog\nAssert-NoProgramAudioBreach")
+    if s.returncode != 0:
+        probs.append(f"teardown: exit {s.returncode} {s.stdout}{s.stderr}")
+    return probs
+
+
+def wd_two_unknowns_stop(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    st.sampler = json_reply(UNKNOWN)       # the classifier stays blind
+    probs = []
+    if not wait_breach(job, "(second non-OK poll in a row; the first: UNKNOWN", 15):
+        probs.append("two UNKNOWNs in a row did not stop the stream")
+    if not wait_breach(job, "stop CONFIRMED", 20) or len(st.stops) < 1:
+        probs.append("no confirmed OBS stop after two UNKNOWNs")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+def wd_foreign_after_measurement_is_immediate(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # ONE FOREIGN read between MEASUREMENTs: no tolerance for music.
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    time.sleep(1.5)
+    st.sampler_script = [json_reply(sample("FOREIGN", rms_dbfs=-14.2))]
+    probs = []
+    if not wait_breach(job, "BREACH: FOREIGN", 10):
+        probs.append("a single FOREIGN read did not stop the stream at once")
+    elif "second non-OK poll" in job.path("program-audio-breach.txt").read_text(encoding="ascii"):
+        probs.append("FOREIGN was tolerated for a poll")
+    if not wait_breach(job, "stop CONFIRMED", 20):
+        probs.append("no confirmed OBS stop after FOREIGN")
+    job.run("Stop-ProgramAudioWatchdog")
+    return probs
+
+
+START_PROBE = PROBE.replace("Test-ProgramAudio)", "Test-ProgramAudio -BeforeStart)")
+
+
+def pre_start_rides_over_startup_unknown(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # The first 4 s after a sampler start read UNKNOWN: the start retries over it.
+    st.sampler_script = [json_reply(UNKNOWN), json_reply(UNKNOWN)]
+    p = job.run(START_PROBE)
+    probs = []
+    if p.returncode != 0 or "VERDICT-OK" not in p.stdout:
+        probs.append(f"the pre-start check did not ride over a startup UNKNOWN: exit {p.returncode} {p.stdout}")
+    if st.gets != 3:
+        probs.append(f"pre-start read the sampler {st.gets}x, expected 3 (UNKNOWN, UNKNOWN, MEASUREMENT)")
+    return probs
+
+
+def pre_start_refuses_lasting_unknown(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    job.env["PROGRAM_AUDIO_START_RETRY_S"] = "4"
+    st.sampler = json_reply(UNKNOWN)
+    t0 = time.time()
+    p = job.run(START_PROBE)
+    took = time.time() - t0
+    probs = []
+    if p.returncode != 1 or "WHY=UNKNOWN:" not in p.stdout or "still not OK after a 4s pre-start retry" not in p.stdout:
+        probs.append(f"a lasting UNKNOWN was not refused after the retry window: exit {p.returncode} {p.stdout}")
+    if took < 4 or st.gets < 2:
+        probs.append(f"no retry window: took {took:.1f} s, {st.gets} reads")
+    return probs
+
+
+def pre_start_refuses_foreign_at_once(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    st.sampler = json_reply(sample("FOREIGN"))
+    p = job.run(START_PROBE)
+    probs = []
+    if p.returncode != 1 or "WHY=FOREIGN:" not in p.stdout:
+        probs.append(f"FOREIGN before the start was not refused: exit {p.returncode} {p.stdout}")
+    if st.gets != 1:
+        probs.append(f"FOREIGN before the start was retried ({st.gets} reads)")
+    return probs
+
+
 WATCHDOG_CASES = [
     ("watchdog: clean program -> polls, no stop, clean teardown", wd_clean_run_stays_quiet),
     ("watchdog: music starts (FOREIGN) -> marker, ONE stop call, exit, assert fails", wd_foreign_stops_stream),
@@ -711,6 +823,12 @@ WATCHDOG_CASES = [
     ("watchdog: back on air after the confirmed stop -> stopped again", wd_back_on_air_is_stopped_again),
     ("watchdog: Restreamer's OBS client disconnected -> not a confirmation", wd_disconnected_status_is_not_a_confirmation),
     ("watchdog: music while the stream is not ours -> no stop, no breach", wd_not_our_stream_is_never_stopped),
+    ("tolerance: ONE UNKNOWN between two MEASUREMENTs -> no stop", wd_one_unknown_between_measurements),
+    ("tolerance: two UNKNOWNs in a row -> stop", wd_two_unknowns_stop),
+    ("tolerance: FOREIGN after MEASUREMENT -> immediate stop", wd_foreign_after_measurement_is_immediate),
+    ("pre-start: rides over a startup UNKNOWN within the retry window", pre_start_rides_over_startup_unknown),
+    ("pre-start: a lasting UNKNOWN is refused after the retry window", pre_start_refuses_lasting_unknown),
+    ("pre-start: FOREIGN is refused at once (no retry)", pre_start_refuses_foreign_at_once),
     ("delivery cut: FOREIGN -> delivery/stop + deactivate of the CI event only, CUT CONFIRMED",
      wd_foreign_cuts_ci_delivery),
     ("delivery cut: a non-CI EVENT_NAME is REFUSED, nothing of it touched", wd_non_ci_event_is_never_touched),
@@ -748,8 +866,17 @@ def watchdog_case(fn) -> list[str]:
 
 
 def main() -> int:
+    # argv: optional name substrings; only the scenarios matching one of them run
+    # (for proving a single scenario RED on an older guard). CI runs them all.
+    only = sys.argv[1:]
+
+    def picked(name: str) -> bool:
+        return not only or any(o in name for o in only)
+
     failed = total = 0
     for name, reply, code, text in VERDICT_CASES:
+        if not picked(name):
+            continue
         total += 1
         probs = verdict_case(reply, code, text)
         failed += bool(probs)
@@ -757,6 +884,8 @@ def main() -> int:
         for p in probs:
             print(f"  - {p}")
     for name, fn in WATCHDOG_CASES:
+        if not picked(name):
+            continue
         total += 1
         probs = watchdog_case(fn)
         failed += bool(probs)

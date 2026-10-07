@@ -362,7 +362,7 @@ class Case:
 
 
 AUDIO_OK = {"schema": 1, "age_s": 0.6, "verdict": "MEASUREMENT", "rms_dbfs": -35.8, "outside_band_pct": 13.1,
-            "source": "STREAM-SNV (stream)", "last_foreign_age_s": None}
+            "source": "STREAM-SNV (stream)", "last_foreign_age_s": None, "markers_decoded": 8, "marker_chain": 6}
 AUDIO_FOREIGN = dict(AUDIO_OK, verdict="FOREIGN", rms_dbfs=-14.2)
 FREE = {"schema": 1, "held": False, "stale": False}
 HELD = {"schema": 1, "held": True, "stale": False, "ttl_s": 600,
@@ -536,6 +536,7 @@ def run_case(case: Case) -> list[str]:
                                   else f"http://127.0.0.1:{_closed_port()}/program-audio.json"),
             # obs-stream.ps1 never POSTs to Restreamer's API (asserted: 0 POSTs).
             "PROGRAM_AUDIO_API_BASE": api.url,
+            "PROGRAM_AUDIO_START_RETRY_S": "3",   # the pre-start retry window, short for the mock
         })
         try:
             pre_out = ""
