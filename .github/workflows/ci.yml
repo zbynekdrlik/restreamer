@@ -1079,6 +1079,19 @@ jobs:
           python3 scripts/ci/verify_no_obs_mutation.py --self-test
           python3 scripts/ci/verify_no_obs_mutation.py
 
+      - name: "Verify every StartStream is gated by the program-audio guard (#379)"
+        run: |
+          # Owner copyright rule: no room/FOH music on YouTube/Facebook. Every
+          # StartStream in obs-stream.ps1 must be immediately preceded by
+          # Test-ProgramAudio + an exit on its verdict, and every job that starts
+          # OBS streaming must start the watchdog right after, check for a breach
+          # after each long streaming step, and stop the watchdog + assert in an
+          # always() teardown after the OBS stop. The guard parses the YAML, so this
+          # step cannot self-match (#325); --self-test proves it red on regressed copies.
+          python3 -c 'import yaml' 2>/dev/null || pip install pyyaml --quiet
+          python3 scripts/ci/verify_program_audio_guard.py --self-test
+          python3 scripts/ci/verify_program_audio_guard.py
+
       - name: "Verify OBS-streaming E2E jobs wait on the rig lease before StartStream (#349)"
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -1564,11 +1577,16 @@ jobs:
     # mock obs-websocket + rig lease + fake obs64 process. Every scenario also
     # asserts the scripts sent only Start/Stop streaming and read-only requests.
     runs-on: windows-latest
-    timeout-minutes: 10
+    # 10 -> 20 with #379: the program-audio guard suite (48 scenarios: a detached
+    # watchdog, real poll intervals, delivery-cut budgets) takes ~4 min on dev1's pwsh
+    # on top of the ~2 min OBS suite, and Windows PowerShell 5.1 starts slower.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Run the OBS scripts against the mock obs-websocket
         run: python tests/ci/test_obs_stream.py
+      - name: "Run the program-audio guard against a mock sampler + stop endpoint (#379)"
+        run: python tests/ci/test_program_audio_guard.py
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -3487,6 +3505,19 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
+      # #379: never stream room/FOH music to a platform (owner copyright rule). The start
+      # step above already refused to StartStream unless camera-box's sampler said
+      # MEASUREMENT/SILENT; this detached watchdog re-reads that verdict every 10 s while
+      # we stream and, on FOREIGN/UNKNOWN/stale/unreachable, stops OBS streaming through
+      # Restreamer's API and leaves a breach marker the checks below fail on.
+      - name: "Program-audio watchdog: start (#379)"
+        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Start-ProgramAudioWatchdog
+
       - name: Wait for chunks and verify upload
         shell: powershell
         timeout-minutes: 3
@@ -3518,155 +3549,6 @@ jobs:
           if ($stats.pending_chunks -gt 0) {
             throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
           }
-
-      - name: Verify cache bar grows during buffering phase (Playwright)
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          Write-Host "Verifying cache bar grows during initial buffering phase..."
-          Set-Location "$env:GITHUB_WORKSPACE\e2e"
-          cmd /c "npm install playwright 2>&1" | Out-Null
-          cmd /c "npx playwright install chromium 2>&1" | Out-Null
-
-          $testScript = @'
-          const { chromium } = require('playwright');
-          (async () => {
-            const browser = await chromium.launch({ headless: true });
-            const page = await browser.newPage();
-
-            const consoleErrors = [];
-            page.on('console', msg => {
-              if (msg.type() === 'error' || msg.type() === 'warning') {
-                consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
-              }
-            });
-
-            await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-
-            // Wait for at least one endpoint cache label to appear. The
-            // dashboard renders endpoint cards from the DeliveryStatus
-            // WebSocket broadcast which is fired by the orchestrator on a
-            // poll loop. networkidle does not wait for WebSocket frames,
-            // so we have to wait for the actual UI element. Up to 30s
-            // because the orchestrator first poll plus VPS HTTP round-trip
-            // can take longer than the 5s the previous fixed wait used.
-            try {
-              await page.locator('.endpoint-cache-label').first().waitFor({
-                state: 'attached',
-                timeout: 30000,
-              });
-            } catch (e) {
-              console.error('FAILED: No endpoint cache labels appeared within 30s');
-              // Diagnostic: dump dashboard state to find why endpoints
-              // are not in store.delivery.endpoints.
-              try {
-                const apiStatus = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
-                console.error('API status:', JSON.stringify(apiStatus.streaming_event));
-                const cached = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
-                console.error('Cached delivery:', JSON.stringify(cached));
-                const eventId = apiStatus.streaming_event && apiStatus.streaming_event.id;
-                if (eventId) {
-                  const live = await fetch(`http://127.0.0.1:8910/api/v1/delivery/status?event_id=${eventId}`).then(r => r.json()).catch(() => null);
-                  console.error('Live delivery status:', JSON.stringify(live));
-                }
-                const pipelineNodes = await page.locator('.pipeline-node-metric').allTextContents().catch(() => []);
-                console.error('Pipeline node metrics:', pipelineNodes);
-                const allClasses = await page.locator('.endpoint-tree').count().catch(() => 0);
-                console.error('Endpoint tree count:', allClasses);
-              } catch (diagErr) {
-                console.error('Diagnostic dump failed:', diagErr.message);
-              }
-              process.exit(1);
-            }
-
-            // During buffering phase: endpoints exist but are pending, cache bar should show
-            // the backend-computed cache_duration_secs value (real measured chunk duration sum)
-            const cacheLabels = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
-            console.log('Cache labels during buffering:', cacheLabels);
-
-            if (cacheLabels.length === 0) {
-              console.error('FAILED: No cache bar labels found during buffering phase');
-              console.error('Expected per-endpoint cache bars showing S3 buffer accumulation');
-              process.exit(1);
-            }
-
-            // #192: parse a NON-FAST label (order-independent). A fast endpoint
-            // renders "Xs / live cache" or "Xs / Ns target cache" -- blindly
-            // parsing cacheLabels[0] would mis-read a fast label if it sorts
-            // first (e.g. a fast "0s / live cache" placeholder pre-VPS would
-            // fail the regex, or "0s / Ns target cache" would trip the
-            // 0s-during-buffering check). This assertion is about the non-fast
-            // S3 cushion.
-            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
-            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
-            const trimmedLabels = cacheLabels.map(l => l.trim());
-            const nfLabel = trimmedLabels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
-            if (!nfLabel) {
-              console.error('FAILED: No non-fast cache label (Xs / Ns cache) during buffering; labels:', JSON.stringify(trimmedLabels));
-              process.exit(1);
-            }
-            const match = nfLabel.match(NONFAST_RE);
-
-            const cacheSecs = parseInt(match[1]);
-            const targetSecs = parseInt(match[2]);
-            console.log('Cache during buffering:', cacheSecs, 's /', targetSecs, 's');
-
-            // Cache MUST be > 0 during buffering (chunks are on S3)
-            if (cacheSecs === 0) {
-              console.error('FAILED: Cache bar shows 0s during buffering phase.');
-              console.error('This is the exact bug from issue #80 - cache bar not growing.');
-              process.exit(1);
-            }
-
-            // Cache bar fill should be visible
-            const fillEl = await page.locator('.endpoint-node .buffer-bar-fill').first();
-            const fillClass = await fillEl.getAttribute('class').catch(() => null);
-            console.log('Bar fill class:', fillClass);
-
-            if (!fillClass) {
-              console.error('FAILED: Cache bar fill element not found');
-              process.exit(1);
-            }
-
-            // Take second reading after 10s to verify growth
-            await page.waitForTimeout(10000);
-            const cacheLabels2 = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
-            const match2 = cacheLabels2[0].match(/(\d+)s\s*\/\s*(\d+)s/);
-            const cacheSecs2 = match2 ? parseInt(match2[1]) : 0;
-            console.log('Cache after 10s:', cacheSecs2, 's');
-
-            if (cacheSecs2 < cacheSecs) {
-              console.error('FAILED: Cache decreased from', cacheSecs, 'to', cacheSecs2, '(should be growing)');
-              process.exit(1);
-            }
-
-            // Cache growth should roughly match wall time (10s wait = ~10s growth)
-            // Allow 50% tolerance for timing variance, but reject 2x growth (broken duration)
-            const growth = cacheSecs2 - cacheSecs;
-            console.log('Cache growth in 10s:', growth, 's');
-            if (growth > 16) {
-              console.error('FAILED: Cache grew', growth, 's in 10s wall time. Duration measurement is broken (> 1.6x real time).');
-              process.exit(1);
-            }
-
-            const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
-            const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
-            if (real.length > 0) {
-              console.error('FAILED: Browser console errors:', real);
-              process.exit(1);
-            }
-
-            console.log('PASSED: Cache bar growing during buffering:', cacheSecs, 's ->', cacheSecs2, 's', '(growth:', growth, 's in 10s)');
-            await browser.close();
-          })();
-          '@
-
-          $testScript | Out-File -FilePath "buffering-cache-check.cjs" -Encoding UTF8
-          node buffering-cache-check.cjs
-          if ($LASTEXITCODE -ne 0) {
-            throw "FAILED: Cache bar buffering phase verification failed"
-          }
-          Remove-Item "buffering-cache-check.cjs" -ErrorAction SilentlyContinue
 
       - name: Verify YouTube is NOT receiving stream (baseline)
         shell: powershell
@@ -3763,6 +3645,13 @@ jobs:
             Write-Host "  - $($ep.alias) ($($ep.service_type))"
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: Wait for delivery server ready
         shell: powershell
         timeout-minutes: 15
@@ -3840,6 +3729,190 @@ jobs:
           }
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
+      # #380: measured AFTER "Wait for delivery server ready", i.e. after the VPS
+      # live-edge init. Before the init the label sums every sent chunk and at the
+      # init it drops to 0 s, so an earlier read raced that drop; an early step with
+      # its own init wait would turn a slow Hetzner boot into a failure (the wait
+      # step above allows 15 min). The 90 s init poll inside stays as a safety net.
+      - name: Verify cache bar grows after the VPS live-edge init (Playwright)
+        shell: powershell
+        # 5 -> 7 with #380: the step now first waits up to 90 s for the VPS live-edge init
+        # (+ up to 15 s for the post-init label) before its 10 s growth check.
+        timeout-minutes: 7
+        run: |
+          Write-Host "Verifying the cache bar grows after the VPS live-edge init..."
+          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          cmd /c "npm install playwright 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+
+          $testScript = @'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+
+            const consoleErrors = [];
+            page.on('console', msg => {
+              if (msg.type() === 'error' || msg.type() === 'warning') {
+                consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+              }
+            });
+
+            await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
+
+            // Wait for at least one endpoint cache label to appear. The
+            // dashboard renders endpoint cards from the DeliveryStatus
+            // WebSocket broadcast which is fired by the orchestrator on a
+            // poll loop. networkidle does not wait for WebSocket frames,
+            // so we have to wait for the actual UI element. Up to 30s
+            // because the orchestrator first poll plus VPS HTTP round-trip
+            // can take longer than the 5s the previous fixed wait used.
+            try {
+              await page.locator('.endpoint-cache-label').first().waitFor({
+                state: 'attached',
+                timeout: 30000,
+              });
+            } catch (e) {
+              console.error('FAILED: No endpoint cache labels appeared within 30s');
+              // Diagnostic: dump dashboard state to find why endpoints
+              // are not in store.delivery.endpoints.
+              try {
+                const apiStatus = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
+                console.error('API status:', JSON.stringify(apiStatus.streaming_event));
+                const cached = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
+                console.error('Cached delivery:', JSON.stringify(cached));
+                const eventId = apiStatus.streaming_event && apiStatus.streaming_event.id;
+                if (eventId) {
+                  const live = await fetch(`http://127.0.0.1:8910/api/v1/delivery/status?event_id=${eventId}`).then(r => r.json()).catch(() => null);
+                  console.error('Live delivery status:', JSON.stringify(live));
+                }
+                const pipelineNodes = await page.locator('.pipeline-node-metric').allTextContents().catch(() => []);
+                console.error('Pipeline node metrics:', pipelineNodes);
+                const allClasses = await page.locator('.endpoint-tree').count().catch(() => 0);
+                console.error('Endpoint tree count:', allClasses);
+              } catch (diagErr) {
+                console.error('Diagnostic dump failed:', diagErr.message);
+              }
+              process.exit(1);
+            }
+
+            // #192: parse a NON-FAST label (order-independent). A fast endpoint
+            // renders "Xs / live cache" or "Xs / Ns target cache" -- blindly
+            // parsing labels[0] would mis-read a fast label if it sorts first.
+            // This assertion is about the non-fast S3 cushion.
+            const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
+            const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
+            const readNonFast = async () => {
+              const labels = (await page.locator('.endpoint-cache-label').allTextContents().catch(() => [])).map(l => l.trim());
+              const nf = labels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+              if (!nf) return { labels, secs: null, target: null };
+              const m = nf.match(NONFAST_RE);
+              return { labels, secs: parseInt(m[1]), target: parseInt(m[2]) };
+            };
+
+            // #380: wait for the VPS live-edge init BEFORE measuring. Before init the
+            // placeholder endpoints have current_chunk_id=0, so the label sums EVERY
+            // sent chunk; at init the VPS starts at the live edge (#174) and the label
+            // drops to 0 s, then grows again. One read ~40 s after the VPS was created
+            // raced that drop (main run 37549179955 read 0 s, 1.2 s after the init).
+            const initDeadline = Date.now() + 90000;
+            let rtmp = null;
+            let cachedLast = null;
+            while (Date.now() < initDeadline) {
+              cachedLast = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
+              const eps = cachedLast && Array.isArray(cachedLast.endpoints) ? cachedLast.endpoints : [];
+              const ep = eps.find(e => e.alias === 'e2e rtmp');
+              if (ep && ep.alive && ep.current_chunk_id > 0) { rtmp = ep; break; }
+              await page.waitForTimeout(2000);
+            }
+            if (!rtmp) {
+              console.error('FAILED: e2e rtmp was not alive with current_chunk_id > 0 within 90 s (no VPS live-edge init)');
+              console.error('Cached delivery:', JSON.stringify(cachedLast));
+              process.exit(1);
+            }
+            console.log('VPS initialised: e2e rtmp alive, current_chunk_id =', rtmp.current_chunk_id);
+
+            // Then the post-init buffer: up to 15 s for the non-fast label to reach >= 2 s
+            // (about one chunk past the live-edge start).
+            const labelDeadline = Date.now() + 15000;
+            let first = await readNonFast();
+            while ((first.secs === null || first.secs < 2) && Date.now() < labelDeadline) {
+              await page.waitForTimeout(1000);
+              first = await readNonFast();
+            }
+            console.log('Cache labels after the VPS init:', first.labels);
+            if (first.secs === null) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns cache) after the VPS init; labels:', JSON.stringify(first.labels));
+              process.exit(1);
+            }
+            const cacheSecs = first.secs;
+            const targetSecs = first.target;
+            console.log('Cache after the VPS init:', cacheSecs, 's /', targetSecs, 's');
+
+            // The cache MUST grow past the live-edge start (chunks keep landing on S3).
+            if (cacheSecs < 2) {
+              console.error('FAILED: Cache bar stayed under 2 s for 15 s after the VPS init.');
+              console.error('This is the exact bug from issue #80 - cache bar not growing.');
+              process.exit(1);
+            }
+
+            // Cache bar fill should be visible
+            const fillEl = await page.locator('.endpoint-node .buffer-bar-fill').first();
+            const fillClass = await fillEl.getAttribute('class').catch(() => null);
+            console.log('Bar fill class:', fillClass);
+
+            if (!fillClass) {
+              console.error('FAILED: Cache bar fill element not found');
+              process.exit(1);
+            }
+
+            // Take second reading after 10s to verify growth
+            await page.waitForTimeout(10000);
+            // The same NON-FAST label as the first read (never labels[0], see #192).
+            const second = await readNonFast();
+            const cacheSecs2 = second.secs === null ? 0 : second.secs;
+            console.log('Cache after 10s:', cacheSecs2, 's');
+
+            if (cacheSecs2 < cacheSecs) {
+              console.error('FAILED: Cache decreased from', cacheSecs, 'to', cacheSecs2, '(should be growing)');
+              process.exit(1);
+            }
+
+            // Cache growth should roughly match wall time (10s wait = ~10s growth)
+            // Allow 50% tolerance for timing variance, but reject 2x growth (broken duration)
+            const growth = cacheSecs2 - cacheSecs;
+            console.log('Cache growth in 10s:', growth, 's');
+            if (growth > 16) {
+              console.error('FAILED: Cache grew', growth, 's in 10s wall time. Duration measurement is broken (> 1.6x real time).');
+              process.exit(1);
+            }
+
+            const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
+            const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
+            if (real.length > 0) {
+              console.error('FAILED: Browser console errors:', real);
+              process.exit(1);
+            }
+
+            console.log('PASSED: Cache bar growing after the VPS live-edge init:', cacheSecs, 's ->', cacheSecs2, 's', '(growth:', growth, 's in 10s)');
+            await browser.close();
+          })();
+          '@
+
+          $testScript | Out-File -FilePath "buffering-cache-check.cjs" -Encoding UTF8
+          node buffering-cache-check.cjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: Cache bar buffering phase verification failed"
+          }
+          Remove-Item "buffering-cache-check.cjs" -ErrorAction SilentlyContinue
+
       - name: "GATE: delivery_init_sent within 180s of vps_ready"
         shell: powershell
         run: |
@@ -3867,6 +3940,13 @@ jobs:
             throw "FAILED: delivery_init_sent took $delaySecs s after vps_ready (max 180s). Likely chunk_records.duration_ms regression -- see issue #146."
           }
           Write-Host "=== Init latency GATE PASSED: $delaySecs s ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: "GATE: chunks_processed > 0 within 200s of init"
         shell: powershell
@@ -3915,6 +3995,13 @@ jobs:
             throw "FAILED: chunks_processed stayed 0 for 200s after init. VPS warmup is stuck (start_chunk_id sanity / OBS not producing / consumer wedged -- see issues #146, #174)."
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: "Assert fast-endpoint audit (#192)"
         shell: powershell
@@ -4017,6 +4104,13 @@ jobs:
             throw "FAILED (#192): the VPS TEST_FILE sink received no new bytes in 60 s -- 'e2e fast' is not delivering"
           }
           Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Verify delivery progression
         shell: powershell
@@ -4192,6 +4286,13 @@ jobs:
           Write-Host "=========================================="
           Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Verify dashboard per-endpoint cache bar via Playwright
         shell: powershell
@@ -4660,6 +4761,13 @@ jobs:
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"
         if: success()
         shell: powershell
@@ -4861,6 +4969,13 @@ jobs:
           Write-Host "  No endpoint accumulated >$maxFbDeaths rtmp_push_died rows"
           Write-Host "=========================================="
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: OBS disconnect/reconnect resilience test
         if: success()
         shell: powershell
@@ -4931,6 +5046,13 @@ jobs:
             }
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: OBS republish A/V-alignment gate (av_skew_ms)
         if: success()
@@ -5322,6 +5444,13 @@ jobs:
           if (-not $recovered) { throw "FAILED: RescueRecovered not recorded - never returned to live" }
           Write-Host "OK: outage survived end-to-end with zero chunk loss"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: Restreamer crash recovery test
         if: success()
         shell: powershell
@@ -5691,6 +5820,13 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Rebaseline
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell
@@ -5778,6 +5914,16 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+
+      # #379: always, even when the job never streamed (both calls are then no-ops).
+      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Stop-ProgramAudioWatchdog
+          Assert-NoProgramAudioBreach
 
       - name: Verify RTMP disconnected after OBS stream stop
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
@@ -6333,6 +6479,15 @@ jobs:
         timeout-minutes: 3
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
+      # #379: the program-audio watchdog, as in the YouTube job (see there).
+      - name: "Program-audio watchdog: start (#379)"
+        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Start-ProgramAudioWatchdog
+
       - name: Start delivery
         shell: powershell
         run: |
@@ -6361,6 +6516,13 @@ jobs:
           }
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "Delivery started for event $($ev.id)"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: "GATE: e2e fb endpoint registers (slow-VPS-boot tolerant, dead-VPS fast-fail)"
         # #222 named-step GATE pattern; #227 slow-vs-dead robustness.
@@ -6715,6 +6877,13 @@ jobs:
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "GATE: FB-side ingest_streams.stream_health populated within 15min (Graph API)"
         shell: powershell
         run: |
@@ -6761,6 +6930,13 @@ jobs:
           }
           if (-not $sawHealth) { throw "FB-side GATE FAIL: ingest_streams.stream_health never populated within 15 min (FB never decoded our H.264)" }
           Write-Host "FB-side GATE: FB confirmed real-time decode of rust-pusher feed"
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
@@ -6833,11 +7009,28 @@ jobs:
             }
           }
 
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
+
       - name: "Stop OBS stream (only the one this job started, #374)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
         shell: powershell
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+
+      # #379: always, even when the job never streamed (both calls are then no-ops).
+      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Stop-ProgramAudioWatchdog
+          Assert-NoProgramAudioBreach
 
   e2e-gate:
     name: E2E Gate
