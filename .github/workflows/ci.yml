@@ -3741,13 +3741,13 @@ jobs:
       # init it drops to 0 s, so an earlier read raced that drop; an early step with
       # its own init wait would turn a slow Hetzner boot into a failure (the wait
       # step above allows 15 min). The 90 s init poll inside stays as a safety net.
-      - name: Verify cache bar grows during buffering phase (Playwright)
+      - name: Verify cache bar grows after the VPS live-edge init (Playwright)
         shell: powershell
         # 5 -> 7 with #380: the step now first waits up to 90 s for the VPS live-edge init
         # (+ up to 15 s for the post-init label) before its 10 s growth check.
         timeout-minutes: 7
         run: |
-          Write-Host "Verifying cache bar grows during initial buffering phase..."
+          Write-Host "Verifying the cache bar grows after the VPS live-edge init..."
           Set-Location "$env:GITHUB_WORKSPACE\e2e"
           cmd /c "npm install playwright 2>&1" | Out-Null
           cmd /c "npx playwright install chromium 2>&1" | Out-Null
