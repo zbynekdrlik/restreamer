@@ -245,7 +245,18 @@ classifies it at `http://dev1:8890/program-audio.json`; restreamer reads ONLY th
     runner as exit 1. Tests that mimic a step can assert only zero vs non-zero.
   - A function that returns an EMPTY array returns `$null`. Use `return , @(...)` when
     empty is a real answer: "no instance left" is not "Restreamer did not answer".
-  - `@(Invoke-RestMethod ...)` can nest a JSON array as ONE element, so `.id` becomes an
-    array. Flatten it with `(Invoke-RestMethod ...) | ForEach-Object { $_ }`.
+  - `@(... | ConvertFrom-Json)` can nest a JSON array as ONE element, so `.id` becomes an
+    array. Flatten it with `(... | ConvertFrom-Json) | ForEach-Object { $_ }`.
+  - **PS 5.1 `Invoke-WebRequest`/`Invoke-RestMethod -TimeoutSec` is not a hard bound.** It
+    does not cover the body read: measured on stream.lan, `-TimeoutSec 3` waited 45 s on a
+    server that stalled after its headers. One such poll froze the watchdog for 15 min (run
+    37567445540, #379). The guard's only HTTP path is `Invoke-ProgramAudioHttp`
+    (`HttpClient.Timeout` + `Task.Wait` bound), and the verifier rejects a raw cmdlet. Any
+    other loop that must keep beating needs the same pattern.
+  - On stream.lan, `dev1` resolves through LLMNR (link-local first, TTL 10 s), about 2 s per
+    lookup.
+  - To prove a guard scenario RED on PS 5.1, copy `tests/ci/` + `scripts/ci/` to stream.lan
+    and run them there with `C:\Python311\python.exe`. pwsh 7 on Linux uses HttpClient and
+    would not reproduce the PS 5.1 behavior.
   - `tests/ci/test_program_audio_guard.py "<name part>"` runs only the matching scenarios.
     Use it to prove a scenario RED on an older guard.

@@ -86,6 +86,7 @@ class MockState:
     obs_streaming: bool = True           # what Restreamer's GET /api/v1/obs/status reports
     obs_connected: bool = True
     gets: int = 0
+    sampler_hosts: list[str] = field(default_factory=list)  # the Host header of each sampler read
     stops: list[float] = field(default_factory=list)
     accepted_stops: int = 0
     # Restreamer's events + delivery (the breach also cuts the CI event's delivery).
@@ -136,6 +137,7 @@ class MockServer:
                     self._send(json_reply(st.instances))
                     return
                 st.gets += 1
+                st.sampler_hosts.append(self.headers.get("Host") or "")
                 if st.sampler_fail_next > 0:
                     st.sampler_fail_next -= 1
                     self._send(Reply(500, b"boom"))
@@ -489,6 +491,25 @@ def wd_stalled_sampler_body_is_bounded(job: Env, st: MockState, srv: MockServer)
         time.sleep(0.5)
     probs = [f"heartbeat went stale during a stalled poll: ages {stale[:5]}"] if stale else []
     return probs + breach_checks(job, st, "BREACH: unreachable:", 1)
+
+
+def wd_sampler_host_is_pinned(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # stream.lan resolves dev1 through LLMNR (~2 s per lookup, TTL 10 s): the watchdog
+    # resolves the sampler host ONCE and polls the pinned IPv4 address after that.
+    port = srv.server.server_address[1]
+    job.env["PROGRAM_AUDIO_URL"] = f"http://localhost:{port}/program-audio.json"
+    p = job.run("Start-ProgramAudioWatchdog")
+    if p.returncode != 0:
+        return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+    if not wait_for(lambda: len(st.sampler_hosts) >= 3, 10):
+        return [f"watchdog polled {len(st.sampler_hosts)}x in 10 s at a 1 s poll"]
+    probs = []
+    if any(h != f"127.0.0.1:{port}" for h in st.sampler_hosts):
+        probs.append(f"polls not pinned to 127.0.0.1:{port}: {st.sampler_hosts[:5]}")
+    a = job.run("Assert-NoProgramAudioBreach")
+    if a.returncode != 0:
+        probs.append(f"assert on a pinned clean run: exit {a.returncode} {a.stdout}{a.stderr}")
+    return probs
 
 
 def wd_stop_retried_while_restreamer_down(job: Env, st: MockState, srv: MockServer) -> list[str]:
@@ -919,6 +940,7 @@ WATCHDOG_CASES = [
     ("watchdog: music starts (FOREIGN) -> marker, ONE stop call, exit, assert fails", wd_foreign_stops_stream),
     ("watchdog: sampler goes away -> fail closed, stop call", wd_sampler_gone_fails_closed),
     ("watchdog: sampler stalls mid-answer -> bounded poll, heartbeat fresh, breach", wd_stalled_sampler_body_is_bounded),
+    ("watchdog: sampler host resolved once, polls go to the pinned IPv4", wd_sampler_host_is_pinned),
     ("watchdog: stop endpoint down once (Restreamer restarting) -> retried", wd_stop_retried_while_restreamer_down),
     ("watchdog: stop queued but OBS keeps streaming -> re-issued until CONFIRMED",
      wd_queued_stop_is_reissued_until_confirmed),

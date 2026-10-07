@@ -1577,7 +1577,7 @@ jobs:
     # mock obs-websocket + rig lease + fake obs64 process. Every scenario also
     # asserts the scripts sent only Start/Stop streaming and read-only requests.
     runs-on: windows-latest
-    # 10 -> 20 with #379: the program-audio guard suite (48 scenarios: a detached
+    # 10 -> 20 with #379: the program-audio guard suite (57 scenarios: a detached
     # watchdog, real poll intervals, delivery-cut budgets) takes ~4 min on dev1's pwsh
     # on top of the ~2 min OBS suite, and Windows PowerShell 5.1 starts slower.
     timeout-minutes: 20

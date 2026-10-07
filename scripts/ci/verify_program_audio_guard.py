@@ -98,8 +98,15 @@ def check_guard_file(root: Path) -> list[str]:
     if not path.is_file():
         return [f"{GUARD} is missing"]
     code = strip_comments(path.read_text(encoding="utf-8"))
-    return [f"{GUARD}: function {f} is missing" for f in GUARD_FUNCS
+    errs = [f"{GUARD}: function {f} is missing" for f in GUARD_FUNCS
             if not re.search(rf"(?m)^function {re.escape(f)}\b", code)]
+    # Every HTTP call goes through the hard-bounded Invoke-ProgramAudioHttp: PS 5.1's
+    # -TimeoutSec does not bound the body read, and a hung watchdog leaves the stream
+    # unguarded (run 37567445540).
+    for raw in sorted(set(re.findall(r"Invoke-(?:WebRequest|RestMethod)\b", code, re.I))):
+        errs.append(f"{GUARD}: {raw} has no hard time bound (PS 5.1 -TimeoutSec skips the body read); "
+                    "use Invoke-ProgramAudioHttp")
+    return errs
 
 
 def long_step(step: dict) -> bool:
@@ -232,7 +239,8 @@ def check_breach_api(root: Path, event_names: set[str]) -> list[str]:
                         f"callers: {callers}")
     body = next((code[a:b] for n, a, b in spans if n == CUT_FN), "")
     gate = CI_GATE.search(body)
-    https = [i for i in (body.find("Invoke-RestMethod"), body.find("Invoke-WebRequest")) if i >= 0]
+    https = [i for i in (body.find("Invoke-RestMethod"), body.find("Invoke-WebRequest"),
+                         body.find("Invoke-ProgramAudioHttp")) if i >= 0]
     if not gate or (https and gate.start() > min(https)):
         errs.append(f"{GUARD}: {CUT_FN} must REFUSE a non-CI EVENT_NAME (-cnotcontains ... return $true) "
                     "before any Restreamer call")
@@ -366,6 +374,9 @@ GUARD_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("the bounded cut retry runs outside the breach path", '      Write-ProgramAudioLog "ok"',
      '      Write-ProgramAudioLog "ok"\n      Invoke-ProgramAudioDeliveryCutUntilDone',
      "Invoke-ProgramAudioDeliveryCutUntilDone may only be called from"),
+    ("a raw Invoke-WebRequest comes back", '    $text = ([string](Invoke-ProgramAudioHttp "GET" (Get-ProgramAudioFetchUrl $url $timeout) $timeout)).Trim()',
+     '    $text = ([string](Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $timeout).Content).Trim()',
+     "has no hard time bound"),
     ("the non-CI refusal is gone", "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {", "  if ($false) {",
      "must REFUSE a non-CI EVENT_NAME"),
     ("a non-CI event is added to the CI list", '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")',

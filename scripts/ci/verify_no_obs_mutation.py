@@ -732,8 +732,7 @@ EXTRA_SCRIPTS: list[tuple[str, dict[str, str], str]] = [
      "start|stop-stream"),
 ]
 # #379: the program-audio guard's one stop-stream call is confined to Invoke-ProgramAudioStop.
-STOP_API_LINE = ('    $null = Invoke-WebRequest -Uri "$(Get-ProgramAudioApiBase)/api/v1/obs/stop-stream" -Method POST '
-                 '-UseBasicParsing -TimeoutSec 5 -Body ""')
+STOP_API_LINE = '    $null = Invoke-ProgramAudioHttp "POST" "$(Get-ProgramAudioApiBase)/api/v1/obs/stop-stream" 5'
 AUDIO_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("the program-audio guard starts streaming through the API", STOP_API_LINE,
      STOP_API_LINE.replace("stop-stream", "start-stream"), "start|stop-stream"),

@@ -84,6 +84,33 @@ function Get-ProgramAudioUrl {
   return "http://dev1:8890/program-audio.json"
 }
 
+# The sampler URL with its host resolved ONCE per process and pinned (IPv4 first: the
+# sampler listens on IPv4 only). stream.lan has no DNS record for dev1 and falls back to
+# LLMNR, ~2 s per lookup with a 10 s TTL, i.e. on every 10 s poll -- 2 s of a 5 s budget.
+# An IP-literal host, or a lookup that fails or does not answer within $timeoutS, keeps
+# the URL as it is; an unreachable poll drops the pin, so a moved dev1 is found again.
+$script:ProgramAudioPinnedUrl = $null
+function Get-ProgramAudioFetchUrl([string]$url, [int]$timeoutS) {
+  if ($script:ProgramAudioPinnedUrl) { return $script:ProgramAudioPinnedUrl }
+  $uri = [Uri]$url
+  if ($uri.HostNameType -ne [UriHostNameType]::Dns) { return $url }
+  $addrs = $null
+  try {
+    $task = [System.Net.Dns]::GetHostAddressesAsync($uri.DnsSafeHost)
+    if ($task.Wait([TimeSpan]::FromSeconds($timeoutS))) { $addrs = $task.Result }
+  } catch {
+    $addrs = $null
+  }
+  $ip = @($addrs | Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }) |
+    Select-Object -First 1
+  if ($null -eq $ip) { return $url }
+  $b = [UriBuilder]$uri
+  $b.Host = $ip.IPAddressToString
+  $script:ProgramAudioPinnedUrl = $b.Uri.AbsoluteUri
+  Write-Host "[program-audio] $($uri.DnsSafeHost) pinned to $($ip.IPAddressToString) for this process"
+  return $script:ProgramAudioPinnedUrl
+}
+
 function Get-ProgramAudioPaths {
   if (-not $env:RUNNER_TEMP) { throw "RUNNER_TEMP is not set; the program-audio guard keeps its state there" }
   return @{
@@ -127,6 +154,49 @@ function Read-ProgramAudioFile([string]$path) {
   return ""
 }
 
+# Every HTTP call of the guard. Returns the body; throws on a non-2xx answer, a
+# refused connection, or no answer within $timeoutS. The bound is HARD: Windows
+# PowerShell 5.1's Invoke-WebRequest/Invoke-RestMethod -TimeoutSec does not cover the
+# body read (stream.lan 2026-10-07: -TimeoutSec 3 waited 45 s on a server that sent
+# headers and stalled), and a watchdog call that never returns leaves the stream
+# unguarded (run 37567445540: no heartbeat for 15 min). HttpClient.Timeout covers the
+# whole request; the Wait bound also covers anything it would miss (name resolution).
+function Invoke-ProgramAudioHttp([string]$method, [string]$url, [int]$timeoutS, [string]$jsonBody = "") {
+  Add-Type -AssemblyName System.Net.Http
+  $client = [System.Net.Http.HttpClient]::new()
+  try {
+    $client.Timeout = [TimeSpan]::FromSeconds($timeoutS)
+    $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($method), $url)
+    $req.Headers.Add("Cache-Control", "no-cache")
+    if ($jsonBody) {
+      $req.Content = [System.Net.Http.StringContent]::new($jsonBody, [System.Text.Encoding]::UTF8, "application/json")
+    } elseif ($method -ne "GET") {
+      $req.Content = [System.Net.Http.StringContent]::new("")
+    }
+    $task = $client.SendAsync($req)
+    $done = $false
+    try {
+      $done = $task.Wait([TimeSpan]::FromSeconds($timeoutS + 1))
+    } catch {
+      $inner = $_.Exception
+      while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+      if ($task.IsCanceled -or $inner -is [System.Threading.Tasks.TaskCanceledException]) {
+        throw "$method $url`: no answer within ${timeoutS}s"
+      }
+      throw "$method $url`: $($inner.Message)"
+    }
+    if (-not $done) { throw "$method $url`: no answer within ${timeoutS}s" }
+    $resp = $task.Result
+    # SendAsync buffers the whole body before it completes, so this read is instant.
+    $body = $resp.Content.ReadAsStringAsync().Result
+    if (-not $resp.IsSuccessStatusCode) { throw "$method $url`: HTTP $([int]$resp.StatusCode)" }
+    return $body
+  } finally {
+    # Also cancels a request still pending after the Wait bound.
+    $client.Dispose()
+  }
+}
+
 # Test-ProgramAudio = one read. -BeforeStart (right before every StartStream) is
 # strict: any non-OK verdict refuses. It refuses at once after an earlier breach / a
 # dead watchdog in this job, and on FOREIGN; a tolerable verdict (a startup UNKNOWN, a
@@ -155,11 +225,11 @@ function Read-ProgramAudioVerdict {
   $foreignWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FOREIGN_WINDOW_S" 30
   $timeout = Get-ProgramAudioKnob "PROGRAM_AUDIO_HTTP_TIMEOUT_S" 5
   try {
-    $resp = Invoke-WebRequest -Uri $url -Method GET -UseBasicParsing -TimeoutSec $timeout -Headers @{ "Cache-Control" = "no-cache" }
+    $text = ([string](Invoke-ProgramAudioHttp "GET" (Get-ProgramAudioFetchUrl $url $timeout) $timeout)).Trim()
   } catch {
+    $script:ProgramAudioPinnedUrl = $null
     return "unreachable: $url ($($_.Exception.Message))"
   }
-  $text = ([string]$resp.Content).Trim()
   # Only a JSON object: ConvertFrom-Json would unwrap a one-element array.
   if (-not $text.StartsWith("{")) { return "malformed: $url did not return a JSON object" }
   try {
@@ -243,7 +313,7 @@ function Get-ProgramAudioApiBase {
 # Returns "" when Restreamer accepted the command (it only QUEUES it), else the error.
 function Invoke-ProgramAudioStop {
   try {
-    $null = Invoke-WebRequest -Uri "$(Get-ProgramAudioApiBase)/api/v1/obs/stop-stream" -Method POST -UseBasicParsing -TimeoutSec 5 -Body ""
+    $null = Invoke-ProgramAudioHttp "POST" "$(Get-ProgramAudioApiBase)/api/v1/obs/stop-stream" 5
     return ""
   } catch {
     return $_.Exception.Message
@@ -254,7 +324,7 @@ function Invoke-ProgramAudioStop {
 # down, its OBS client not connected, no answer).
 function Get-ProgramAudioObsStreaming {
   try {
-    $s = Invoke-RestMethod -Uri "$(Get-ProgramAudioApiBase)/api/v1/obs/status" -Method GET -TimeoutSec 5
+    $s = (Invoke-ProgramAudioHttp "GET" "$(Get-ProgramAudioApiBase)/api/v1/obs/status" 5) | ConvertFrom-Json
   } catch {
     return $null
   }
@@ -266,7 +336,7 @@ function Get-ProgramAudioObsStreaming {
 function Get-ProgramAudioEventInstances([long]$eventId) {
   try {
     # `(...) | ForEach-Object { $_ }` flattens: a JSON array can come back as ONE object.
-    $all = @((Invoke-RestMethod -Uri "$(Get-ProgramAudioApiBase)/api/v1/delivery/instances" -Method GET -TimeoutSec 10) |
+    $all = @(((Invoke-ProgramAudioHttp "GET" "$(Get-ProgramAudioApiBase)/api/v1/delivery/instances" 10) | ConvertFrom-Json) |
       ForEach-Object { $_ })
   } catch {
     return $null
@@ -291,7 +361,7 @@ function Invoke-ProgramAudioDeliveryCut {
   }
   $base = Get-ProgramAudioApiBase
   try {
-    $ev = (Invoke-RestMethod -Uri "$base/api/v1/events" -Method GET -TimeoutSec 10) | ForEach-Object { $_ } |
+    $ev = ((Invoke-ProgramAudioHttp "GET" "$base/api/v1/events" 10) | ConvertFrom-Json) | ForEach-Object { $_ } |
       Where-Object { $null -ne $_ -and $_.name -ceq $name } | Select-Object -First 1
   } catch {
     Write-ProgramAudioLog "delivery cut: events unreadable: $($_.Exception.Message)"
@@ -308,14 +378,14 @@ function Invoke-ProgramAudioDeliveryCut {
   }
   try {
     $body = @{ event_id = $id } | ConvertTo-Json -Compress
-    $null = Invoke-WebRequest -Uri "$base/api/v1/delivery/stop" -Method POST -UseBasicParsing -TimeoutSec 60 -Body $body -ContentType "application/json"
+    $null = Invoke-ProgramAudioHttp "POST" "$base/api/v1/delivery/stop" 60 $body
   } catch {
     Write-ProgramAudioLog "delivery cut: delivery stop for event $name (id $id) failed: $($_.Exception.Message)"
     return $false
   }
   Add-ProgramAudioBreachLine "delivery stop OK: event $name (id $id)"
   try {
-    $null = Invoke-WebRequest -Uri "$base/api/v1/events/$id/deactivate" -Method POST -UseBasicParsing -TimeoutSec 10 -Body ""
+    $null = Invoke-ProgramAudioHttp "POST" "$base/api/v1/events/$id/deactivate" 10
   } catch {
     Write-ProgramAudioLog "delivery cut: deactivating event $name (id $id) failed: $($_.Exception.Message)"
     return $false
