@@ -3,6 +3,7 @@ use crate::api::S3Config;
 use s3::Bucket;
 use s3::Region;
 use s3::creds::Credentials;
+use s3::error::S3Error;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -14,6 +15,16 @@ use thiserror::Error;
 /// #275/#276) with margin so slow-but-completing GETs still succeed, while
 /// failing a true wedge fast into the existing retry-with-backoff.
 const S3_GET_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// An S3 error that means "the object does not exist". Only the typed HTTP
+/// status counts: without rust-s3's `fail-on-err` feature a 404 arrives as an
+/// `Ok` response with status 404 (handled by the callers); with it, as
+/// `HttpFailWithBody(404, _)`. Never the error TEXT: reqwest's message carries
+/// the URL, so a timeout on chunk 404 or 1404 used to read as a clean 404,
+/// i.e. genuine exhaustion and a false rescue on the VPS (#383).
+fn is_not_found(e: &S3Error) -> bool {
+    matches!(e, S3Error::HttpFailWithBody(404, _))
+}
 
 /// Typed errors for S3 fetching operations.
 #[derive(Debug, Error)]
@@ -132,14 +143,8 @@ impl S3Fetcher {
                 "status {}",
                 response.status_code()
             ))),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(err_str))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(S3FetchError::Fetch(e.to_string())),
         }
     }
 
@@ -160,14 +165,8 @@ impl S3Fetcher {
             }
             Ok((_, 404)) => Ok(None),
             Ok((_, code)) => Err(S3FetchError::Fetch(format!("HEAD status {}", code))),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(err_str))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(S3FetchError::Fetch(e.to_string())),
         }
     }
 }
@@ -233,6 +232,16 @@ mod tests {
             matches!(result.unwrap(), Err(S3FetchError::Fetch(_))),
             "a wedged GET must surface as a fetch error (timeout), not a false 404/None"
         );
+    }
+
+    #[test]
+    fn only_a_typed_http_404_is_not_found() {
+        assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
+        assert!(!is_not_found(&S3Error::HttpFailWithBody(
+            500,
+            "404".to_string()
+        )));
+        assert!(!is_not_found(&S3Error::HttpFail));
     }
 
     /// A fetcher whose endpoint refuses every connection (the port was bound

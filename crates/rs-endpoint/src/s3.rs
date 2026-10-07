@@ -497,16 +497,8 @@ impl S3Client {
                 }
                 Ok(Some(String::from_utf8_lossy(resp.bytes()).to_string()))
             }
-            // Some rust-s3 code paths surface a 404 as an Err rather than an
-            // Ok with status 404; treat a not-found message as "absent".
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("404") || msg.to_ascii_lowercase().contains("not found") {
-                    Ok(None)
-                } else {
-                    Err(EndpointError::S3(format!("get {key} failed: {e}")))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(EndpointError::S3(format!("get {key} failed: {e}"))),
         }
     }
 
@@ -528,6 +520,15 @@ impl S3Client {
         }
         Ok(())
     }
+}
+
+/// An S3 error that means "the object does not exist": only the typed
+/// `HttpFailWithBody(404)` (rust-s3's `fail-on-err`; without it a 404 is an
+/// `Ok` with status 404). Never the error TEXT: reqwest's message carries the
+/// URL, so "404"/"not found" in a key or port made a refused GET read as
+/// "absent" (#383).
+fn is_not_found(e: &s3::error::S3Error) -> bool {
+    matches!(e, s3::error::S3Error::HttpFailWithBody(404, _))
 }
 
 #[cfg(test)]
@@ -589,6 +590,17 @@ mod tests {
             secret_access_key: "secret".to_string(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn only_a_typed_http_404_is_not_found() {
+        use s3::error::S3Error;
+        assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
+        assert!(!is_not_found(&S3Error::HttpFailWithBody(
+            500,
+            "not found 404".to_string()
+        )));
+        assert!(!is_not_found(&S3Error::HttpFail));
     }
 
     /// A transport error is never "absent", even when its text contains "404"
