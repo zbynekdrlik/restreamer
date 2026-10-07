@@ -3552,7 +3552,9 @@ jobs:
 
       - name: Verify cache bar grows during buffering phase (Playwright)
         shell: powershell
-        timeout-minutes: 5
+        # 5 -> 7 with #380: the step now first waits up to 90 s for the VPS live-edge init
+        # (+ up to 15 s for the post-init label) before its 10 s growth check.
+        timeout-minutes: 7
         run: |
           Write-Host "Verifying cache bar grows during initial buffering phase..."
           Set-Location "$env:GITHUB_WORKSPACE\e2e"
@@ -3610,41 +3612,62 @@ jobs:
               process.exit(1);
             }
 
-            // During buffering phase: endpoints exist but are pending, cache bar should show
-            // the backend-computed cache_duration_secs value (real measured chunk duration sum)
-            const cacheLabels = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
-            console.log('Cache labels during buffering:', cacheLabels);
-
-            if (cacheLabels.length === 0) {
-              console.error('FAILED: No cache bar labels found during buffering phase');
-              console.error('Expected per-endpoint cache bars showing S3 buffer accumulation');
-              process.exit(1);
-            }
-
             // #192: parse a NON-FAST label (order-independent). A fast endpoint
             // renders "Xs / live cache" or "Xs / Ns target cache" -- blindly
-            // parsing cacheLabels[0] would mis-read a fast label if it sorts
-            // first (e.g. a fast "0s / live cache" placeholder pre-VPS would
-            // fail the regex, or "0s / Ns target cache" would trip the
-            // 0s-during-buffering check). This assertion is about the non-fast
-            // S3 cushion.
+            // parsing labels[0] would mis-read a fast label if it sorts first.
+            // This assertion is about the non-fast S3 cushion.
             const FAST_RE = /(\d+)s\s*\/\s*(?:live|(\d+)s\s+target)\s+cache\s*$/i;
             const NONFAST_RE = /(\d+)s\s*\/\s*(\d+)s\s+cache\s*$/;
-            const trimmedLabels = cacheLabels.map(l => l.trim());
-            const nfLabel = trimmedLabels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
-            if (!nfLabel) {
-              console.error('FAILED: No non-fast cache label (Xs / Ns cache) during buffering; labels:', JSON.stringify(trimmedLabels));
+            const readNonFast = async () => {
+              const labels = (await page.locator('.endpoint-cache-label').allTextContents().catch(() => [])).map(l => l.trim());
+              const nf = labels.find(l => !FAST_RE.test(l) && NONFAST_RE.test(l));
+              if (!nf) return { labels, secs: null, target: null };
+              const m = nf.match(NONFAST_RE);
+              return { labels, secs: parseInt(m[1]), target: parseInt(m[2]) };
+            };
+
+            // #380: wait for the VPS live-edge init BEFORE measuring. Before init the
+            // placeholder endpoints have current_chunk_id=0, so the label sums EVERY
+            // sent chunk; at init the VPS starts at the live edge (#174) and the label
+            // drops to 0 s, then grows again. One read ~40 s after the VPS was created
+            // raced that drop (main run 37549179955 read 0 s, 1.2 s after the init).
+            const initDeadline = Date.now() + 90000;
+            let rtmp = null;
+            let cachedLast = null;
+            while (Date.now() < initDeadline) {
+              cachedLast = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
+              const eps = cachedLast && Array.isArray(cachedLast.endpoints) ? cachedLast.endpoints : [];
+              const ep = eps.find(e => e.alias === 'e2e rtmp');
+              if (ep && ep.alive && ep.current_chunk_id > 0) { rtmp = ep; break; }
+              await page.waitForTimeout(2000);
+            }
+            if (!rtmp) {
+              console.error('FAILED: e2e rtmp was not alive with current_chunk_id > 0 within 90 s (no VPS live-edge init)');
+              console.error('Cached delivery:', JSON.stringify(cachedLast));
               process.exit(1);
             }
-            const match = nfLabel.match(NONFAST_RE);
+            console.log('VPS initialised: e2e rtmp alive, current_chunk_id =', rtmp.current_chunk_id);
 
-            const cacheSecs = parseInt(match[1]);
-            const targetSecs = parseInt(match[2]);
-            console.log('Cache during buffering:', cacheSecs, 's /', targetSecs, 's');
+            // Then the post-init buffer: up to 15 s for the non-fast label to reach >= 2 s
+            // (about one chunk past the live-edge start).
+            const labelDeadline = Date.now() + 15000;
+            let first = await readNonFast();
+            while ((first.secs === null || first.secs < 2) && Date.now() < labelDeadline) {
+              await page.waitForTimeout(1000);
+              first = await readNonFast();
+            }
+            console.log('Cache labels after the VPS init:', first.labels);
+            if (first.secs === null) {
+              console.error('FAILED: No non-fast cache label (Xs / Ns cache) after the VPS init; labels:', JSON.stringify(first.labels));
+              process.exit(1);
+            }
+            const cacheSecs = first.secs;
+            const targetSecs = first.target;
+            console.log('Cache after the VPS init:', cacheSecs, 's /', targetSecs, 's');
 
-            // Cache MUST be > 0 during buffering (chunks are on S3)
-            if (cacheSecs === 0) {
-              console.error('FAILED: Cache bar shows 0s during buffering phase.');
+            // The cache MUST grow past the live-edge start (chunks keep landing on S3).
+            if (cacheSecs < 2) {
+              console.error('FAILED: Cache bar stayed under 2 s for 15 s after the VPS init.');
               console.error('This is the exact bug from issue #80 - cache bar not growing.');
               process.exit(1);
             }
@@ -3661,9 +3684,9 @@ jobs:
 
             // Take second reading after 10s to verify growth
             await page.waitForTimeout(10000);
-            const cacheLabels2 = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
-            const match2 = cacheLabels2[0].match(/(\d+)s\s*\/\s*(\d+)s/);
-            const cacheSecs2 = match2 ? parseInt(match2[1]) : 0;
+            // The same NON-FAST label as the first read (never labels[0], see #192).
+            const second = await readNonFast();
+            const cacheSecs2 = second.secs === null ? 0 : second.secs;
             console.log('Cache after 10s:', cacheSecs2, 's');
 
             if (cacheSecs2 < cacheSecs) {
@@ -3687,7 +3710,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log('PASSED: Cache bar growing during buffering:', cacheSecs, 's ->', cacheSecs2, 's', '(growth:', growth, 's in 10s)');
+            console.log('PASSED: Cache bar growing after the VPS live-edge init:', cacheSecs, 's ->', cacheSecs2, 's', '(growth:', growth, 's in 10s)');
             await browser.close();
           })();
           '@
