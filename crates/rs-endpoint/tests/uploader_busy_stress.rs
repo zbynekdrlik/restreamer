@@ -63,6 +63,22 @@ fn is_sqlite_busy(e: &rs_core::error::CoreError) -> bool {
     s.contains("database is locked") || s.contains("(code: 5") || s.contains("(code: 517")
 }
 
+/// Keeps the first 5 BUSY errors with the call and its wait (see busy_details).
+fn note_busy(
+    details: &std::sync::Mutex<Vec<String>>,
+    op: &str,
+    started: Instant,
+    e: &impl std::fmt::Display,
+) {
+    let mut d = details.lock().unwrap();
+    if d.len() < 5 {
+        d.push(format!(
+            "{op} after {} ms: {e}",
+            started.elapsed().as_millis()
+        ));
+    }
+}
+
 /// Floor of the liveness cap on the whole claim phase. It is NOT a throughput
 /// target: a correct picker drains 800 chunks in about 0.5 s on a normal host.
 const LIVENESS_CAP_FLOOR: Duration = Duration::from_secs(60);
@@ -118,6 +134,12 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     let (ws_tx, _ws_rx) = broadcast::channel(1024);
 
     let busy_hits = Arc::new(AtomicU32::new(0));
+    // The first BUSY errors in full: which call, how long it waited, the
+    // SQLite text. ~5000 ms = busy_timeout expired (a writer held the lock);
+    // a few ms = SQLite bypassed the busy handler. Windows run 37700613077 hit
+    // 2 BUSY that never reproduce on Linux, and the count alone said nothing.
+    let busy_details: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     // Non-BUSY errors from the picker or the sent-mark. Not part of the #256
     // signature, but counted so a persistent one shows up in the output
     // instead of looping silently.
@@ -149,6 +171,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     for _ in 0..8 {
         let pool = pool.clone();
         let busy_hits = Arc::clone(&busy_hits);
+        let busy_details = Arc::clone(&busy_details);
         let other_errors = Arc::clone(&other_errors);
         let claims = Arc::clone(&claims);
         let seeded_ids = Arc::clone(&seeded_ids);
@@ -156,6 +179,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         workers.push(tokio::spawn(async move {
             while seeded_claimed.load(Ordering::SeqCst) < SEED {
                 let now_ms = chrono::Utc::now().timestamp_millis();
+                let pick_started = Instant::now();
                 match db::pick_next_uploadable_chunk(&pool, now_ms).await {
                     Ok(Some(chunk)) => {
                         // Count this claim. A correct picker claims each id
@@ -171,6 +195,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                         // a real production write (execute(pool) UPDATE), so a
                         // BUSY here is ALSO part of the storm the fix must
                         // eliminate — count it into busy_hits, don't swallow it.
+                        let mark_started = Instant::now();
                         if let Err(e) = db::record_upload_success(
                             &pool,
                             chunk.id,
@@ -181,6 +206,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                         {
                             if is_sqlite_busy(&e) {
                                 busy_hits.fetch_add(1, Ordering::Relaxed);
+                                note_busy(&busy_details, "mark", mark_started, &e);
                             } else {
                                 other_errors.fetch_add(1, Ordering::Relaxed);
                             }
@@ -192,6 +218,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                     Err(e) => {
                         if is_sqlite_busy(&e) {
                             busy_hits.fetch_add(1, Ordering::Relaxed);
+                            note_busy(&busy_details, "pick", pick_started, &e);
                         } else {
                             other_errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -311,6 +338,11 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         &missing[..missing.len().min(10)]
     );
 
+    let busy_text = busy_details.lock().unwrap().join(" | ");
+    if !busy_text.is_empty() {
+        println!("uploader_busy_stress: BUSY details: {busy_text}");
+    }
+
     // ZERO tolerance: the storm is the bug. The fix (single atomic claim
     // statement) eliminates both the read snapshot (517) and the read->write
     // window (5). Any escape to the app layer is a regression.
@@ -318,7 +350,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         busy, 0,
         "picker surfaced {busy} SQLITE_BUSY/BUSY_SNAPSHOT errors under the \
          production write mix — the #256 storm is back (deferred read->write \
-         picker, or busy_timeout failing to cover 517)"
+         picker, or busy_timeout failing to cover 517). Details: {busy_text}"
     );
 
     // The write mix must really have run while the workers claimed; otherwise

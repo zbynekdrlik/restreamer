@@ -3,6 +3,7 @@ use crate::api::S3Config;
 use s3::Bucket;
 use s3::Region;
 use s3::creds::Credentials;
+use s3::error::S3Error;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -14,6 +15,27 @@ use thiserror::Error;
 /// #275/#276) with margin so slow-but-completing GETs still succeed, while
 /// failing a true wedge fast into the existing retry-with-backoff.
 const S3_GET_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// An S3 error that means "the object does not exist". Only the typed HTTP
+/// status counts: without rust-s3's `fail-on-err` feature a 404 arrives as an
+/// `Ok` response with status 404 (handled by the callers); with it, as
+/// `HttpFailWithBody(404, _)`. Never the error TEXT: reqwest's message carries
+/// the URL, so a timeout on chunk 404 or 1404 used to read as a clean 404,
+/// i.e. genuine exhaustion and a false rescue on the VPS (#383).
+fn is_not_found(e: &S3Error) -> bool {
+    matches!(e, S3Error::HttpFailWithBody(404, _))
+}
+
+/// The answer for a failed S3 call: absent for a typed 404, else a fetch
+/// error (it then goes into the caller's retry). Its own function so the
+/// typed-404 branch is unit-testable: our rust-s3 build never produces it.
+fn absent_or_fetch_error<T>(e: S3Error) -> Result<Option<T>, S3FetchError> {
+    if is_not_found(&e) {
+        Ok(None)
+    } else {
+        Err(S3FetchError::Fetch(e.to_string()))
+    }
+}
 
 /// Typed errors for S3 fetching operations.
 #[derive(Debug, Error)]
@@ -132,14 +154,7 @@ impl S3Fetcher {
                 "status {}",
                 response.status_code()
             ))),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(err_str))
-                }
-            }
+            Err(e) => absent_or_fetch_error(e),
         }
     }
 
@@ -160,14 +175,7 @@ impl S3Fetcher {
             }
             Ok((_, 404)) => Ok(None),
             Ok((_, code)) => Err(S3FetchError::Fetch(format!("HEAD status {}", code))),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(err_str))
-                }
-            }
+            Err(e) => absent_or_fetch_error(e),
         }
     }
 }
@@ -233,6 +241,73 @@ mod tests {
             matches!(result.unwrap(), Err(S3FetchError::Fetch(_))),
             "a wedged GET must surface as a fetch error (timeout), not a false 404/None"
         );
+    }
+
+    #[test]
+    fn only_a_typed_http_404_is_not_found() {
+        assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
+        assert!(!is_not_found(&S3Error::HttpFailWithBody(
+            500,
+            "404".to_string()
+        )));
+        assert!(!is_not_found(&S3Error::HttpFail));
+    }
+
+    #[test]
+    fn a_failed_call_is_absent_only_for_a_typed_404() {
+        let absent: Result<Option<i64>, _> =
+            absent_or_fetch_error(S3Error::HttpFailWithBody(404, String::new()));
+        assert!(matches!(absent, Ok(None)));
+        let failed: Result<Option<i64>, _> =
+            absent_or_fetch_error(S3Error::HttpFailWithBody(503, "404".to_string()));
+        assert!(matches!(failed, Err(S3FetchError::Fetch(m)) if m.contains("503")));
+    }
+
+    /// A fetcher whose endpoint refuses every connection (the port was bound
+    /// and released): each request fails at once with a transport error.
+    async fn refusing_fetcher() -> S3Fetcher {
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(2)).unwrap()
+    }
+
+    /// A transport error is never "absent", even when its text contains "404":
+    /// reqwest's message carries the URL, so a failed GET of chunk 404 / 1404 /
+    /// 4041 read as a clean 404 = genuine exhaustion on the VPS (a false rescue
+    /// while the stream still exists on S3). Main CI 37686250955 hit the same
+    /// misread through a random port containing "404".
+    #[tokio::test]
+    async fn a_failed_get_of_chunk_404_is_an_error_not_absent() {
+        let fetcher = refusing_fetcher().await;
+        for chunk_id in [404, 1404, 4041] {
+            let r = fetcher.fetch_chunk_with_meta(chunk_id).await;
+            assert!(
+                matches!(r, Err(S3FetchError::Fetch(_))),
+                "chunk {chunk_id}: a refused GET must be Err(Fetch), got {:?}",
+                r.map(|o| o.is_some())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_head_of_chunk_404_is_an_error_not_absent() {
+        let fetcher = refusing_fetcher().await;
+        for chunk_id in [404, 1404, 4041] {
+            let r = fetcher.head_chunk_duration(chunk_id).await;
+            assert!(
+                matches!(r, Err(S3FetchError::Fetch(_))),
+                "chunk {chunk_id}: a refused HEAD must be Err(Fetch), got {r:?}"
+            );
+        }
     }
 
     #[test]

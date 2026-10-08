@@ -497,16 +497,7 @@ impl S3Client {
                 }
                 Ok(Some(String::from_utf8_lossy(resp.bytes()).to_string()))
             }
-            // Some rust-s3 code paths surface a 404 as an Err rather than an
-            // Ok with status 404; treat a not-found message as "absent".
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("404") || msg.to_ascii_lowercase().contains("not found") {
-                    Ok(None)
-                } else {
-                    Err(EndpointError::S3(format!("get {key} failed: {e}")))
-                }
-            }
+            Err(e) => absent_or_get_error(key, e),
         }
     }
 
@@ -527,6 +518,26 @@ impl S3Client {
             )));
         }
         Ok(())
+    }
+}
+
+/// An S3 error that means "the object does not exist": only the typed
+/// `HttpFailWithBody(404)` (rust-s3's `fail-on-err`; without it a 404 is an
+/// `Ok` with status 404). Never the error TEXT: reqwest's message carries the
+/// URL, so "404"/"not found" in a key or port made a refused GET read as
+/// "absent" (#383).
+fn is_not_found(e: &s3::error::S3Error) -> bool {
+    matches!(e, s3::error::S3Error::HttpFailWithBody(404, _))
+}
+
+/// The answer for a failed GET: absent for a typed 404, else an error. Its own
+/// function so the typed-404 branch is unit-testable: our rust-s3 build never
+/// produces it.
+fn absent_or_get_error<T>(key: &str, e: s3::error::S3Error) -> Result<Option<T>, EndpointError> {
+    if is_not_found(&e) {
+        Ok(None)
+    } else {
+        Err(EndpointError::S3(format!("get {key} failed: {e}")))
     }
 }
 
@@ -589,6 +600,46 @@ mod tests {
             secret_access_key: "secret".to_string(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn only_a_typed_http_404_is_not_found() {
+        use s3::error::S3Error;
+        assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
+        assert!(!is_not_found(&S3Error::HttpFailWithBody(
+            500,
+            "not found 404".to_string()
+        )));
+        assert!(!is_not_found(&S3Error::HttpFail));
+    }
+
+    #[test]
+    fn a_failed_get_is_absent_only_for_a_typed_404() {
+        use s3::error::S3Error;
+        let absent: Result<Option<String>, _> =
+            absent_or_get_error("k", S3Error::HttpFailWithBody(404, String::new()));
+        assert!(matches!(absent, Ok(None)));
+        let failed: Result<Option<String>, _> =
+            absent_or_get_error("k/404.log", S3Error::HttpFailWithBody(503, String::new()));
+        assert!(
+            matches!(failed, Err(EndpointError::S3(m)) if m.contains("k/404.log") && m.contains("503"))
+        );
+    }
+
+    /// A transport error is never "absent", even when its text contains "404"
+    /// or "not found": reqwest's message carries the URL (key + port), so a
+    /// refused GET of `delivery-logs/vps-404.log` used to read as Ok(None).
+    #[tokio::test]
+    async fn get_object_string_refused_is_an_error_not_absent() {
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = test_s3_client(&format!("http://127.0.0.1:{port}"));
+        for key in ["delivery-logs/vps-404.log", "delivery-logs/not found.log"] {
+            let r = client.get_object_string(key).await;
+            assert!(r.is_err(), "{key}: a refused GET must be Err, got {r:?}");
+        }
     }
 
     #[test]
