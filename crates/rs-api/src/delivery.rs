@@ -70,6 +70,10 @@ pub struct StartDeliveryResult {
     /// Auth token generated for this delivery instance (used for API auth).
     #[serde(skip)]
     pub auth_token: String,
+    /// True when this start found a live or spawning instance and handed it
+    /// back. The caller must then NOT init it again (#370).
+    #[serde(skip)]
+    pub reused: bool,
 }
 
 // `EventChunkWiper`, `wipe_event_s3_chunks`, and `wipe_event_s3_chunks_with`
@@ -242,6 +246,7 @@ impl DeliveryOrchestrator {
                     server_type: existing.server_type,
                     status: existing.status,
                     auth_token: existing.auth_token,
+                    reused: true,
                 });
             }
             // Stale row: the old VPS may still be running and billing. #244:
@@ -421,6 +426,7 @@ impl DeliveryOrchestrator {
             server_type,
             status: "creating".to_string(),
             auth_token,
+            reused: false,
         })
     }
 

@@ -49,6 +49,34 @@ pub async fn start_stream(
         }
     }
 
+    // #370: the delivery is already live (or still spawning): a second start
+    // changes nothing. It used to clear this event's chunk rows below and
+    // spawn a second poll_and_init whose failure marked the LIVE instance
+    // "failed", so the next start deleted it as a stale row.
+    let live = db::get_delivery_instance_by_event(&state.pool, id)
+        .await
+        .map_err(|e| {
+            error!("Failed to read the delivery instance of event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .filter(|inst| crate::delivery_helpers::is_delivery_or_spawning(&inst.status));
+    if let Some(inst) = live {
+        tracing::info!(
+            event_id = id,
+            instance_id = inst.id,
+            status = %inst.status,
+            "Stream already running for this event; second start is a no-op"
+        );
+        // Idempotent: keeps the dashboard flags consistent with the live VPS.
+        db::update_streaming_event_flags(&state.pool, id, true, true)
+            .await
+            .map_err(|e| {
+                error!("Failed to set the stream flags of event {id}: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        return Ok(StatusCode::OK);
+    }
+
     // Set both flags
     db::update_streaming_event_flags(&state.pool, id, true, true)
         .await
