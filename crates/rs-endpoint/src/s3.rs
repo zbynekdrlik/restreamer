@@ -497,8 +497,7 @@ impl S3Client {
                 }
                 Ok(Some(String::from_utf8_lossy(resp.bytes()).to_string()))
             }
-            Err(e) if is_not_found(&e) => Ok(None),
-            Err(e) => Err(EndpointError::S3(format!("get {key} failed: {e}"))),
+            Err(e) => absent_or_get_error(key, e),
         }
     }
 
@@ -529,6 +528,17 @@ impl S3Client {
 /// "absent" (#383).
 fn is_not_found(e: &s3::error::S3Error) -> bool {
     matches!(e, s3::error::S3Error::HttpFailWithBody(404, _))
+}
+
+/// The answer for a failed GET: absent for a typed 404, else an error. Its own
+/// function so the typed-404 branch is unit-testable: our rust-s3 build never
+/// produces it.
+fn absent_or_get_error<T>(key: &str, e: s3::error::S3Error) -> Result<Option<T>, EndpointError> {
+    if is_not_found(&e) {
+        Ok(None)
+    } else {
+        Err(EndpointError::S3(format!("get {key} failed: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -601,6 +611,19 @@ mod tests {
             "not found 404".to_string()
         )));
         assert!(!is_not_found(&S3Error::HttpFail));
+    }
+
+    #[test]
+    fn a_failed_get_is_absent_only_for_a_typed_404() {
+        use s3::error::S3Error;
+        let absent: Result<Option<String>, _> =
+            absent_or_get_error("k", S3Error::HttpFailWithBody(404, String::new()));
+        assert!(matches!(absent, Ok(None)));
+        let failed: Result<Option<String>, _> =
+            absent_or_get_error("k/404.log", S3Error::HttpFailWithBody(503, String::new()));
+        assert!(
+            matches!(failed, Err(EndpointError::S3(m)) if m.contains("k/404.log") && m.contains("503"))
+        );
     }
 
     /// A transport error is never "absent", even when its text contains "404"

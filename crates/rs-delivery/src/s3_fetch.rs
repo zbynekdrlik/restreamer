@@ -26,6 +26,17 @@ fn is_not_found(e: &S3Error) -> bool {
     matches!(e, S3Error::HttpFailWithBody(404, _))
 }
 
+/// The answer for a failed S3 call: absent for a typed 404, else a fetch
+/// error (it then goes into the caller's retry). Its own function so the
+/// typed-404 branch is unit-testable: our rust-s3 build never produces it.
+fn absent_or_fetch_error<T>(e: S3Error) -> Result<Option<T>, S3FetchError> {
+    if is_not_found(&e) {
+        Ok(None)
+    } else {
+        Err(S3FetchError::Fetch(e.to_string()))
+    }
+}
+
 /// Typed errors for S3 fetching operations.
 #[derive(Debug, Error)]
 pub enum S3FetchError {
@@ -143,8 +154,7 @@ impl S3Fetcher {
                 "status {}",
                 response.status_code()
             ))),
-            Err(e) if is_not_found(&e) => Ok(None),
-            Err(e) => Err(S3FetchError::Fetch(e.to_string())),
+            Err(e) => absent_or_fetch_error(e),
         }
     }
 
@@ -165,8 +175,7 @@ impl S3Fetcher {
             }
             Ok((_, 404)) => Ok(None),
             Ok((_, code)) => Err(S3FetchError::Fetch(format!("HEAD status {}", code))),
-            Err(e) if is_not_found(&e) => Ok(None),
-            Err(e) => Err(S3FetchError::Fetch(e.to_string())),
+            Err(e) => absent_or_fetch_error(e),
         }
     }
 }
@@ -242,6 +251,16 @@ mod tests {
             "404".to_string()
         )));
         assert!(!is_not_found(&S3Error::HttpFail));
+    }
+
+    #[test]
+    fn a_failed_call_is_absent_only_for_a_typed_404() {
+        let absent: Result<Option<i64>, _> =
+            absent_or_fetch_error(S3Error::HttpFailWithBody(404, String::new()));
+        assert!(matches!(absent, Ok(None)));
+        let failed: Result<Option<i64>, _> =
+            absent_or_fetch_error(S3Error::HttpFailWithBody(503, "404".to_string()));
+        assert!(matches!(failed, Err(S3FetchError::Fetch(m)) if m.contains("503")));
     }
 
     /// A fetcher whose endpoint refuses every connection (the port was bound
