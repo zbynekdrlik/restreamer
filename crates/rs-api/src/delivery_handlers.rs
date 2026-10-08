@@ -254,6 +254,26 @@ pub async fn delivery_start(
         );
     }
 
+    // #370: a second start on a delivery that is already live (or still
+    // spawning) is a no-op. Its first start already runs poll_and_init and the
+    // health monitor; a second init would replace that monitor's handle, and
+    // when it failed its cleanup would delete the LIVE VPS.
+    if result.reused {
+        tracing::info!(
+            event_id,
+            instance_id = result.instance_id,
+            status = %result.status,
+            "Delivery already running for this event; second start is a no-op"
+        );
+        return Ok(Json(DeliveryStartResponse {
+            instance_id: result.instance_id,
+            hetzner_id: result.hetzner_id,
+            name: result.name,
+            server_type: result.server_type,
+            status: result.status,
+        }));
+    }
+
     // Spawn background task to poll Hetzner and init rs-delivery
     let (instance_id, event_name) = (result.instance_id, event.name.clone());
     let (auth_token, poll_handles, orch) = (
