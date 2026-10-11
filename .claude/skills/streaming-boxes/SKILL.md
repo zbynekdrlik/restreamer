@@ -10,6 +10,7 @@ triggers:
   - streampp
   - win-stream-snv
   - stream-pp
+  - linux-stream-pp
   - streaming box
   - soak test
   - fast endpoint
@@ -52,7 +53,7 @@ upgrades, tailscale IP) are obsolete.
 | Property | Value |
 |---|---|
 | Host | `stream-pp`, LAN `10.77.8.204` (PP LAN, gateway 10.77.8.1) |
-| From dev1 | `ssh newlevel@10.76.8.204` (companion-pp subnet route). **No tailscale on the box** (owner, 2026-10-11) and no MCP. |
+| From dev1 | MCP `linux-stream-pp` (remoteos MCP, `http://stream-pp.lan:8092/mcp`; dev1 resolves `stream-pp.lan` to 10.76.8.204), or `ssh newlevel@10.76.8.204` (companion-pp subnet route). **No tailscale on the box** (owner, 2026-10-11). |
 | User | `newlevel` (dev1 key in authorized_keys; `sudo` needs the rig password, which camera-box/owner hold) |
 | Restreamer | apt-installed `.deb` (`dpkg -s restreamer`), `systemctl --user` unit `restreamer.service` (`--headless`, enabled; the kiosk autostart also starts it) |
 | Config / data | `~/.config/restreamer/config.json` (own `client_uuid`, obs ws `127.0.0.1:4455` without auth) / `~/.local/share/restreamer` (DB, chunks, `restreamer.log`, `logs/stall.log`) |
