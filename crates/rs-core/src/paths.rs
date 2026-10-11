@@ -10,6 +10,8 @@
 //!   else `$HOME/.config/restreamer`
 //! - data (DB, chunks, logs): `$RESTREAMER_DATA_DIR`, else
 //!   `$XDG_DATA_HOME/restreamer`, else `$HOME/.local/share/restreamer`
+//! - none of them set: panic at startup. Guessing a CWD-relative dir would
+//!   silently start on a fresh empty DB wherever the process happened to run.
 //!
 //! Every caller goes through these two functions; the paths used to be
 //! hardcoded in six places.
@@ -17,13 +19,15 @@
 use std::path::PathBuf;
 
 const WINDOWS_DIR: &str = r"C:\ProgramData\Restreamer";
+const NO_HOME: &str =
+    "no RESTREAMER_*_DIR, XDG_*_HOME or HOME is set: refusing to guess where config and data live";
 
 /// The directory holding `config.json` (and `av-gate/`, `delivery-logs/`).
 pub fn config_dir() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(WINDOWS_DIR)
     } else {
-        unix_dir(&env_var, Kind::Config)
+        unix_dir(&env_var, Kind::Config).expect(NO_HOME)
     }
 }
 
@@ -32,7 +36,7 @@ pub fn data_dir() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(WINDOWS_DIR)
     } else {
-        unix_dir(&env_var, Kind::Data)
+        unix_dir(&env_var, Kind::Data).expect(NO_HOME)
     }
 }
 
@@ -48,22 +52,20 @@ enum Kind {
 
 /// The non-Windows rule, with the environment passed in so it is testable.
 /// An empty variable counts as unset (the XDG spec says so for the XDG ones).
-fn unix_dir(env: &dyn Fn(&str) -> Option<String>, kind: Kind) -> PathBuf {
+/// `None` when not even HOME is set.
+fn unix_dir(env: &dyn Fn(&str) -> Option<String>, kind: Kind) -> Option<PathBuf> {
     let set = |name: &str| env(name).filter(|v| !v.is_empty());
     let (own, xdg, home_rel) = match kind {
         Kind::Config => ("RESTREAMER_CONFIG_DIR", "XDG_CONFIG_HOME", ".config"),
         Kind::Data => ("RESTREAMER_DATA_DIR", "XDG_DATA_HOME", ".local/share"),
     };
     if let Some(dir) = set(own) {
-        return PathBuf::from(dir);
+        return Some(PathBuf::from(dir));
     }
     if let Some(base) = set(xdg) {
-        return PathBuf::from(base).join("restreamer");
+        return Some(PathBuf::from(base).join("restreamer"));
     }
-    // No HOME at all (a bare service environment): fall back to a relative
-    // dir rather than the filesystem root.
-    let home = set("HOME").unwrap_or_else(|| ".".to_string());
-    PathBuf::from(home).join(home_rel).join("restreamer")
+    set("HOME").map(|home| PathBuf::from(home).join(home_rel).join("restreamer"))
 }
 
 #[cfg(test)]
@@ -84,11 +86,11 @@ mod tests {
         let env = env_of(&[("HOME", "/home/newlevel")]);
         assert_eq!(
             unix_dir(&env, Kind::Config),
-            PathBuf::from("/home/newlevel/.config/restreamer")
+            Some(PathBuf::from("/home/newlevel/.config/restreamer"))
         );
         assert_eq!(
             unix_dir(&env, Kind::Data),
-            PathBuf::from("/home/newlevel/.local/share/restreamer")
+            Some(PathBuf::from("/home/newlevel/.local/share/restreamer"))
         );
     }
 
@@ -101,11 +103,11 @@ mod tests {
         ]);
         assert_eq!(
             unix_dir(&env, Kind::Config),
-            PathBuf::from("/cfg/restreamer")
+            Some(PathBuf::from("/cfg/restreamer"))
         );
         assert_eq!(
             unix_dir(&env, Kind::Data),
-            PathBuf::from("/data/restreamer")
+            Some(PathBuf::from("/data/restreamer"))
         );
     }
 
@@ -120,9 +122,12 @@ mod tests {
         ]);
         assert_eq!(
             unix_dir(&env, Kind::Config),
-            PathBuf::from("/srv/rs-config")
+            Some(PathBuf::from("/srv/rs-config"))
         );
-        assert_eq!(unix_dir(&env, Kind::Data), PathBuf::from("/srv/rs-data"));
+        assert_eq!(
+            unix_dir(&env, Kind::Data),
+            Some(PathBuf::from("/srv/rs-data"))
+        );
     }
 
     #[test]
@@ -134,20 +139,24 @@ mod tests {
         ]);
         assert_eq!(
             unix_dir(&env, Kind::Config),
-            PathBuf::from("/home/newlevel/.config/restreamer")
+            Some(PathBuf::from("/home/newlevel/.config/restreamer"))
         );
         assert_eq!(
             unix_dir(&env, Kind::Data),
-            PathBuf::from("/home/newlevel/.local/share/restreamer")
+            Some(PathBuf::from("/home/newlevel/.local/share/restreamer"))
         );
     }
 
     #[test]
-    fn no_home_falls_back_to_a_relative_dir() {
+    fn no_home_and_no_overrides_is_none_not_a_guess() {
         let env = env_of(&[]);
+        assert_eq!(unix_dir(&env, Kind::Data), None);
+        assert_eq!(unix_dir(&env, Kind::Config), None);
+        // An override alone is enough, HOME is not needed.
+        let env = env_of(&[("RESTREAMER_DATA_DIR", "/srv/rs-data")]);
         assert_eq!(
             unix_dir(&env, Kind::Data),
-            PathBuf::from("./.local/share/restreamer")
+            Some(PathBuf::from("/srv/rs-data"))
         );
     }
 

@@ -3,10 +3,12 @@
 # embedded service in --headless mode (file log under
 # ~/.local/share/restreamer, config at ~/.config/restreamer/config.json).
 # Enable once:  systemctl --user enable --now restreamer
+# No network-online.target here: that is a system-manager target the user
+# manager does not have, so it would order nothing. Restreamer starts without
+# a network (RTMP listens on 0.0.0.0; S3 uploads and delivery retry).
 [Unit]
 Description=Restreamer (headless)
-After=graphical-session.target network-online.target
-Wants=network-online.target
+After=graphical-session.target
 
 [Service]
 ExecStart=/usr/bin/Restreamer --headless
