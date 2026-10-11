@@ -147,6 +147,13 @@ fn bundled_candidates(exe_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     vec![
         exe_dir.join(BUNDLED_BINARY_NAME),
         exe_dir.join("resources").join(BUNDLED_BINARY_NAME),
+        // The Linux .deb (stream-pp): the exe is /usr/bin/Restreamer and Tauri
+        // puts `bundle.resources` under /usr/lib/<productName>/.
+        exe_dir
+            .join("..")
+            .join("lib")
+            .join("Restreamer")
+            .join(BUNDLED_BINARY_NAME),
     ]
 }
 
@@ -672,6 +679,13 @@ mod tests {
         let c = bundled_candidates(dir);
         assert!(c.contains(&dir.join("rs-delivery-linux")));
         assert!(c.contains(&dir.join("resources").join("rs-delivery-linux")));
+    }
+
+    #[test]
+    fn bundled_candidates_include_the_linux_deb_resource_dir() {
+        let dir = std::path::Path::new("/usr/bin");
+        let c = bundled_candidates(dir);
+        assert!(c.contains(&dir.join("../lib/Restreamer/rs-delivery-linux")));
     }
 
     #[test]

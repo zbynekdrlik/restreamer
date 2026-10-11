@@ -1,0 +1,17 @@
+# Restreamer on a Linux box (stream-pp): a systemd --user service in the
+# desktop user's session. The kiosk there has no system tray, so it runs the
+# embedded service in --headless mode (file log under
+# ~/.local/share/restreamer, config at ~/.config/restreamer/config.json).
+# Enable once:  systemctl --user enable --now restreamer
+[Unit]
+Description=Restreamer (headless)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/Restreamer --headless
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

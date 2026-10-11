@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{RwLock, broadcast, oneshot};
 
 use rs_core::config::Config;
 use rs_core::db;
@@ -180,11 +180,7 @@ impl AppState {
 
     /// Get the database path.
     pub fn db_path(&self) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(r"C:\ProgramData\Restreamer\restreamer.db")
-        } else {
-            PathBuf::from("/var/lib/restreamer/restreamer.db")
-        }
+        rs_core::paths::data_dir().join("restreamer.db")
     }
 
     /// Delete all chunk records from the database and remove orphaned `.bin` files.
@@ -193,11 +189,7 @@ impl AppState {
             .await
             .map_err(|e| e.to_string())?;
 
-        let chunk_dir = if cfg!(windows) {
-            std::path::PathBuf::from(r"C:\ProgramData\Restreamer\chunks")
-        } else {
-            std::path::PathBuf::from("/var/lib/restreamer/chunks")
-        };
+        let chunk_dir = rs_core::paths::data_dir().join("chunks");
 
         cleanup_chunk_files(&chunk_dir).await;
 
@@ -222,7 +214,10 @@ pub async fn cleanup_chunk_files(dir: &Path) {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if entry.path().extension().is_some_and(|ext| ext == "bin") {
                 if let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                    tracing::warn!("Failed to remove chunk file {}: {e}", entry.path().display());
+                    tracing::warn!(
+                        "Failed to remove chunk file {}: {e}",
+                        entry.path().display()
+                    );
                 }
             }
         }

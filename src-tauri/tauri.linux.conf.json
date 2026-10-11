@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/config.schema.json",
+  "bundle": {
+    "targets": [
+      "deb"
+    ],
+    "resources": {
+      "rs-delivery-linux": "rs-delivery-linux",
+      "rs-delivery-linux.sha256": "rs-delivery-linux.sha256",
+      "../dist/": "www/"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "ffmpeg"
+        ],
+        "files": {
+          "/usr/lib/systemd/user/restreamer.service": "linux/restreamer.service"
+        }
+      }
+    }
+  }
+}

@@ -67,11 +67,7 @@ impl ServiceCore {
         log_buffer: LogBuffer,
         inpoint_state: InpointState,
     ) -> Self {
-        let data_dir = if cfg!(windows) {
-            PathBuf::from(r"C:\ProgramData\Restreamer")
-        } else {
-            PathBuf::from("/var/lib/restreamer")
-        };
+        let data_dir = rs_core::paths::data_dir();
 
         Self {
             db_path: data_dir.join("restreamer.db"),
@@ -350,14 +346,22 @@ impl ServiceCore {
         api_state = api_state.with_inpoint_state(wired_inpoint.clone());
         let inpoint_state = wired_inpoint;
 
-        // Serve the WASM frontend from a "www" directory next to the binary,
-        // so LAN browsers can access the dashboard at http://<host>:8910/
+        // Serve the WASM frontend so LAN browsers can open the dashboard at
+        // http://<host>:8910/. Windows: `www` next to the exe. Linux .deb: the
+        // exe is /usr/bin/Restreamer and the bundled www is a Tauri resource
+        // under /usr/lib/Restreamer/.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
-                let www = exe_dir.join("www");
-                if www.is_dir() {
-                    info!("Serving frontend from {}", www.display());
-                    api_state = api_state.with_www_dir(www);
+                let candidates = crate::www_dir::www_candidates(exe_dir);
+                match candidates.iter().find(|p| p.is_dir()) {
+                    Some(www) => {
+                        info!("Serving frontend from {}", www.display());
+                        api_state = api_state.with_www_dir(www.clone());
+                    }
+                    None => warn!(
+                        "No frontend www dir found (looked in {:?}); the dashboard will not load",
+                        candidates
+                    ),
                 }
             }
         }

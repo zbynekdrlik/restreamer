@@ -102,8 +102,13 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         true,
         None::<&str>,
     )?;
-    let check_updates =
-        MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
+    let check_updates = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
     let menu = MenuBuilder::new(app)
@@ -283,23 +288,22 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
         }
         "view_logs" => {
             // Open a live-tailing log window
+            let log = rs_core::paths::data_dir().join("restreamer.log");
             #[cfg(target_os = "windows")]
             {
                 let _ = std::process::Command::new("powershell.exe")
                     .args([
-                        "-NoExit",
-                        "-Command",
-                        "Get-Content 'C:\\ProgramData\\Restreamer\\restreamer.log' -Tail 50 -Wait",
+                        "-NoExit".to_string(),
+                        "-Command".to_string(),
+                        format!("Get-Content '{}' -Tail 50 -Wait", log.display()),
                     ])
                     .spawn();
             }
             #[cfg(not(target_os = "windows"))]
             {
                 let _ = std::process::Command::new("x-terminal-emulator")
-                    .args([
-                        "-e", "tail", "-n", "50", "-f",
-                        "/var/lib/restreamer/restreamer.log",
-                    ])
+                    .args(["-e", "tail", "-n", "50", "-f"])
+                    .arg(&log)
                     .spawn();
             }
         }
@@ -436,9 +440,7 @@ fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
             let _ = items
                 .inpoint
                 .set_text(format!("Inpoint: {}", status.inpoint));
-            let _ = items
-                .buffer
-                .set_text(format!("Buffer: {}", status.buffer));
+            let _ = items.buffer.set_text(format!("Buffer: {}", status.buffer));
             let _ = items
                 .uploader
                 .set_text(format!("Uploader: {}", status.endpoint));
