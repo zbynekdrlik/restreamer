@@ -588,6 +588,82 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  build-tauri-linux:
+    name: Build Tauri app (Linux .deb)
+    # stream-pp runs Ubuntu 26.04 (#323): the same app as the Windows NSIS,
+    # packaged as a .deb with the dashboard www, the bundled rs-delivery-linux
+    # and a systemd --user unit (src-tauri/tauri.linux.conf.json).
+    needs: [lint, test, build-delivery]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Download delivery binary (for bundling, #246)
+        uses: actions/download-artifact@v4
+        with:
+          name: rs-delivery-binary
+          path: delivery-artifact
+      - name: Bundle delivery binary into Tauri resources (#246)
+        run: |
+          src=$(find delivery-artifact -type f -name rs-delivery | head -1)
+          if [ -z "$src" ]; then echo "delivery binary artifact not found -- cannot bundle (#246)"; exit 1; fi
+          cp "$src" src-tauri/rs-delivery-linux
+          size=$(stat -c %s src-tauri/rs-delivery-linux)
+          echo "Bundled rs-delivery-linux: $size bytes"
+          if [ "$size" -lt 1000000 ]; then echo "bundled binary suspiciously small ($size bytes)"; exit 1; fi
+          (cd src-tauri && sha256sum rs-delivery-linux | awk '{printf "%s  rs-delivery-linux", $1}' > rs-delivery-linux.sha256)
+      - name: Install trunk, wasm-bindgen-cli and wasm-opt
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk,wasm-bindgen-cli,wasm-opt
+      - name: Set build version and timestamp
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.ref_name }}" != "main" ]; then version="$version-dev"; fi
+          echo "BUILD_VERSION=$version" >> "$GITHUB_ENV"
+          echo "BUILD_TIMESTAMP=$(date '+%b %d %H:%M')" >> "$GITHUB_ENV"
+          echo "Version: $version"
+      - name: Build Leptos UI (WASM)
+        run: cd leptos-ui && trunk build --release
+      - name: Install Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+      - name: Build the .deb
+        run: cd src-tauri && cargo tauri build --bundles deb
+        env:
+          SQLX_OFFLINE: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Verify the .deb carries the binary, www, the VPS binary and the unit
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          dpkg-deb -I "$deb"
+          # Tauri writes the paths without a leading "./"; strip it if present.
+          dpkg-deb -c "$deb" | awk '{print $6}' | sed 's#^\./##' > deb-files.txt
+          for want in usr/bin/Restreamer usr/lib/Restreamer/www/index.html \
+                      usr/lib/Restreamer/rs-delivery-linux usr/lib/systemd/user/restreamer.service; do
+            grep -qx "$want" deb-files.txt || { echo "MISSING in .deb: $want"; cat deb-files.txt; exit 1; }
+          done
+          dpkg-deb -f "$deb" Depends | grep -q ffmpeg || { echo ".deb does not depend on ffmpeg"; exit 1; }
+          echo "deb contents OK"
+      - name: Upload the .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
   build-delivery:
     name: Build rs-delivery (Linux)
     needs: [lint, test]
@@ -1599,6 +1675,7 @@ jobs:
         coverage,
         security,
         build-tauri,
+        build-tauri-linux,
         build-delivery,
         file-size,
         secret-scan,
@@ -1618,6 +1695,7 @@ jobs:
           echo "coverage:       ${{ needs.coverage.result }}"
           echo "security:       ${{ needs.security.result }}"
           echo "build-tauri:    ${{ needs.build-tauri.result }}"
+          echo "build-tauri-linux: ${{ needs.build-tauri-linux.result }}"
           echo "build-delivery: ${{ needs.build-delivery.result }}"
           echo "file-size:      ${{ needs.file-size.result }}"
           echo "secret-scan:    ${{ needs.secret-scan.result }}"
@@ -1669,6 +1747,7 @@ jobs:
             "coverage:${{ needs.coverage.result }}" \
             "security:${{ needs.security.result }}" \
             "build-tauri:${{ needs.build-tauri.result }}" \
+            "build-tauri-linux:${{ needs.build-tauri-linux.result }}" \
             "build-delivery:${{ needs.build-delivery.result }}" \
             "file-size:${{ needs.file-size.result }}" \
             "secret-scan:${{ needs.secret-scan.result }}" \
