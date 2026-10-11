@@ -1,7 +1,7 @@
 ---
 name: streaming-boxes
 description: >
-  Reference for the two Windows streaming boxes (stream.lan and streampp) —
+  Reference for the two streaming boxes (stream.lan on Windows, stream-pp on Linux) —
   IPs, MCP names, subnets, API endpoints, soak/test recipe, dashboard quirks.
   Load when working on stream.lan or streampp deployment, CI E2E jobs, VPS
   delivery, or any task involving the production streaming infrastructure.
@@ -9,7 +9,7 @@ triggers:
   - stream.lan
   - streampp
   - win-stream-snv
-  - win-streampp
+  - stream-pp
   - streaming box
   - soak test
   - fast endpoint
@@ -42,55 +42,32 @@ Two Windows streaming boxes (separate from dev1/dev2). Both run the single unifi
 
 Dashboard reachable from dev1 (returns 200).
 
-### streampp — Secondary Box
+### stream-pp — Secondary Box (Linux since 2026-10-11, #323)
+
+The Windows streampp PC was reinstalled to **Ubuntu 26.04** (openbox kiosk run by camera-box,
+stream OBS = `strih-obs.service` user unit). Its old Windows DB (endpoints, YT/FB keys, OAuth)
+was lost in the reinstall. The Windows notes (MCP `win-streampp`, user `interkom`, NSIS
+upgrades, tailscale IP) are obsolete.
 
 | Property | Value |
 |---|---|
-| IP | `10.77.8.204:8910` |
-| User | `interkom` |
-| MCP | `win-streampp` |
-| S3 bucket | `restreamer-chunks-fsn1` @ fsn1 (migrated 2026-06-24 after the nbg1 incident, #278 — verify live via `/api/v1/status` s3_region_standard or config.json, don't trust this snapshot). Its DB `rescue_video_url` still points at the DELETED nbg1 bucket — #347. |
-| Disk | disk_pressure="ok" as of 2026-07-12 (was ~82%/"warn" on 2026-06-07 — check live via `/api/v1/status`, don't trust either snapshot) |
-| Subnet | 10.77.8.x — LAN IP `10.77.8.204` NOT reachable from dev1 (10.77.9.x) |
-| Tailscale | streampp has its OWN tailscale IP (`tailscale ip -4` via `win-streampp` Shell) — reachable from dev1/Playwright even though the LAN IP isn't. Don't assume unreachable; check tailscale first. |
+| Host | `stream-pp`, LAN `10.77.8.204` (PP LAN, gateway 10.77.8.1) |
+| From dev1 | `ssh newlevel@10.76.8.204` (companion-pp subnet route). **No tailscale on the box** (owner, 2026-10-11) and no MCP. |
+| User | `newlevel` (dev1 key in authorized_keys; `sudo` needs the rig password, which camera-box/owner hold) |
+| Restreamer | apt-installed `.deb` (`dpkg -s restreamer`), `systemctl --user` unit `restreamer.service` (`--headless`, enabled; the kiosk autostart also starts it) |
+| Config / data | `~/.config/restreamer/config.json` (own `client_uuid`, obs ws `127.0.0.1:4455` without auth) / `~/.local/share/restreamer` (DB, chunks, `restreamer.log`, `logs/stall.log`) |
+| Dashboard | `http://10.77.8.204:8910` on the PP LAN (`http://10.76.8.204:8910` from dev1, Playwright works) |
+| OBS ingest | `rtmp://127.0.0.1:1234/live` (camera-box sets it); restreamer may only Start/Stop streaming via its API. Never put `PRO` on program/preview. |
 
-**Access streampp dashboard**: via `win-streampp` MCP locally, from dev2 (10.77.8.134, same LAN subnet), OR via streampp's own tailscale IP (works from anywhere on the tailnet, incl. Playwright on dev1 for DOM version verification).
+**Upgrade:** take the `restreamer-linux-deb` artifact (ci.yml) or the `Restreamer_<ver>_amd64.deb`
+release asset, `scp` it to stream-pp and have someone with sudo run `apt install ./<deb>`, then
+`systemctl --user restart restreamer` (with `XDG_RUNTIME_DIR=/run/user/1000` over ssh). Verify:
+`dpkg -s restreamer`, `/api/v1/status` 200, the dashboard DOM version, `obs/status` connected.
 
-No ffmpeg, OBS installed but no headless task. Version drifts independently of stream.lan (manual NSIS deploys, not CI-driven) — always read the LIVE version via MCP (`(Get-Item 'C:\Program Files\Restreamer\Restreamer.exe').VersionInfo.ProductVersion`) before assuming any note here is current; it was v0.22.6 on 2026-06-07, v0.27.0 by 2026-07-12 (upgraded outside this doc's tracking), v0.29.1 after 2026-07-12's manual upgrade.
-
-### Manual upgrade procedure (cross-subnet, no shared filesystem)
-
-streampp can't be `scp`'d to directly from dev1 and has no shared drive — transfer via the airuleset file-drop server over tailscale (works even though the LAN IP doesn't):
-
-```bash
-# On dev1: get the installer + the matching www bundle for the SAME commit
-gh release download restreamer-vX.Y.Z -R zbynekdrlik/restreamer --pattern "*.exe" --dir .
-# Find the main-branch CI run for that release's merge commit, download its www artifact:
-gh run list --workflow ci.yml -b main -L 5 --json databaseId,headSha,conclusion
-gh run download <run-id> -R zbynekdrlik/restreamer --name restreamer-www --dir ./www
-zip -qr www.zip www   # bundle for one-shot transfer
-
-# Host both via the file-drop server, then have streampp pull them over tailscale:
-python3 ~/devel/airuleset/airuleset.py share Restreamer_X.Y.Z_x64-setup.exe
-python3 ~/devel/airuleset/airuleset.py share www.zip
-```
-
-On streampp (`win-streampp` Shell), download via the printed tailscale URL, install silently, then swap `www\` (NSIS never ships it — see below):
-
-```powershell
-Invoke-WebRequest -Uri "http://<dev1-tailscale-ip>:8788/<token>/Restreamer_X.Y.Z_x64-setup.exe" -OutFile "$env:TEMP\setup.exe"
-Invoke-WebRequest -Uri "http://<dev1-tailscale-ip>:8788/<token>/www.zip" -OutFile "$env:TEMP\www.zip"
-& "$env:TEMP\setup.exe" /S
-Start-Sleep -Seconds 15   # let the silent install finish before touching www\
-
-Remove-Item -Recurse -Force 'C:\Program Files\Restreamer\www'
-Expand-Archive -Path "$env:TEMP\www.zip" -DestinationPath "$env:TEMP\www_extract" -Force
-Move-Item "$env:TEMP\www_extract\www" 'C:\Program Files\Restreamer\www'
-```
-
-**Gotcha: the NSIS silent installer STOPS the `RestreamerGUI` scheduled task and does not restart it** — after `/S` completes, the task is left in `Ready` (not `Running`) state and the API stops answering. Always follow with `Start-ScheduledTask -TaskName RestreamerGUI` and re-verify `/api/v1/status` responds before declaring the upgrade done. Streaming-event state (DB) survives the upgrade untouched (confirmed 2026-07-12: same event id/name/received_bytes before and after).
-
-Verify the new version from the LIVE DOM (not just the exe's `ProductVersion`) via streampp's tailscale IP — the `www\` swap is a separate step from the exe upgrade and can silently fail independently.
+**Ingest-only test without a VPS:** `pp-ingest-test.sh` recipe (2026-10-11). Create or reuse the
+event `PP-Ingest-Test`, `POST /events/{id}/activate`, `POST /obs/start-stream`, sample
+`/api/v1/status` (inpoint state, `ingest_gaps`, skew), `POST /obs/stop-stream`, then
+`/events/{id}/deactivate`. Check `/api/v1/uploads/stats` and `stall.log`.
 
 ## Object storage — ONE bucket exists: `restreamer-chunks-fsn1`
 
