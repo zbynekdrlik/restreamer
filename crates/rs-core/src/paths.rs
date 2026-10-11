@@ -152,6 +152,16 @@ mod tests {
     }
 
     #[test]
+    fn env_var_reads_the_real_process_environment() {
+        // PATH is set and non-empty for every test runner; reading it back
+        // through env_var proves the real environment is consulted.
+        let path = std::env::var("PATH").expect("PATH set for the test runner");
+        assert!(!path.is_empty());
+        assert_eq!(env_var("PATH"), Some(path));
+        assert_eq!(env_var("RESTREAMER_PATHS_TEST_SURELY_UNSET_VAR"), None);
+    }
+
+    #[test]
     fn windows_keeps_programdata_for_both() {
         if cfg!(windows) {
             assert_eq!(config_dir(), PathBuf::from(WINDOWS_DIR));
