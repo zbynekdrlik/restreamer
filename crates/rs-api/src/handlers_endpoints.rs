@@ -16,16 +16,20 @@ const VALID_SERVICE_TYPES: &[&str] = &["FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "T
 /// (#391). Those routes are internet-reachable behind Access and their bodies
 /// land in logs and transcripts, so the key never leaves the box. `***` (the
 /// config-redaction mask) plus the last 4 characters lets the operator tell
-/// keys apart; a key of 8 characters or fewer gets no tail. Internal consumers
-/// (VPS init, YT health matching, oauth-suggest) read the DB row, not this.
+/// keys apart. A key shorter than `MIN_TAILED_KEY_CHARS` gets no tail, so the
+/// tail never reveals a third or more of a key. Internal consumers (VPS init,
+/// YT health matching, oauth-suggest) read the DB row, not this.
 pub fn mask_stream_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 8 {
+    if chars.len() < MIN_TAILED_KEY_CHARS {
         return REDACTED.to_string();
     }
     let tail: String = chars[chars.len() - 4..].iter().collect();
     format!("{REDACTED}{tail}")
 }
+
+/// Shortest stream key whose masked form shows its last 4 characters.
+const MIN_TAILED_KEY_CHARS: usize = 13;
 
 /// An endpoint row as the read routes serve it: stream key masked.
 pub fn masked_endpoint(mut ep: EndpointConfig) -> EndpointConfig {
@@ -37,7 +41,8 @@ pub fn masked_endpoint(mut ep: EndpointConfig) -> EndpointConfig {
 /// key": a client echoing a listed row back must never write `***abcd` over
 /// the real key (#391). A real stream key never starts with the mask.
 fn is_unchanged_key(key: &str) -> bool {
-    key.trim().is_empty() || key.starts_with(REDACTED)
+    let key = key.trim();
+    key.is_empty() || key.starts_with(REDACTED)
 }
 
 pub async fn list_endpoints(

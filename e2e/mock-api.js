@@ -533,7 +533,7 @@ app.delete("/api/v1/templates/:id", (req, res) => {
 // is exercised against the real contract.
 function maskKey(key) {
   const chars = Array.from(key || "");
-  return chars.length <= 8 ? "***" : "***" + chars.slice(-4).join("");
+  return chars.length < 13 ? "***" : "***" + chars.slice(-4).join("");
 }
 function maskedEndpoints(list) {
   return list.map((e) => ({ ...e, stream_key: maskKey(e.stream_key) }));
@@ -625,7 +625,7 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
   if (req.body.service_type !== undefined)
     ep.service_type = req.body.service_type;
   const key = req.body.stream_key;
-  if (key !== undefined && key.trim() !== "" && !key.startsWith("***")) {
+  if (key !== undefined && key.trim() !== "" && !key.trim().startsWith("***")) {
     ep.stream_key = key;
     // #68: record key updates so the guided Change Key E2E can assert the
     // remove -> update -> re-add sequence fired with the new key.
