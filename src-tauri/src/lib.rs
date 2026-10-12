@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use tauri::{Manager, WindowEvent};
 use tokio::sync::{broadcast, oneshot};
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 use rs_core::config::Config;
 use rs_core::db;
@@ -21,15 +21,11 @@ use rs_runtime::{LogCaptureLayer, ServiceCore};
 use crate::state::AppState;
 
 #[cfg(windows)]
-use tokio::signal::windows::{ctrl_c, ctrl_break};
+use tokio::signal::windows::{ctrl_break, ctrl_c};
 
-/// Data directory path (platform-specific).
+/// Data directory path (platform-specific, see `rs_core::paths`).
 fn data_dir() -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(r"C:\ProgramData\Restreamer")
-    } else {
-        PathBuf::from("/var/lib/restreamer")
-    }
+    rs_core::paths::data_dir()
 }
 
 /// Initialize tracing with log capture and non-blocking file logging.
@@ -159,11 +155,7 @@ pub fn run() {
             // Start the embedded service in a background task
             tauri::async_runtime::spawn(async move {
                 // Initialize database first to get the pool
-                let data_dir = if cfg!(windows) {
-                    PathBuf::from(r"C:\ProgramData\Restreamer")
-                } else {
-                    PathBuf::from("/var/lib/restreamer")
-                };
+                let data_dir = data_dir();
 
                 // Ensure data directory exists
                 if let Err(e) = tokio::fs::create_dir_all(&data_dir).await {
@@ -187,9 +179,7 @@ pub fn run() {
                 if let Err(e) = db::run_migrations(&pool).await {
                     tracing::error!("Failed to run migrations: {e}");
                     eprintln!("FATAL: database migration failed: {e}");
-                    eprintln!(
-                        "See log file at C:\\ProgramData\\Restreamer\\logs\\ for details."
-                    );
+                    eprintln!("See the log in {} for details.", data_dir.display());
                     std::process::exit(1);
                 }
 
@@ -206,15 +196,11 @@ pub fn run() {
                 // #234: pre-create the Arcs shared between Tauri AppState
                 // and the embedded `rs_api::AppState` so the tray IPC
                 // `get_status` reads the same atomics the HTTP path reads.
-                let disk_pressure_level = std::sync::Arc::new(
-                    std::sync::atomic::AtomicU8::new(0),
-                );
+                let disk_pressure_level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
                 let rtmp_stable_since = rs_core::stable_since::StableSince::new();
                 // #352: shared orphan-VPS count so the tray IPC surfaces the
                 // orphan banner (the tray app is the production deployment).
-                let vps_orphan_count = std::sync::Arc::new(
-                    std::sync::atomic::AtomicU8::new(0),
-                );
+                let vps_orphan_count = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
 
                 let app_state = AppState::new(
                     pool,
@@ -325,8 +311,7 @@ pub fn run_headless() {
         // Handle shutdown signals
         #[cfg(windows)]
         {
-            let mut ctrl_c_signal =
-                ctrl_c().expect("Failed to register Ctrl+C handler");
+            let mut ctrl_c_signal = ctrl_c().expect("Failed to register Ctrl+C handler");
             let mut ctrl_break_signal =
                 ctrl_break().expect("Failed to register Ctrl+Break handler");
 
@@ -350,9 +335,9 @@ pub fn run_headless() {
 
         #[cfg(not(windows))]
         {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
             let mut sigint =
                 signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
 

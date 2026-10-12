@@ -13,6 +13,7 @@ mod orchestrator;
 pub mod rtmp_bind;
 mod shutdown;
 pub mod stall_detector;
+mod www_dir;
 
 pub use log_capture::LogCaptureLayer;
 pub use orchestrator::ServiceCore;

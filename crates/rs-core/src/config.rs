@@ -654,11 +654,7 @@ impl Config {
 
     /// Default config file path.
     pub fn default_path() -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(r"C:\ProgramData\Restreamer\config.json")
-        } else {
-            PathBuf::from("/etc/restreamer/config.json")
-        }
+        crate::paths::config_dir().join("config.json")
     }
 
     /// Directory where delivery VPS logs are persisted to disk as a backup

@@ -151,9 +151,64 @@ jobs:
           name: tauri-installer
           path: src-tauri/target/release/bundle/nsis/*.exe
 
+  build-tauri-linux:
+    name: Build Tauri app (Linux .deb)
+    # stream-pp runs Ubuntu 26.04 (#323). Same app, packaged as a .deb with the
+    # dashboard www, the bundled rs-delivery-linux and a systemd --user unit.
+    needs: [validate, build-delivery]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Download delivery binary (for bundling, #246)
+        uses: actions/download-artifact@v4
+        with:
+          name: delivery-binary
+          path: delivery-artifact
+      - name: Bundle delivery binary into Tauri resources (#246)
+        run: |
+          src=$(find delivery-artifact -type f -name 'rs-delivery-*-linux-amd64' | head -1)
+          if [ -z "$src" ]; then echo "delivery binary artifact not found -- cannot bundle (#246)"; exit 1; fi
+          cp "$src" src-tauri/rs-delivery-linux
+          size=$(stat -c %s src-tauri/rs-delivery-linux)
+          if [ "$size" -lt 1000000 ]; then echo "bundled binary suspiciously small ($size bytes)"; exit 1; fi
+          (cd src-tauri && sha256sum rs-delivery-linux | awk '{printf "%s  rs-delivery-linux", $1}' > rs-delivery-linux.sha256)
+      - name: Install trunk, wasm-bindgen-cli, wasm-opt and the Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk,wasm-bindgen-cli,wasm-opt,tauri-cli
+      - name: Set build version and timestamp
+        run: |
+          echo "BUILD_VERSION=${{ needs.validate.outputs.version }}" >> "$GITHUB_ENV"
+          echo "BUILD_TIMESTAMP=$(date '+%b %d %H:%M')" >> "$GITHUB_ENV"
+      - name: Build Leptos UI (WASM)
+        run: cd leptos-ui && trunk build --release
+      - name: Build the .deb
+        run: cd src-tauri && cargo tauri build --bundles deb
+        env:
+          SQLX_OFFLINE: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: [validate, build-delivery, build-tauri]
+    needs: [validate, build-delivery, build-tauri, build-tauri-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -173,12 +228,14 @@ jobs:
           files: |
             artifacts/delivery-binary/*
             artifacts/tauri-installer/*
+            artifacts/tauri-linux-deb/*
           body: |
             ## Restreamer v${{ needs.validate.outputs.version }}
 
             ### Assets
             - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (unified app with embedded service + tray icon)
             - `rs-delivery-*-linux-amd64` — Linux delivery VPS binary
+            - `Restreamer_*_amd64.deb` — Linux build (stream-pp): `sudo apt install ./Restreamer_*_amd64.deb`, then `systemctl --user enable --now restreamer`
 
             ### Installation
             ```powershell
