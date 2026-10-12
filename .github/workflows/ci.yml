@@ -754,6 +754,28 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
           ./gitleaks version
+      - name: "Self-test: the YouTube stream-key rule fires (#375)"
+        run: |
+          # A key leaked in a committed skill for 7 months because the default
+          # rules only catch one after a `key: ` keyword. Prove our custom rule
+          # catches the URL and table forms. The keys are random, built at
+          # runtime, so no key-shaped literal sits in the tree.
+          d="$(mktemp -d)"
+          python3 - "$d/leak.md" <<'PY'
+          import secrets, string, sys
+          g = lambda n: "-".join("".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4)) for _ in range(n))
+          open(sys.argv[1], "w").write("rtmp://a.rtmp.youtube.com/live2/" + g(4) + "\n| YT KS-BB 4K | " + g(5) + " |\n")
+          PY
+          if ./gitleaks detect --no-git --source "$d" --config .gitleaks.toml --redact --no-banner -r "$d/report.json"; then
+            echo "ERROR: gitleaks found nothing in a file holding two YouTube stream keys"; exit 1
+          fi
+          hits=$(jq '[.[] | select(.RuleID == "youtube-stream-key")] | length' "$d/report.json")
+          echo "youtube-stream-key hits: $hits"
+          [ "$hits" -eq 2 ] || { echo "ERROR: expected 2 youtube-stream-key hits"; exit 1; }
+          # A UUID's 4-4-4 middle must not match.
+          python3 -c "import uuid,sys; open(sys.argv[1],'w').write(str(uuid.uuid4())+'\n')" "$d/uuid.md"
+          rm "$d/leak.md" "$d/report.json"
+          ./gitleaks detect --no-git --source "$d" --config .gitleaks.toml --redact --no-banner
       - name: Scan working tree for committed secrets
         run: |
           # Tree-only scan (--no-git): checks the checked-out tree exactly as
