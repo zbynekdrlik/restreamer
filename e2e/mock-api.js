@@ -527,10 +527,22 @@ app.delete("/api/v1/templates/:id", (req, res) => {
   res.status(204).send();
 });
 
+// #391: the real read routes serve the stream key masked (`***` + last 4,
+// bare `***` for keys of 8 chars or fewer) and a PUT whose key is empty or
+// still masked keeps the stored key. The mock mirrors both so the dashboard
+// is exercised against the real contract.
+function maskKey(key) {
+  const chars = Array.from(key || "");
+  return chars.length <= 8 ? "***" : "***" + chars.slice(-4).join("");
+}
+function maskedEndpoints(list) {
+  return list.map((e) => ({ ...e, stream_key: maskKey(e.stream_key) }));
+}
+
 app.get("/api/v1/templates/:id/endpoints", (req, res) => {
   const id = parseInt(req.params.id);
   const epIds = templateEndpoints[id] || [];
-  res.json(endpoints.filter((e) => epIds.includes(e.id)));
+  res.json(maskedEndpoints(endpoints.filter((e) => epIds.includes(e.id))));
 });
 
 app.post("/api/v1/templates/:tid/endpoints/:eid", (req, res) => {
@@ -555,7 +567,7 @@ app.get("/api/v1/events/:id/endpoints", (req, res) => {
   const id = parseInt(req.params.id);
   const epIds = eventEndpoints[id] || [];
   const eps = endpoints.filter((e) => epIds.includes(e.id));
-  res.json(eps);
+  res.json(maskedEndpoints(eps));
 });
 
 app.post("/api/v1/events/:eventId/endpoints/:endpointId", (req, res) => {
@@ -583,7 +595,7 @@ app.delete("/api/v1/events/:eventId/endpoints/:endpointId", (req, res) => {
 
 // --- Endpoints API ---
 app.get("/api/v1/endpoints", (_req, res) => {
-  res.json(endpoints);
+  res.json(maskedEndpoints(endpoints));
 });
 
 app.post("/api/v1/endpoints", (req, res) => {
@@ -612,8 +624,9 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
   if (req.body.alias !== undefined) ep.alias = req.body.alias;
   if (req.body.service_type !== undefined)
     ep.service_type = req.body.service_type;
-  if (req.body.stream_key !== undefined) {
-    ep.stream_key = req.body.stream_key;
+  const key = req.body.stream_key;
+  if (key !== undefined && key.trim() !== "" && !key.startsWith("***")) {
+    ep.stream_key = key;
     // #68: record key updates so the guided Change Key E2E can assert the
     // remove -> update -> re-add sequence fired with the new key.
     changeKeyOps.push({ op: "update", id: ep.id, stream_key: req.body.stream_key });
@@ -683,6 +696,11 @@ app.post("/api/v1/delivery/endpoints/remove", (req, res) => {
 });
 app.get("/api/v1/_test/change-key-ops", (_req, res) => {
   res.json(changeKeyOps);
+});
+// #391: the STORED (unmasked) key, so a spec can prove a save kept it.
+app.get("/api/v1/_test/stored-key/:id", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  res.json({ stream_key: ep ? ep.stream_key : null });
 });
 
 // --- Standalone delivery start/stop (#136) ---

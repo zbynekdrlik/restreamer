@@ -3,13 +3,42 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
 
+use rs_core::config_redact::REDACTED;
 use rs_core::db;
 use rs_core::models::EndpointConfig;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::state::AppState;
 
 const VALID_SERVICE_TYPES: &[&str] = &["FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
+
+/// The stream key an endpoint read route serves instead of the stored one
+/// (#391). Those routes are internet-reachable behind Access and their bodies
+/// land in logs and transcripts, so the key never leaves the box. `***` (the
+/// config-redaction mask) plus the last 4 characters lets the operator tell
+/// keys apart; a key of 8 characters or fewer gets no tail. Internal consumers
+/// (VPS init, YT health matching, oauth-suggest) read the DB row, not this.
+pub fn mask_stream_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return REDACTED.to_string();
+    }
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{REDACTED}{tail}")
+}
+
+/// An endpoint row as the read routes serve it: stream key masked.
+pub fn masked_endpoint(mut ep: EndpointConfig) -> EndpointConfig {
+    ep.stream_key = mask_stream_key(&ep.stream_key);
+    ep
+}
+
+/// A PUT key that is empty or still carries the mask means "keep the stored
+/// key": a client echoing a listed row back must never write `***abcd` over
+/// the real key (#391). A real stream key never starts with the mask.
+fn is_unchanged_key(key: &str) -> bool {
+    key.trim().is_empty() || key.starts_with(REDACTED)
+}
 
 pub async fn list_endpoints(
     State(state): State<AppState>,
@@ -18,7 +47,7 @@ pub async fn list_endpoints(
         error!("Failed to list endpoints: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok(Json(endpoints))
+    Ok(Json(endpoints.into_iter().map(masked_endpoint).collect()))
 }
 
 #[derive(Deserialize)]
@@ -70,7 +99,7 @@ pub async fn get_endpoint_by_id(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(endpoint))
+    Ok(Json(masked_endpoint(endpoint)))
 }
 
 #[derive(Deserialize)]
@@ -109,6 +138,14 @@ pub async fn update_endpoint(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let stream_key = match req.stream_key.as_deref() {
+        Some(key) if !is_unchanged_key(key) => {
+            info!("Endpoint {id}: stream key replaced");
+            key
+        }
+        _ => &existing.stream_key,
+    };
+
     db::update_endpoint_config(
         &state.pool,
         id,
@@ -116,7 +153,7 @@ pub async fn update_endpoint(
         req.service_type
             .as_deref()
             .unwrap_or(&existing.service_type),
-        req.stream_key.as_deref().unwrap_or(&existing.stream_key),
+        stream_key,
         req.enabled.unwrap_or(existing.enabled),
         req.is_fast.unwrap_or(existing.is_fast),
     )
@@ -177,5 +214,5 @@ pub async fn get_event_endpoints(
             error!("Failed to get endpoints for event {event_id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(Json(links))
+    Ok(Json(links.into_iter().map(masked_endpoint).collect()))
 }
