@@ -4,6 +4,18 @@ title = "gitleaks config for restreamer"
 [extend]
 useDefault = true
 
+# YouTube RTMP stream keys: 4 or 5 groups of 4 lowercase alphanumerics
+# ("abcd-efgh-ijkl-mnop[-qrst]"). The default rule set only catches one after
+# a `key: ` keyword, so a key inside an rtmp:// URL or a markdown table passed
+# (#375: a production key sat in a committed skill for 7 months). The
+# delimiters keep the 4-4-4-4 middle of a UUID (8-4-4-4-12) from matching.
+[[rules]]
+id = "youtube-stream-key"
+description = "YouTube RTMP stream key"
+regex = '''(?:^|[^0-9A-Za-z_-])([a-z0-9]{4}(?:-[a-z0-9]{4}){3,4})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+entropy = 3.0
+
 # The `secret-scan` CI job runs `gitleaks detect --no-git` against the
 # checked-out TREE only (never git history) -- see .github/workflows/ci.yml.
 # History is intentionally left unscanned: the two known historical leaks
