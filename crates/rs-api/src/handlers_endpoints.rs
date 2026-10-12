@@ -216,3 +216,40 @@ pub async fn get_event_endpoints(
         })?;
     Ok(Json(links.into_iter().map(masked_endpoint).collect()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_keys_get_no_tail() {
+        assert_eq!(mask_stream_key(""), "***");
+        assert_eq!(mask_stream_key("abcd"), "***");
+        // Up to 12 characters a 4-character tail would reveal a third or more
+        // of the key, so those get the bare mask.
+        assert_eq!(mask_stream_key("123456789"), "***");
+        assert_eq!(mask_stream_key("123456789abc"), "***");
+    }
+
+    #[test]
+    fn long_keys_show_only_the_last_four_characters() {
+        assert_eq!(mask_stream_key("123456789abcd"), "***abcd");
+        assert_eq!(mask_stream_key("new-stream-key-mnop"), "***mnop");
+    }
+
+    #[test]
+    fn the_tail_is_cut_on_char_boundaries() {
+        assert_eq!(mask_stream_key("ľščťžýáíéúäôň-ďĺŕ"), "***-ďĺŕ");
+    }
+
+    #[test]
+    fn empty_or_masked_keys_mean_unchanged() {
+        assert!(is_unchanged_key(""));
+        assert!(is_unchanged_key("   "));
+        assert!(is_unchanged_key("***"));
+        assert!(is_unchanged_key("***abcd"));
+        assert!(is_unchanged_key("  ***abcd "));
+        assert!(!is_unchanged_key("new-stream-key-mnop"));
+        assert!(!is_unchanged_key("a***b"));
+    }
+}
