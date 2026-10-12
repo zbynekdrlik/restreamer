@@ -101,13 +101,13 @@ test.describe("Endpoint stream key is never served in plaintext (#391)", () => {
     const msgs = collectConsoleErrors(page);
 
     const section = await openFirstEndpointEdit(page);
-    await section.getByTestId("edit-key-input").fill("abcd-efgh-ijkl-mnop");
+    await section.getByTestId("edit-key-input").fill("new-stream-key-mnop");
     await section.locator(".edit-actions button.save").click();
     await expect(section.locator(".endpoint-edit-form")).toBeHidden({
       timeout: 5000,
     });
 
-    expect(await storedKey(page, 1)).toBe("abcd-efgh-ijkl-mnop");
+    expect(await storedKey(page, 1)).toBe("new-stream-key-mnop");
     expect(await keyUpdates(page, 1)).toHaveLength(1);
     const list = await (await page.request.get("/api/v1/endpoints")).json();
     expect(list[0].stream_key).toBe("***mnop");

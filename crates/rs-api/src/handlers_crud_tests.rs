@@ -376,10 +376,10 @@ async fn update_with_masked_or_empty_key_keeps_the_stored_key() {
     assert_eq!(put("").await, Ok(StatusCode::OK));
     assert_eq!(stored().await, "key-1", "an empty key keeps the key");
 
-    assert_eq!(put("abcd-efgh-ijkl-mnop").await, Ok(StatusCode::OK));
+    assert_eq!(put("new-stream-key-mnop").await, Ok(StatusCode::OK));
     assert_eq!(
         stored().await,
-        "abcd-efgh-ijkl-mnop",
+        "new-stream-key-mnop",
         "a new key replaces it"
     );
 }
