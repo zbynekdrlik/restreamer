@@ -130,6 +130,8 @@ NEVER push to dev while a main run (or the release workflow) is in flight, and n
 
 The `stream-lan-box` concurrency group (`queue: max`, `cancel-in-progress: false`) in ci.yml serializes E2E jobs platform-side (FIFO). Hold the post-merge version-bump push until main + release reach terminal state.
 
+**A push to `dev` with PR #N open starts a `push` run AND a `pull_request` run on the same SHA: these are NOT duplicates — never cancel the push run.** The PR run skips Deploy + all stream-lan E2E, and its E2E Gate passes only if the PUSH run's E2E Gate succeeded for that commit. Cancelling the push run fails the PR gate. (Cost a full cycle on PR #392.)
+
 **If two runs ARE ever in flight**: cancel the lower-value run immediately (keep the release-bound main run), clean shared state (deactivate/detach the E2E event via API, delete any orphan VPS), then let the surviving run continue. One decisive cancel beats letting both race.
 
 **When a superseded run IGNORES a normal `gh run cancel` (force-cancel escalation, #303)**: a superseded dev run holding the self-hosted stream-lan E2E jobs can ignore `gh run cancel` — it keeps STARTING new jobs (observed moving from YT E2E into the FB soak 50+ min after the cancel request) and holds the workflow-level `rust-ci-<ref>` concurrency slot, so the successor sits at `pending` with 0 jobs. If a submitted cancel does not reach a terminal state within **~2 min**, escalate to the force-cancel endpoint:
