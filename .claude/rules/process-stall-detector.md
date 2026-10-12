@@ -127,8 +127,9 @@ apply):
   stall is measured from the probe's send instant, so a 600 ms block can
   measure 700+ ms on a loaded box. Assert the absence on a scale whose audit
   threshold is far above the block (`a_stall_below_the_audit_threshold_...`
-  uses 1500 ms), and on the production tiers assert only that tier and row
-  AGREE with the measured duration.
+  uses 10 s; 1500 ms was not enough, because a starved hosted Windows runner
+  measured the 600 ms block at >= 1.5 s in PR #392), and on the production
+  tiers assert only that tier and row AGREE with the measured duration.
 - **A block after the first one may get its probe only mid-block**: after a
   stall closes, the grace drive answers the fresh probe, and the next one is
   sent at the next 100 ms tick, possibly inside the block. Its stall then

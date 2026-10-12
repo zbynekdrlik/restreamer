@@ -456,12 +456,16 @@ fn stall_ends(path: &Path) -> Vec<Value> {
 
 /// A 600 ms block is a stall worth recording (>= 500 ms) but, on a scale
 /// whose audit threshold sits far above any measurement slack, never an
-/// audit row.
+/// audit row. A starved hosted Windows runner measured this 600 ms block
+/// at >= 1.5 s (PR #392 run 38308222003), so the threshold is 10 s: the tier
+/// boundaries themselves are pinned in `stall_tiers_tests.rs`, this test
+/// only proves a sub-threshold stall is logged and never audited.
 #[test]
 fn a_stall_below_the_audit_threshold_is_recorded_but_not_audited() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = StallDetectorConfig {
-        audit_threshold: Duration::from_millis(1_500),
+        audit_threshold: Duration::from_secs(10),
+        severe_threshold: Duration::from_secs(20),
         ..production_tiers(dir.path())
     };
     let log_path = cfg.log_path.clone();
@@ -474,7 +478,7 @@ fn a_stall_below_the_audit_threshold_is_recorded_but_not_audited() {
     let ends = stall_ends(&log_path);
     let duration = ends[0]["duration_ms"].as_u64().unwrap();
     assert!(duration >= blocked.as_millis() as u64, "{duration} ms");
-    assert_eq!(ends[0]["tier"], "minor");
+    assert_eq!(ends[0]["tier"], "minor", "measured {duration} ms");
     assert!(audit_rx.try_recv().is_err(), "no ProcessStall row");
 }
 
