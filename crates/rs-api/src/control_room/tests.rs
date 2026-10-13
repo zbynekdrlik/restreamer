@@ -16,6 +16,7 @@ fn page(id: &str, ctx: &str) -> TargetInfo {
         url: "https://x/".into(),
         title: String::new(),
         browser_context_id: Some(ctx.into()),
+        opener_id: None,
     }
 }
 
@@ -420,5 +421,74 @@ mod with_fake_chrome {
             .lines()
             .count();
         assert_eq!(runs, 1);
+    }
+
+    /// Chrome starts in its last-used profile and creates that directory when
+    /// it is missing. A YouTube room profile must be cloned before Chrome can
+    /// do that, or the room opens signed out (stream-pp, 2026-10-14).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_clones_the_profile_before_chrome_starts() {
+        use crate::control_room::browser::xvfb_lock;
+        use crate::control_room::fake_chrome::fake_bin;
+        let dir = tempfile::tempdir().unwrap();
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let mut b = Browser::at(dir.path(), addr.clone());
+        let ud = b.user_data.clone();
+        b.chrome_bin = Some(fake_bin(dir.path(), "chrome", 0, Some(&ud.join("dest-7"))));
+        let display = format!(":{}", 20_000 + std::process::id() % 20_000);
+        let lock = xvfb_lock(&display);
+        let _ = std::fs::remove_file(&lock);
+        b.xvfb_bin = fake_bin(dir.path(), "xvfb", 0, Some(&lock));
+        b.display = display;
+        std::fs::create_dir_all(ud.join("acct-a")).unwrap();
+        std::fs::write(ud.join("acct-a").join("Cookies"), "signed-in").unwrap();
+        let rooms = ControlRooms::with_browser(dir.path(), b);
+        let dest = destinations(&[ep(7, "YT A", "YT_RTMP")], &AccountsFile::default()).remove(0);
+
+        // The debugging port comes up once "chrome" first ran; the room tab
+        // appears once it ran a second time (the handover).
+        let args = dir.path().join("chrome.args");
+        let helper = tokio::spawn(async move {
+            while !args.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let chrome = FakeChrome::start_on(l).await;
+            chrome.set_targets(vec![page("T0", "C0", "about:blank")]);
+            while std::fs::read_to_string(&args)
+                .unwrap_or_default()
+                .lines()
+                .count()
+                < 2
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            chrome.set_targets(vec![
+                page("T0", "C0", "about:blank"),
+                page("T7", "C7", "https://studio.youtube.com/"),
+            ]);
+            chrome
+        });
+        let id = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            rooms.open(&dest, &["acct-a".to_string()]),
+        )
+        .await
+        .expect("open hung")
+        .unwrap();
+        let _ = std::fs::remove_file(&lock);
+        assert_eq!(id, "T7");
+        assert_eq!(
+            std::fs::read_to_string(ud.join("dest-7").join("Cookies"))
+                .ok()
+                .as_deref(),
+            Some("signed-in"),
+            "the room profile must be the clone of the signed-in profile"
+        );
+        helper.abort();
     }
 }

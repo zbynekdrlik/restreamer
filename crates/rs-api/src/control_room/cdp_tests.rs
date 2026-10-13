@@ -7,6 +7,7 @@ fn target(id: &str, kind: &str, url: &str) -> TargetInfo {
         url: url.into(),
         title: String::new(),
         browser_context_id: None,
+        opener_id: None,
     }
 }
 

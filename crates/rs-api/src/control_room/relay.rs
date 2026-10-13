@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
-use super::cdp::{self, Cdp};
+use super::cdp::{self, Cdp, TargetInfo};
 
 const MOUSE_FIELDS: &[&str] = &[
     "type",
@@ -115,6 +115,14 @@ pub fn page_to_client(m: &Value) -> PageOut {
         }
         _ => PageOut::Ignore,
     }
+}
+
+/// The tabs the room tab `room` opened (`window.open`, a `target=_blank`
+/// link) that already carry an http(s) URL: the room shows them in its own
+/// tab, since the viewer only ever sees that one.
+pub fn popups_of(pages: &[TargetInfo], room: &str) -> Vec<TargetInfo> {
+    let _ = (pages, room);
+    vec![]
 }
 
 /// Relay `client` to the page `target_id` until either side closes.

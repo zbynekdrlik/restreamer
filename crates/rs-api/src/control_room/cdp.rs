@@ -22,6 +22,9 @@ pub struct TargetInfo {
     pub title: String,
     #[serde(default)]
     pub browser_context_id: Option<String>,
+    /// The tab that opened this one (`window.open`, a `target=_blank` link).
+    #[serde(default)]
+    pub opener_id: Option<String>,
 }
 
 /// The page targets an operator can see: real tabs, no extension pages.
