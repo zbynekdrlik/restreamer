@@ -70,6 +70,20 @@ event `PP-Ingest-Test`, `POST /events/{id}/activate`, `POST /obs/start-stream`, 
 `/api/v1/status` (inpoint state, `ingest_gaps`, skew), `POST /obs/stop-stream`, then
 `/events/{id}/deactivate`. Check `/api/v1/uploads/stats` and `stall.log`.
 
+**Full-path test PP → VPS → YouTube (passed 2026-10-13, #387):** PP event 2 `PP-FullPath-Test`
+with only endpoint 14 `e2e rtmp` (the CI YouTube test stream; its key comes from SNV endpoint 26,
+copied without printing it). Use a SYNTHETIC source, not PP OBS. PP OBS program is usually `PRO`
+plus the live mixer audio (likely music, a YouTube ban risk), and PP has no YT-safe scene.
+- Run ffmpeg ON stream-pp: `testsrc2` 1080p30 + `sine` 1 kHz at -20 dB, to
+  `rtmp://127.0.0.1:1234/live/pp-fullpath-test`.
+- Then: activate, `delivery/start {event_id}`, and poll `delivery/status?event_id=` plus SNV's
+  `/api/v1/youtube/status` (its OAuth sees the `e2e rtmp` stream: `active`/`good`).
+- Teardown: `delivery/stop`, deactivate, kill ffmpeg, `vps_orphan_count` 0.
+- Expect YouTube `bitrateLow` (the stream is configured for 2160p) and boot-time
+  `vps_unreachable` warns.
+- Gotcha: `ssh pp 'pkill -f pp-fullpath-test'` kills its OWN ssh shell (exit 255), because the
+  pattern is in that command line too. Use `pkill -f '[p]p-fullpath-test'`.
+
 ## Object storage — ONE bucket exists: `restreamer-chunks-fsn1`
 
 Hetzner buckets are region-bound, so the region lives in the bucket NAME. The
