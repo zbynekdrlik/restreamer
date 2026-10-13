@@ -1,4 +1,5 @@
 mod commands;
+mod dashboard_load;
 mod state;
 mod tray;
 mod tray_icons;
@@ -252,6 +253,10 @@ pub fn run() {
             if let Err(e) = tray::setup_tray(app) {
                 tracing::warn!("System tray unavailable, continuing with the window only: {e}");
             }
+
+            // #393: the window is visible from the start; load the dashboard
+            // once the embedded server answers.
+            dashboard_load::load_when_ready(app.handle());
 
             // Start update checker
             updater::start_update_checker(app.handle());

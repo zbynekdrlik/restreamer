@@ -2,8 +2,10 @@
 # desktop user's session. It runs the GUI: the dashboard is the operator's
 # always-present window next to OBS (Alt-Tab), and it refuses to close (#393).
 # The kiosk autostart imports DISPLAY/XAUTHORITY into the user manager and then
-# starts this unit. If the process dies anyway, Restart=always brings the
-# window back. File log under ~/.local/share/restreamer, config at
+# starts this unit. If the process ends anyway (crash, kill, even the tray
+# "Quit"), Restart=always brings the window back; only `systemctl --user stop`
+# ends it. Nothing else may launch /usr/bin/Restreamer here: a second launch
+# exits at once (single instance), so the unit must be the only launcher. File log under ~/.local/share/restreamer, config at
 # ~/.config/restreamer/config.json.
 # Enable once:  systemctl --user enable --now restreamer
 # No network-online.target here: that is a system-manager target the user
