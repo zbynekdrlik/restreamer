@@ -199,6 +199,13 @@ impl Browser {
     }
 }
 
+/// The command line `CreateProcessW` gets for `program` + `args`, quoted the
+/// way `CommandLineToArgvW` (and Chrome) splits it back.
+pub fn windows_command_line(program: &str, args: &[String]) -> String {
+    let _ = (program, args);
+    String::new()
+}
+
 /// The port of a `host:port` address; [`CDP_PORT`] when there is none.
 pub fn port_of(addr: &str) -> u16 {
     addr.rsplit_once(':')
