@@ -140,7 +140,11 @@ mod spawn {
             .await
             .expect("ensure_running hung")
             .unwrap();
-        let _chrome = up.await.unwrap();
+        // Bounded: if Chrome was never started, the helper would wait forever.
+        let _chrome = tokio::time::timeout(Duration::from_secs(5), up)
+            .await
+            .expect("ensure_running returned without ever starting Chrome")
+            .unwrap();
         let _ = std::fs::remove_file(&lock);
 
         let xargs = std::fs::read_to_string(dir.path().join("xvfb.args")).unwrap();
