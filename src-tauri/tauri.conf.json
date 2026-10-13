@@ -16,7 +16,9 @@
         "url": "http://127.0.0.1:8910",
         "width": 1024,
         "height": 768,
-        "visible": false
+        "visible": true,
+        "maximized": true,
+        "closable": false
       }
     ]
   },

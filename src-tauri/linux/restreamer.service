@@ -1,17 +1,20 @@
 # Restreamer on a Linux box (stream-pp): a systemd --user service in the
-# desktop user's session. The kiosk there has no system tray, so it runs the
-# embedded service in --headless mode (file log under
-# ~/.local/share/restreamer, config at ~/.config/restreamer/config.json).
+# desktop user's session. It runs the GUI: the dashboard is the operator's
+# always-present window next to OBS (Alt-Tab), and it refuses to close (#393).
+# The kiosk autostart imports DISPLAY/XAUTHORITY into the user manager and then
+# starts this unit. If the process dies anyway, Restart=always brings the
+# window back. File log under ~/.local/share/restreamer, config at
+# ~/.config/restreamer/config.json.
 # Enable once:  systemctl --user enable --now restreamer
 # No network-online.target here: that is a system-manager target the user
 # manager does not have, so it would order nothing. Restreamer starts without
 # a network (RTMP listens on 0.0.0.0; S3 uploads and delivery retry).
 [Unit]
-Description=Restreamer (headless)
+Description=Restreamer (operator window)
 After=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/Restreamer --headless
+ExecStart=/usr/bin/Restreamer
 Restart=always
 RestartSec=5
 

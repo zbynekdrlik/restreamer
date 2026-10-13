@@ -19,10 +19,18 @@ paths:
   - Tauri writes the dpkg paths without a leading `./`.
   - `www_dir::www_candidates` and `delivery_binary::bundled_candidates` both look at
     `<exe_dir>/../lib/Restreamer/`.
-- **Runs as** a systemd `--user` service with `--headless`. The kiosk has no system tray,
-  and its openbox autostart runs `systemctl --user start restreamer`. Enable it once with
-  `systemctl --user enable --now restreamer`. The Windows rule "tray app, never
-  `--headless`" stays Windows-only.
+- **Runs as** a systemd `--user` service running the GUI, NOT `--headless` (#393). The
+  dashboard window is the operator's always-present window: Alt-Tab with OBS, maximized,
+  and every close (X, Alt-F4, WM close) is refused, never hidden, because the kiosk has
+  no tray. `Restart=always` brings it back if the process dies.
+  - The kiosk's openbox autostart (camera-box) imports DISPLAY/XAUTHORITY into the user
+    manager and then runs `systemctl --user start restreamer`.
+  - Enable it once with `systemctl --user enable --now restreamer`.
+  - Probe the GUI without touching production: run a 2nd instance with throwaway
+    `RESTREAMER_CONFIG_DIR`/`RESTREAMER_DATA_DIR` and DISPLAY/XAUTHORITY from
+    `systemctl --user show-environment`. Its service fails on the busy ports, but the
+    window renders the live dashboard. `wmctrl -l` lists it, and `ffmpeg -f x11grab -i :0
+    -frames:v 1` takes a screenshot.
 - **Paths** come from `rs_core::paths` only:
   - config: `~/.config/restreamer/config.json`
   - data, DB, chunks, logs: `~/.local/share/restreamer`

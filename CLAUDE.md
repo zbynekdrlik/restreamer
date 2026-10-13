@@ -36,7 +36,7 @@ auto-load on their `paths:` — you do not invoke those.
 - A/V-skew guard (ingest diag #354 vs push actuator #257/#359, STEP-vs-DRIFT, DriftHold) → `.claude/rules/av-skew-guard.md` (auto)
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
-- Linux build for stream-pp (.deb, systemd --user unit, `--headless`, XDG paths via `rs_core::paths`) → `.claude/rules/linux-build.md` (auto)
+- Linux build for stream-pp (.deb, systemd --user GUI unit (#393 operator window), XDG paths via `rs_core::paths`) → `.claude/rules/linux-build.md` (auto)
 - VPS `delivery_mode` in CI gates (`refilling` is normal delivery, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
 - frontend E2E WebSocket pushes (`waitForWsClient` + `broadcast`, the #377 guard) → `.claude/rules/e2e-ws-broadcast.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
@@ -97,7 +97,7 @@ mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri http://127.0.0.1:8910
 
 ### Tray App Deployment (CRITICAL)
 
-Restreamer.exe MUST run as a tray app in the user's desktop session — NEVER as background service or headless. Task name: `RestreamerGUI`, user: `newlevel`, install path: `C:\Program Files\Restreamer\`. No `--headless` flag ever. If the scheduled task fails, CI must fail. (Windows only. The Linux stream-pp kiosk has no system tray and runs `--headless` as a systemd `--user` unit, see `.claude/rules/linux-build.md`.)
+Restreamer.exe MUST run as a tray app in the user's desktop session — NEVER as background service or headless. Task name: `RestreamerGUI`, user: `newlevel`, install path: `C:\Program Files\Restreamer\`. No `--headless` flag ever. If the scheduled task fails, CI must fail. On BOTH boxes the dashboard window is the operator's always-present window (#393): visible and maximized at start, Alt-Tab with OBS, and a close is refused (never hidden). The Linux stream-pp kiosk has no tray and runs the GUI as a systemd `--user` unit, see `.claude/rules/linux-build.md`.
 
 ### Adding a field to `Config` — classify it for redaction
 

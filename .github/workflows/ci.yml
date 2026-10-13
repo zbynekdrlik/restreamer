@@ -655,6 +655,14 @@ jobs:
             grep -qx "$want" deb-files.txt || { echo "MISSING in .deb: $want"; cat deb-files.txt; exit 1; }
           done
           dpkg-deb -f "$deb" Depends | grep -q ffmpeg || { echo ".deb does not depend on ffmpeg"; exit 1; }
+          # #393: the box runs the operator WINDOW (Alt-Tab with OBS), not --headless.
+          dpkg-deb -x "$deb" deb-root
+          unit=deb-root/usr/lib/systemd/user/restreamer.service
+          grep -qx 'ExecStart=/usr/bin/Restreamer' "$unit" || { echo "unit must run the GUI (ExecStart=/usr/bin/Restreamer):"; cat "$unit"; exit 1; }
+          grep -qx 'Restart=always' "$unit" || { echo "unit must restart the window if it dies"; cat "$unit"; exit 1; }
+          # #393: the main window is visible, maximized and cannot be closed.
+          jq -e '.app.windows[0] | .visible == true and .maximized == true and .closable == false' src-tauri/tauri.conf.json \
+            || { echo "main window must be visible, maximized and non-closable (#393)"; jq '.app.windows' src-tauri/tauri.conf.json; exit 1; }
           echo "deb contents OK"
       - name: Upload the .deb
         uses: actions/upload-artifact@v4
