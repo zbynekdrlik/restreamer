@@ -183,7 +183,12 @@ pub async fn get_template_endpoints(
             error!("Failed to get endpoints for template {id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(Json(endpoints))
+    Ok(Json(
+        endpoints
+            .into_iter()
+            .map(crate::handlers::masked_endpoint)
+            .collect(),
+    ))
 }
 
 pub async fn attach_endpoint_to_template(

@@ -14,7 +14,8 @@ use tokio::sync::broadcast;
 use crate::handlers::{
     CreateEndpointRequest, UpdateEndpointRequest, activate_event, attach_endpoint_to_event,
     create_endpoint, deactivate_event, delete_endpoint, detach_endpoint_from_event,
-    get_event_endpoints, list_endpoints, list_events, start_delivering, update_endpoint,
+    get_endpoint_by_id, get_event_endpoints, list_endpoints, list_events, start_delivering,
+    update_endpoint,
 };
 use crate::state::AppState;
 
@@ -257,5 +258,128 @@ async fn attach_list_detach_and_delete_endpoint() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// #391: the endpoint read routes are internet-reachable (behind Access) and
+/// their bodies end up in logs and transcripts. None of them may carry the
+/// stored stream key; each carries the `***` + last-4 mask instead.
+#[tokio::test]
+async fn endpoint_read_routes_never_return_the_stored_stream_key() {
+    let (state, _rx) = state().await;
+    let stored_key = "FB-0000000000-0-fixturefixtMnOp";
+    let (_, Json(body)) = create_endpoint(
+        State(state.clone()),
+        Json(CreateEndpointRequest {
+            alias: "fb".into(),
+            service_type: "FB".into(),
+            stream_key: stored_key.into(),
+            is_fast: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let id = body["id"].as_i64().unwrap();
+    let event = db::create_streaming_event(&state.pool, "sunday")
+        .await
+        .unwrap();
+    db::attach_endpoint_to_event(&state.pool, event, id)
+        .await
+        .unwrap();
+    let template = db::create_template(&state.pool, "tpl", None, None)
+        .await
+        .unwrap();
+    db::attach_endpoint_to_template(&state.pool, template, id)
+        .await
+        .unwrap();
+
+    let Json(list) = list_endpoints(State(state.clone())).await.unwrap();
+    let Json(one) = get_endpoint_by_id(State(state.clone()), Path(id))
+        .await
+        .unwrap();
+    let Json(by_event) = get_event_endpoints(State(state.clone()), Path(event))
+        .await
+        .unwrap();
+    let Json(by_template) =
+        crate::template_handlers::get_template_endpoints(State(state.clone()), Path(template))
+            .await
+            .unwrap();
+
+    for (route, body) in [
+        ("GET /endpoints", serde_json::to_string(&list).unwrap()),
+        ("GET /endpoints/{id}", serde_json::to_string(&one).unwrap()),
+        (
+            "GET /events/{id}/endpoints",
+            serde_json::to_string(&by_event).unwrap(),
+        ),
+        (
+            "GET /templates/{id}/endpoints",
+            serde_json::to_string(&by_template).unwrap(),
+        ),
+    ] {
+        assert!(
+            !body.contains(stored_key),
+            "{route} leaked the stream key: {body}"
+        );
+        assert!(
+            body.contains("\"stream_key\":\"***MnOp\""),
+            "{route} must carry the masked key: {body}"
+        );
+    }
+
+    let stored = db::get_endpoint_config(&state.pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.stream_key, stored_key,
+        "masking never touches the DB row"
+    );
+}
+
+/// #391: a client that reads the masked list and PUTs the row back verbatim
+/// (or sends an empty key) must keep the stored key, never overwrite it with
+/// the mask. A genuinely new key still replaces it.
+#[tokio::test]
+async fn update_with_masked_or_empty_key_keeps_the_stored_key() {
+    let (state, _rx) = state().await;
+    let id = create_ok(&state, "yt").await; // stored key "key-1"
+    let put = |key: &str| {
+        let state = state.clone();
+        let key = key.to_string();
+        async move {
+            update_endpoint(
+                State(state),
+                Path(id),
+                Json(UpdateEndpointRequest {
+                    stream_key: Some(key),
+                    ..update_req()
+                }),
+            )
+            .await
+        }
+    };
+    let stored = || async {
+        db::get_endpoint_config(&state.pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stream_key
+    };
+
+    let Json(listed) = get_endpoint_by_id(State(state.clone()), Path(id))
+        .await
+        .unwrap();
+    assert_eq!(put(&listed.stream_key).await, Ok(StatusCode::OK));
+    assert_eq!(stored().await, "key-1", "echoing the mask keeps the key");
+
+    assert_eq!(put("").await, Ok(StatusCode::OK));
+    assert_eq!(stored().await, "key-1", "an empty key keeps the key");
+
+    assert_eq!(put("new-stream-key-mnop").await, Ok(StatusCode::OK));
+    assert_eq!(
+        stored().await,
+        "new-stream-key-mnop",
+        "a new key replaces it"
     );
 }

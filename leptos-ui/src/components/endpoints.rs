@@ -19,6 +19,9 @@ pub fn EndpointsView() -> impl IntoView {
     let (edit_alias, set_edit_alias) = signal(String::new());
     let (edit_type, set_edit_type) = signal(String::new());
     let (edit_key, set_edit_key) = signal(String::new());
+    // #391: the API serves the key masked (`***` + last 4). The edit field
+    // starts EMPTY (= keep the stored key) and shows the mask as a hint.
+    let (edit_key_mask, set_edit_key_mask) = signal(String::new());
     let (edit_enabled, set_edit_enabled) = signal(false);
     let (edit_fast, set_edit_fast) = signal(false);
     let (saving, set_saving) = signal(false);
@@ -71,7 +74,8 @@ pub fn EndpointsView() -> impl IntoView {
     let start_edit = move |ep: &api::EndpointConfig| {
         set_edit_alias.set(ep.alias.clone());
         set_edit_type.set(ep.service_type.clone());
-        set_edit_key.set(ep.stream_key.clone());
+        set_edit_key.set(String::new());
+        set_edit_key_mask.set(ep.stream_key.clone());
         set_edit_enabled.set(ep.enabled);
         set_edit_fast.set(ep.is_fast);
         set_edit_orig_oauth_id.set(ep.youtube_oauth_id);
@@ -146,7 +150,8 @@ pub fn EndpointsView() -> impl IntoView {
             let req = UpdateEndpointRequest {
                 alias: Some(alias),
                 service_type: Some(stype),
-                stream_key: Some(key),
+                // #391: an untouched (empty) key field keeps the stored key.
+                stream_key: (!key.trim().is_empty()).then_some(key),
                 enabled: Some(enabled),
                 is_fast: Some(is_fast),
             };
@@ -256,6 +261,8 @@ pub fn EndpointsView() -> impl IntoView {
                                                 <div class="key-input-wrapper">
                                                     <input
                                                         type=move || if show_edit_key.get() { "text" } else { "password" }
+                                                        data-testid="edit-key-input"
+                                                        placeholder=move || format!("unchanged ({})", edit_key_mask.get())
                                                         prop:value=move || edit_key.get()
                                                         on:input=move |ev| set_edit_key.set(event_target_value(&ev))
                                                     />
