@@ -12,7 +12,8 @@
     "linux": {
       "deb": {
         "depends": [
-          "ffmpeg"
+          "ffmpeg",
+          "xvfb"
         ],
         "files": {
           "/usr/lib/systemd/user/restreamer.service": "linux/restreamer.service"

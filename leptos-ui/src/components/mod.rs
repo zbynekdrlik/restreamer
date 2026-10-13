@@ -5,6 +5,7 @@ pub mod alert_glow;
 pub mod oauth_authorize;
 pub mod audit_panel;
 pub mod change_key_modal;
+pub mod control_room;
 mod confirm_modal;
 pub mod disk_pressure_banner;
 pub mod endpoint_history;

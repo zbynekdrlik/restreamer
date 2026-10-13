@@ -10,6 +10,7 @@ pub(crate) mod cache_ttl;
 pub mod clock_skew_probe;
 #[cfg(test)]
 mod config_redaction_tests;
+pub mod control_room;
 #[cfg(test)]
 mod crash_recovery_tests;
 pub mod delivery;

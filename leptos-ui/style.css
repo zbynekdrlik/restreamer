@@ -823,3 +823,29 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 }
 .oauth-error { color: var(--status-error); }
 .oauth-status { font-style: italic; color: var(--text-secondary); }
+
+/* Control-room tabs (#388) */
+.cr-tabs { display: flex; flex-wrap: wrap; gap: var(--spacing-xs); align-items: center; padding: var(--spacing-xs); background: var(--bg-card); border: var(--border-w) solid var(--border); border-radius: 6px; }
+.cr-tab { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-primary); color: var(--text-primary); border: var(--border-w) solid var(--border); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
+.cr-tab--active { border-color: #2563eb; outline: 1px solid #2563eb; }
+.cr-tab__alias { white-space: nowrap; }
+.cr-tabs__event { margin-left: auto; color: var(--text-secondary); font-size: 12px; }
+.cr-badge { font-size: 11px; font-weight: 700; padding: 1px 5px; border-radius: 4px; color: #fff; }
+.cr-badge--yt { background: #dc2626; }
+.cr-badge--fb { background: #2563eb; }
+.cr-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-label); display: inline-block; }
+.cr-dot--on { background: #22c55e; }
+.cr-dot--off { background: #f59e0b; }
+.cr-room { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+.cr-room__head, .cr-room__bar, .cr-room__edit { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); align-items: center; }
+.cr-room__alias { font-size: 15px; }
+.cr-room__channel { color: var(--text-secondary); }
+.cr-room__account { color: #fde68a; }
+.cr-room__status { margin-left: auto; color: var(--text-secondary); font-size: 12px; }
+.cr-room__url { flex: 1; min-width: 200px; }
+.cr-room__screen { width: 100%; height: auto; background: #000; outline: none; border: var(--border-w) solid var(--border); }
+.cr-room__screen:focus { border-color: #2563eb; }
+.cr-input { background: var(--bg-primary); color: var(--text-primary); border: var(--border-w) solid var(--border); padding: 4px 6px; border-radius: 4px; }
+.cr-btn { background: var(--border); color: var(--text-primary); border: 0; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.cr-hidden { display: none !important; }
+.operator-dashboard__home { display: flex; flex-direction: column; gap: var(--spacing-md); }

@@ -99,6 +99,9 @@ pub struct AppState {
     /// YouTube A/V-gate sessions (#357): the one-session-at-a-time registry.
     /// Shared by every clone, so every handler sees the same holder.
     pub av_gate: Arc<crate::av_gate::AvGateHub>,
+    /// Control rooms (#388): the box-hosted Chrome and the account mapping.
+    /// Chrome starts only when a room is first opened.
+    pub control_rooms: Arc<crate::control_room::ControlRooms>,
 }
 
 impl AppState {
@@ -156,7 +159,16 @@ impl AppState {
             disk_pressure_level,
             vps_orphan_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             av_gate: Arc::new(crate::av_gate::AvGateHub::default()),
+            control_rooms: Arc::new(crate::control_room::ControlRooms::new(
+                &rs_core::paths::data_dir(),
+            )),
         }
+    }
+
+    /// Use these control rooms (tests point them at a temp dir).
+    pub fn with_control_rooms(mut self, rooms: Arc<crate::control_room::ControlRooms>) -> Self {
+        self.control_rooms = rooms;
+        self
     }
 
     /// Test helper: construct `AppState` with a dummy audit channel whose

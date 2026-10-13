@@ -393,8 +393,16 @@ def breach_checks(job: Env, st: MockState, expect: str, stops: int) -> list[str]
         probs.append(f"assert after a breach exited {a.returncode}, expected 1")
     if "::error::program-audio guard (#379): BREACH" not in a.stdout or expect not in a.stdout:
         probs.append(f"assert output lacks the ::error:: reason: {a.stdout}")
-    if expect not in job.summary.read_text(encoding="utf-8"):
+    summary = job.summary.read_text(encoding="utf-8")
+    if expect not in summary:
         probs.append("the breach reason is not in GITHUB_STEP_SUMMARY")
+    if "FOREIGN" in expect:
+        # The operator request shared with camera-box (its issue 1421), verbatim.
+        request = (ROOT / "scripts" / "ci" / "program-audio-operator-msg.txt").read_text(encoding="utf-8").strip()
+        if not request.startswith("ZASTAVEN") or request not in summary:
+            probs.append(f"the job summary lacks the shared operator request: {summary!r}")
+        if "::error::operator: mute everything in mbc" not in a.stdout:
+            probs.append(f"the log lacks the operator hint: {a.stdout}")
     t = job.run("Stop-ProgramAudioWatchdog\nAssert-NoProgramAudioBreach")
     if t.returncode != 1:
         probs.append(f"teardown after a breach exited {t.returncode}, expected 1")

@@ -1,0 +1,1 @@
+ZASTAVENÉ: do stream programu (mbc / stream OBS) ide okrem meracieho signálu aj iný zvuk (hudba, CG, kapela). Stlm v mbc a v stream OBS všetko okrem meracieho signálu a spusti test znova.

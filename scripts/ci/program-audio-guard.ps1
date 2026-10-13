@@ -66,6 +66,11 @@
 param([switch]$RunWatchdog)
 
 $script:ProgramAudioGuardScript = $PSCommandPath
+# The operator request shared with camera-box (its E2E_PROGRAM_AUDIO_OPERATOR_MSG,
+# camera-box issue 1421): ONE text, whichever guard trips. It is Slovak, so it lives
+# in a UTF-8 file; this script stays ASCII (PowerShell 5.1 reads a BOM-less script
+# as ANSI).
+$script:ProgramAudioOperatorMsgFile = Join-Path (Split-Path -Parent $PSCommandPath) "program-audio-operator-msg.txt"
 $script:ProgramAudioOkVerdicts = @("MEASUREMENT", "SILENT")
 # The CI-owned E2E events (ci.yml EVENT_NAME of the OBS-streaming jobs; pinned by
 # verify_program_audio_guard.py). A breach never cuts the delivery of any other event.
@@ -279,13 +284,25 @@ function Test-ProgramAudioTolerable([string]$why) {
   return ($why -clike "UNKNOWN:*" -or $why -like "unreachable:*" -or $why -like "stale:*" -or $why -like "malformed:*")
 }
 
+# The shared operator request, when the reason is music/CG/band in the program.
+function Get-ProgramAudioOperatorRequest([string]$why) {
+  if ($why -cnotmatch "FOREIGN") { return $null }
+  return [System.IO.File]::ReadAllText($script:ProgramAudioOperatorMsgFile, [System.Text.Encoding]::UTF8).Trim()
+}
+
 # ::error:: plus the job summary, so the reason is visible without opening the log.
 function Write-ProgramAudioError([string]$context, [string]$why) {
   Write-Host "::error::program-audio guard (#379): $context -- $why"
+  $request = Get-ProgramAudioOperatorRequest $why
+  if ($request) {
+    # The console of a Windows runner is not UTF-8; the job summary carries the exact text.
+    Write-Host "::error::operator: mute everything in mbc / stream OBS except the measurement signal, then re-run (exact request in the job summary)"
+  }
   if ($env:GITHUB_STEP_SUMMARY) {
     # One bullet per breach-marker line (" | "-joined): every step of the stop and the
     # delivery cut is visible in the job summary.
     $md = "### Program-audio guard (#379): $context`n`n"
+    if ($request) { $md += "**$request**`n`n" }
     foreach ($line in ($why -split " \| ")) { $md += "- ``$line```n" }
     $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
   }

@@ -1,0 +1,43 @@
+---
+paths:
+  - "crates/rs-api/src/control_room/**"
+  - "leptos-ui/src/components/control_room.rs"
+  - "leptos-ui/src/api/control_rooms.rs"
+  - "e2e/control-rooms.spec.ts"
+---
+
+# Control rooms: the YT/FB tabs in the dashboard (#388)
+
+- **Shape.** One box-hosted Chrome (debugging port `127.0.0.1:9231`, user-data-dir
+  `<data_dir>/browser-profiles/control-rooms`). It starts on the first `open`, and it
+  survives a Restreamer restart on purpose: the next start reuses it, logins included.
+  - Windows: a real window parked at -32000,-32000.
+  - Linux: Chrome draws on Restreamer's own `Xvfb :93`, so the kiosk screen and tint2
+    never show it. The .deb `Depends: xvfb`.
+  - `RESTREAMER_CHROME` overrides the binary. stream-pp uses the system
+    `google-chrome-stable`, installed by camera-box setup-strih step 16j.
+- **One Google profile = ONE active YouTube channel identity.** A second brand channel
+  in the same profile gets "Select a channel" or "Oops, you don't have permission"
+  (probed 2026-10-13).
+  - So YouTube is one profile per destination (`dest-<id>`). FB is one per account
+    (`acct-<email>`), because Live Producer picks the page in its UI.
+  - A missing YT profile is CLONED from a signed-in profile of the same account (caches
+    skipped). The operator then only clicks "Switch account" and picks the channel.
+- **Account mapping** lives box-local in `<data_dir>/control-rooms.json`, keyed by
+  endpoint id. It holds emails, so it never goes in the repo. Set it with
+  `PUT /api/v1/control-rooms/{id}/account`, or from the room's "Zmeniť účet".
+- **Linux cookies need `--password-store=basic`.** The kiosk has no keyring. A profile
+  copied between user-data-dirs keeps its SID.
+- **A profile's own startup window adds `about:blank` / `chrome://newtab/` tabs** next
+  to the requested URL. `new_target` skips them; never take the first new page blindly.
+- **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
+  `history.back()`, and http(s) `Page.navigate`. Anything else is dropped. Frames are
+  JPEG binary messages.
+- **Tests.**
+  - `control_room/*_tests.rs` use a fake CDP websocket page and a real axum relay.
+  - The Playwright spec uses the mock's `/api/v1/control-rooms*` routes and a second
+    noServer WebSocketServer, `/api/v1/control-rooms/ws`. Its fixture frame is
+    `e2e/fixtures/control-room-frame.jpg`; an inline base64 JPEG trips the secret scanner.
+- **dev2 gotcha.** `trunk build` writes to the repo-root `dist/`, not `leptos-ui/dist/`.
+  An `rsync --delete` of the repo to dev2 wipes it, and the mock then serves a stale or
+  missing UI. Re-run `trunk build` before Playwright.
