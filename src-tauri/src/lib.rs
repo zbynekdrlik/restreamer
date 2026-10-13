@@ -1,4 +1,5 @@
 mod commands;
+mod dashboard_load;
 mod state;
 mod tray;
 mod tray_icons;
@@ -129,6 +130,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus existing window when a second instance is launched
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -246,8 +248,15 @@ pub fn run() {
                 }
             });
 
-            // Set up system tray
-            tray::setup_tray(app)?;
+            // Set up system tray. The window is the primary UI (#393), so a
+            // missing tray host must not take the whole app down.
+            if let Err(e) = tray::setup_tray(app) {
+                tracing::warn!("System tray unavailable, continuing with the window only: {e}");
+            }
+
+            // #393: the window is visible from the start; load the dashboard
+            // once the embedded server answers.
+            dashboard_load::load_when_ready(app.handle());
 
             // Start update checker
             updater::start_update_checker(app.handle());
@@ -255,10 +264,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Hide window instead of closing - keeps tray app running
+            // #393: the dashboard is the operator's always-present window on
+            // both streaming boxes (Alt-Tab with OBS). Refuse every close
+            // (Alt-F4, WM close) and keep it on screen. Never hide it: the
+            // Linux kiosk has no tray, so a hidden window is unreachable.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                tracing::info!(
+                    "Close requested on window '{}' - refused, the operator window stays open (#393)",
+                    window.label()
+                );
             }
         })
         .invoke_handler(tauri::generate_handler![

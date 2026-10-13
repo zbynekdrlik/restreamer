@@ -19,10 +19,18 @@ paths:
   - Tauri writes the dpkg paths without a leading `./`.
   - `www_dir::www_candidates` and `delivery_binary::bundled_candidates` both look at
     `<exe_dir>/../lib/Restreamer/`.
-- **Runs as** a systemd `--user` service with `--headless`. The kiosk has no system tray,
-  and its openbox autostart runs `systemctl --user start restreamer`. Enable it once with
-  `systemctl --user enable --now restreamer`. The Windows rule "tray app, never
-  `--headless`" stays Windows-only.
+- **Runs as** a systemd `--user` service running the GUI, NOT `--headless` (#393). The
+  dashboard window is the operator's always-present window: Alt-Tab with OBS, maximized,
+  and every close (X, Alt-F4, WM close) is refused, never hidden, because the kiosk has
+  no tray. `Restart=always` brings it back if the process dies.
+  - The kiosk's openbox autostart (camera-box) imports DISPLAY/XAUTHORITY into the user
+    manager and then runs `systemctl --user start restreamer`.
+  - Enable it once with `systemctl --user enable --now restreamer`.
+  - Probe the GUI without touching production: run a 2nd instance with throwaway
+    `RESTREAMER_CONFIG_DIR`/`RESTREAMER_DATA_DIR` and DISPLAY/XAUTHORITY from
+    `systemctl --user show-environment`. Its service fails on the busy ports, but the
+    window renders the live dashboard. `wmctrl -l` lists it, and `ffmpeg -f x11grab -i :0
+    -frames:v 1` takes a screenshot.
 - **Paths** come from `rs_core::paths` only:
   - config: `~/.config/restreamer/config.json`
   - data, DB, chunks, logs: `~/.local/share/restreamer`
@@ -33,6 +41,11 @@ paths:
 - **A config file must exist** (#112). The minimum is `client_uuid` plus
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
+- **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
+  sudo there. Copy the release `.deb` to `/tmp/`; the camera-box session (which has the
+  sudo path) runs `sudo dpkg -i` + `systemctl --user daemon-reload` (the package ships
+  the unit file) + `systemctl --user restart restreamer`. Then verify the version on the
+  dashboard and `dpkg-query -W restreamer` (0.29.38, 2026-10-13).
 - **Smoke test without the box:** install the `.deb` in a `ubuntu:26.04` container on
   dev2, start `Restreamer --headless` as a normal user, and expect 200 from
   `/api/v1/status` and `/` (recipe: build-deb + deb-smoke scripts, 2026-10-11).

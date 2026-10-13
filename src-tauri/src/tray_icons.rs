@@ -220,15 +220,17 @@ fn set_pixel(buf: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
         // Fully opaque source or transparent destination — direct write
         buf[offset..offset + 4].copy_from_slice(&color);
     } else {
-        // Alpha blend
-        let dst_a = buf[offset + 3] as u16;
+        // Alpha blend. In u32: the destination term reaches 255^3, which
+        // overflowed u16 (a debug panic on the pulsing "receiving" dot).
+        let src_a = src_a as u32;
+        let dst_a = buf[offset + 3] as u32;
         let out_a = src_a + dst_a * (255 - src_a) / 255;
         if out_a == 0 {
             return;
         }
         for i in 0..3 {
-            let src = color[i] as u16;
-            let dst = buf[offset + i] as u16;
+            let src = color[i] as u32;
+            let dst = buf[offset + i] as u32;
             buf[offset + i] = ((src * src_a + dst * dst_a * (255 - src_a) / 255) / out_a) as u8;
         }
         buf[offset + 3] = out_a as u8;
