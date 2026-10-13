@@ -14,6 +14,8 @@
 
 pub mod browser;
 pub mod cdp;
+#[cfg(test)]
+pub(crate) mod fake_chrome;
 pub mod handlers;
 pub mod relay;
 

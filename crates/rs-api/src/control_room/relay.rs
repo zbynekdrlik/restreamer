@@ -212,19 +212,15 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
         }
     };
     let from_client = async move {
+        // A Close frame ends the stream, which ends this loop.
         while let Some(Ok(msg)) = client_rx.next().await {
-            match msg {
-                AxMessage::Text(text) => {
-                    if let Some((method, params)) = serde_json::from_str::<Value>(&text)
-                        .ok()
-                        .as_ref()
-                        .and_then(client_to_cdp)
-                    {
-                        call(method, params);
-                    }
-                }
-                AxMessage::Close(_) => break,
-                _ => {}
+            if let AxMessage::Text(text) = msg
+                && let Some((method, params)) = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .as_ref()
+                    .and_then(client_to_cdp)
+            {
+                call(method, params);
             }
         }
     };

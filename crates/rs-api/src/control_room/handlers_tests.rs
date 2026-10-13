@@ -178,3 +178,75 @@ async fn ws_without_chrome_is_unavailable_not_a_hang() {
     // either way it must not be a 101 into a dead browser.
     assert_ne!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
 }
+
+#[tokio::test]
+async fn a_db_failure_is_a_500_not_an_empty_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path()).await;
+    s.pool.close().await;
+    let (status, _) = call(&s, "GET", "/api/v1/control-rooms", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn ws_relays_a_live_tab_and_refuses_an_unknown_one() {
+    use crate::control_room::fake_chrome::{FakeChrome, page};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let chrome = FakeChrome::start().await;
+    chrome.set_targets(vec![page("T1", "C1", "https://studio.youtube.com/x")]);
+    let s = state(dir.path())
+        .await
+        .with_control_rooms(Arc::new(ControlRooms::with_browser(
+            dir.path(),
+            Browser::at(dir.path(), chrome.addr.clone()),
+        )));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, build_router(s)).await.unwrap() });
+
+    let unknown = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/api/v1/control-rooms/ws?target=nope"
+    ))
+    .await;
+    assert!(unknown.is_err(), "an unknown tab must not be upgraded");
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/control-rooms/ws?target=T1"))
+            .await
+            .unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(t) = first else {
+        panic!("expected the url message")
+    };
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["url"], "https://studio.youtube.com/x");
+    let click = serde_json::json!({"t": "m", "type": "mousePressed", "x": 1, "y": 2, "button": "left", "clickCount": 1});
+    ws.send(Message::Text(click.to_string().into()))
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if chrome
+                .methods()
+                .iter()
+                .any(|m| m == "Input.dispatchMouseEvent")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        got.is_ok(),
+        "the click never reached the tab: {:?}",
+        chrome.methods()
+    );
+}

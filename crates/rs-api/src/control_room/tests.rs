@@ -268,3 +268,157 @@ async fn status_without_chrome_lists_destinations_closed() {
     assert_eq!(d[0].target_id, None);
     assert_eq!(d[0].signed_in, None);
 }
+
+mod with_fake_chrome {
+    use super::*;
+    use crate::control_room::fake_chrome::{FakeChrome, page};
+
+    fn rooms_at(dir: &std::path::Path, chrome: &FakeChrome) -> ControlRooms {
+        ControlRooms::with_browser(dir, Browser::at(dir, chrome.addr.clone()))
+    }
+
+    #[tokio::test]
+    async fn status_reports_open_tabs_and_sign_in_per_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let chrome = FakeChrome::start().await;
+        chrome.set_targets(vec![
+            page("T1", "C1", "https://studio.youtube.com/"),
+            page("T3", "C3", "https://fb/"),
+        ]);
+        {
+            let mut s = chrome.state.lock().unwrap();
+            s.cookies
+                .insert("T1".into(), vec!["SID".into(), "HSID".into()]);
+            s.cookies.insert("T3".into(), vec!["datr".into()]);
+        }
+        let map = TabMap {
+            ctx: [
+                ("C1".to_string(), "dest-1".to_string()),
+                ("C3".to_string(), "acct-b-x-com".to_string()),
+            ]
+            .into(),
+            tab: [("T1".to_string(), 1), ("T3".to_string(), 3)].into(),
+        };
+        std::fs::write(
+            dir.path().join("control-room-tabs.json"),
+            serde_json::to_vec(&map).unwrap(),
+        )
+        .unwrap();
+        let rooms = rooms_at(dir.path(), &chrome);
+        rooms
+            .set_account(
+                1,
+                Account {
+                    account: Some("a@x.com".into()),
+                    sure: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        rooms
+            .set_account(
+                3,
+                Account {
+                    account: Some("b@x.com".into()),
+                    sure: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        rooms
+            .set_account(
+                4,
+                Account {
+                    account: Some("b@x.com".into()),
+                    sure: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let d = rooms
+            .status(&[
+                ep(1, "YT A", "YT_RTMP"),
+                ep(3, "FB B", "FB"),
+                ep(4, "FB B2", "FB"),
+                ep(5, "YT none", "YT_RTMP"),
+            ])
+            .await;
+        assert_eq!(d[0].target_id.as_deref(), Some("T1"));
+        assert_eq!(
+            d[0].signed_in,
+            Some(true),
+            "SID cookie = signed in to YouTube"
+        );
+        assert_eq!(d[1].target_id.as_deref(), Some("T3"));
+        assert_eq!(
+            d[1].signed_in,
+            Some(false),
+            "no c_user cookie = not signed in to FB"
+        );
+        assert_eq!(d[2].target_id, None, "same FB profile, no tab of its own");
+        assert_eq!(
+            d[2].signed_in,
+            Some(false),
+            "shares the profile's sign-in state"
+        );
+        assert_eq!(d[3].signed_in, None, "no tab of that profile");
+        let cookie_reads = chrome
+            .methods()
+            .iter()
+            .filter(|m| *m == "Network.getCookies")
+            .count();
+        assert_eq!(cookie_reads, 2, "one cookie read per (profile, service)");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_maps_the_new_tab_and_reuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let chrome = FakeChrome::start().await;
+        chrome.set_targets(vec![page("T0", "C0", "about:blank")]);
+        let mut b = Browser::at(dir.path(), chrome.addr.clone());
+        b.chrome_bin = Some(crate::control_room::fake_chrome::fake_bin(
+            dir.path(),
+            "chrome",
+            0,
+            None,
+        ));
+        let rooms = ControlRooms::with_browser(dir.path(), b);
+        let dest = destinations(&[ep(7, "YT A", "YT_RTMP")], &AccountsFile::default()).remove(0);
+
+        // The fake "chrome" hands the tab over: Chrome then lists it (plus a
+        // startup new-tab page that must not be taken).
+        let args = dir.path().join("chrome.args");
+        let c2 = chrome.clone();
+        tokio::spawn(async move {
+            while !args.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            c2.set_targets(vec![
+                page("T0", "C0", "about:blank"),
+                page("NT", "C7", "chrome://newtab/"),
+                page("T7", "C7", "https://studio.youtube.com/"),
+            ]);
+        });
+        let id = tokio::time::timeout(std::time::Duration::from_secs(20), rooms.open(&dest, &[]))
+            .await
+            .expect("open hung")
+            .unwrap();
+        assert_eq!(id, "T7");
+        let map: TabMap = serde_json::from_slice(
+            &std::fs::read(dir.path().join("control-room-tabs.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(map.tab.get("T7"), Some(&7));
+        assert_eq!(map.ctx.get("C7").map(String::as_str), Some("dest-7"));
+
+        // A second open reuses the tab and does not run Chrome again.
+        assert_eq!(rooms.open(&dest, &[]).await.unwrap(), "T7");
+        let runs = std::fs::read_to_string(dir.path().join("chrome.args"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(runs, 1);
+    }
+}

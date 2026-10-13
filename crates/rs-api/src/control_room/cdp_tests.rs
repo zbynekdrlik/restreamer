@@ -103,3 +103,23 @@ async fn page_call_fails_cleanly_when_chrome_is_not_there() {
         .unwrap_err();
     assert!(err.to_string().contains("CDP connect"), "{err}");
 }
+
+#[tokio::test]
+async fn browser_endpoint_and_pages_through_a_fake_chrome() {
+    use crate::control_room::fake_chrome::{FakeChrome, page};
+    let chrome = FakeChrome::start().await;
+    chrome.set_targets(vec![
+        page("T1", "C1", "https://studio.youtube.com/"),
+        serde_json::json!({"targetId": "W1", "type": "service_worker", "url": "https://x/sw.js"}),
+    ]);
+    let cdp = Cdp::new(chrome.addr.clone());
+    assert_eq!(
+        cdp.browser_ws_url().await.unwrap(),
+        format!("ws://{}/devtools/browser/b1", chrome.addr)
+    );
+    let pages = cdp.pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].target_id, "T1");
+    assert_eq!(pages[0].browser_context_id.as_deref(), Some("C1"));
+    assert_eq!(chrome.methods(), vec!["Target.getTargets"]);
+}

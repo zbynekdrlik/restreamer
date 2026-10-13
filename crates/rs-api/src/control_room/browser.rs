@@ -104,6 +104,11 @@ pub fn open_args(user_data: &Path, profile: &str, url: &str, windows: bool) -> V
 pub struct Browser {
     pub cdp: Cdp,
     pub user_data: PathBuf,
+    /// The Chrome binary; `None` = [`locate_chrome`].
+    pub chrome_bin: Option<PathBuf>,
+    pub xvfb_bin: PathBuf,
+    /// The hidden X display Chrome draws on (Linux).
+    pub display: String,
     start_lock: Mutex<()>,
 }
 
@@ -117,8 +122,28 @@ impl Browser {
         Self {
             cdp: Cdp::new(cdp_addr),
             user_data: data_dir.join("browser-profiles").join("control-rooms"),
+            chrome_bin: None,
+            xvfb_bin: PathBuf::from("Xvfb"),
+            display: XVFB_DISPLAY.into(),
             start_lock: Mutex::new(()),
         }
+    }
+
+    fn chrome(&self) -> Result<PathBuf> {
+        self.chrome_bin
+            .clone()
+            .or_else(locate_chrome)
+            .context("Chrome not found: install Google Chrome or set RESTREAMER_CHROME to its path")
+    }
+
+    /// The debugging port, from `cdp.addr` (`host:port`).
+    pub fn port(&self) -> u16 {
+        port_of(&self.cdp.addr)
+    }
+
+    /// DISPLAY for Chrome/Xvfb: the hidden display on Linux, none on Windows.
+    fn display_env(&self) -> Option<&str> {
+        (!cfg!(windows)).then_some(self.display.as_str())
     }
 
     /// Start Chrome (and Xvfb) unless the debugging port already answers.
@@ -127,22 +152,21 @@ impl Browser {
         if self.cdp.browser_ws_url().await.is_ok() {
             return Ok(());
         }
-        let chrome = locate_chrome().context(
-            "Chrome not found: install Google Chrome or set RESTREAMER_CHROME to its path",
-        )?;
+        let chrome = self.chrome()?;
         std::fs::create_dir_all(&self.user_data)
             .with_context(|| format!("create {}", self.user_data.display()))?;
-        if !cfg!(windows) {
-            start_xvfb().await?;
+        if let Some(display) = self.display_env() {
+            start_xvfb(&self.xvfb_bin, display).await?;
         }
         tracing::info!(
-            "control rooms: starting {} (profiles in {}, debugging port {CDP_PORT})",
+            "control rooms: starting {} (profiles in {}, debugging port {})",
             chrome.display(),
-            self.user_data.display()
+            self.user_data.display(),
+            self.port()
         );
         let mut cmd = tokio::process::Command::new(&chrome);
-        cmd.args(launch_args(&self.user_data, CDP_PORT, cfg!(windows)));
-        detach(&mut cmd);
+        cmd.args(launch_args(&self.user_data, self.port(), cfg!(windows)));
+        detach(&mut cmd, self.display_env());
         cmd.spawn()
             .with_context(|| format!("spawn {}", chrome.display()))?;
         for _ in 0..60 {
@@ -152,15 +176,18 @@ impl Browser {
                 return Ok(());
             }
         }
-        bail!("Chrome started but its debugging port {CDP_PORT} never answered")
+        bail!(
+            "Chrome started but its debugging port {} never answered",
+            self.port()
+        )
     }
 
     /// Open `url` in `profile` (a new tab of the running browser).
     pub async fn open(&self, profile: &str, url: &str) -> Result<()> {
-        let chrome = locate_chrome().context("Chrome not found")?;
+        let chrome = self.chrome()?;
         let mut cmd = tokio::process::Command::new(&chrome);
         cmd.args(open_args(&self.user_data, profile, url, cfg!(windows)));
-        detach(&mut cmd);
+        detach(&mut cmd, self.display_env());
         let status = tokio::time::timeout(Duration::from_secs(15), cmd.status())
             .await
             .context("Chrome did not hand the tab over within 15 s")?
@@ -172,44 +199,56 @@ impl Browser {
     }
 }
 
-/// Chrome/Xvfb must not die with Restreamer, and on Linux must draw on the
-/// hidden display.
-fn detach(cmd: &mut tokio::process::Command) {
+/// The port of a `host:port` address; [`CDP_PORT`] when there is none.
+pub fn port_of(addr: &str) -> u16 {
+    addr.rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(CDP_PORT)
+}
+
+/// Chrome/Xvfb must not die with Restreamer, and on Linux draw on the hidden
+/// display.
+fn detach(cmd: &mut tokio::process::Command, display: Option<&str>) {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(false);
-    if !cfg!(windows) {
-        cmd.env("DISPLAY", XVFB_DISPLAY);
+    if let Some(d) = display {
+        cmd.env("DISPLAY", d);
     }
 }
 
+/// The X server lock file of `display` (`:93` -> `/tmp/.X93-lock`).
+pub fn xvfb_lock(display: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/.X{}-lock", display.trim_start_matches(':')))
+}
+
 /// Start the hidden X display unless it already runs.
-async fn start_xvfb() -> Result<()> {
-    let lock = format!("/tmp/.X{}-lock", XVFB_DISPLAY.trim_start_matches(':'));
-    if Path::new(&lock).exists() {
+async fn start_xvfb(bin: &Path, disp: &str) -> Result<()> {
+    let lock = xvfb_lock(disp);
+    if lock.exists() {
         return Ok(());
     }
-    let mut cmd = tokio::process::Command::new("Xvfb");
+    let mut cmd = tokio::process::Command::new(bin);
     cmd.args([
-        XVFB_DISPLAY,
+        disp,
         "-screen",
         "0",
         &format!("{WINDOW_W}x{WINDOW_H}x24"),
         "-nolisten",
         "tcp",
     ]);
-    detach(&mut cmd);
+    detach(&mut cmd, None);
     cmd.spawn()
         .context("spawn Xvfb (install the xvfb package)")?;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if Path::new(&lock).exists() {
-            tracing::info!("control rooms: Xvfb {XVFB_DISPLAY} is up");
+        if lock.exists() {
+            tracing::info!("control rooms: Xvfb {disp} is up");
             return Ok(());
         }
     }
-    bail!("Xvfb {XVFB_DISPLAY} did not come up")
+    bail!("Xvfb {disp} did not come up")
 }
 
 #[cfg(test)]

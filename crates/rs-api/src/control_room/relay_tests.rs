@@ -167,7 +167,10 @@ async fn relay_streams_frames_and_forwards_input() {
             .await
             .unwrap();
         let mut methods = Vec::new();
+        let mut next_id = 1;
         while let Some(req) = seen.recv().await {
+            assert_eq!(req["id"], next_id, "CDP request ids count up from 1");
+            next_id += 1;
             let m = req["method"].as_str().unwrap().to_string();
             if m == "Input.dispatchMouseEvent" {
                 assert_eq!(req["params"]["x"], 5);
