@@ -4796,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "restreamer"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "anyhow",
  "clap",
@@ -4860,7 +4860,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -4907,7 +4907,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4924,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4944,7 +4944,7 @@ dependencies = [
 
 [[package]]
 name = "rs-facebook"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -4954,7 +4954,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "bytes",
  "log",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "rs-rtmp-push"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4991,7 +4991,7 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5011,7 +5011,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.29.38"
+version = "0.29.39"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
