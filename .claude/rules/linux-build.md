@@ -33,6 +33,11 @@ paths:
 - **A config file must exist** (#112). The minimum is `client_uuid` plus
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
+- **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
+  sudo there. Copy the release `.deb` to `/tmp/`; the camera-box session (which has the
+  sudo path) runs `sudo dpkg -i` + `systemctl --user daemon-reload` (the package ships
+  the unit file) + `systemctl --user restart restreamer`. Then verify the version on the
+  dashboard and `dpkg-query -W restreamer` (0.29.38, 2026-10-13).
 - **Smoke test without the box:** install the `.deb` in a `ubuntu:26.04` container on
   dev2, start `Restreamer --headless` as a normal user, and expect 200 from
   `/api/v1/status` and `/` (recipe: build-deb + deb-smoke scripts, 2026-10-11).
