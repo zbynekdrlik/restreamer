@@ -18,6 +18,8 @@ pub mod cdp;
 pub(crate) mod fake_chrome;
 pub mod handlers;
 pub mod relay;
+#[cfg(windows)]
+mod spawn_windows;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
