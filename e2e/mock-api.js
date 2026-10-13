@@ -1203,6 +1203,10 @@ app.post("/api/v1/__reset", (_req, res) => {
   oauthSuggestByEndpoint = {};
   lastDestroyByEvent = {};
   changeKeyOps = [];
+  controlRooms = { event: null, destinations: [] };
+  controlRoomOpens = [];
+  controlRoomInputs = [];
+  controlRoomAccounts = {};
   // #136: the standalone /delivery/start sets cachedDelivery to a running +
   // warmup state no scenario default produces; clear it so it can't leak into
   // the next spec's pre-WS instant load if a test fails before /delivery/stop.
@@ -1452,6 +1456,53 @@ app.post("/api/v1/_test/simulate-reconnect", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// --- Control rooms (#388) ---
+// Default: no destinations (the tab strip stays hidden in every other spec).
+// A spec seeds them with POST /api/v1/_test/control-rooms.
+let controlRooms = { event: null, destinations: [] };
+let controlRoomOpens = [];
+let controlRoomInputs = [];
+let controlRoomAccounts = {};
+// A 16x16 solid red JPEG: the frame the fake screencast sends.
+const CONTROL_ROOM_FRAME = require("fs").readFileSync(path.join(__dirname, "fixtures", "control-room-frame.jpg"));
+
+app.get("/api/v1/control-rooms", (_req, res) => {
+  const destinations = controlRooms.destinations.map((d) => ({
+    ...d,
+    ...(controlRoomAccounts[d.endpoint_id] || {}),
+  }));
+  res.json({ event: controlRooms.event, destinations });
+});
+
+app.post("/api/v1/control-rooms/:id/open", (req, res) => {
+  const id = Number(req.params.id);
+  if (!controlRooms.destinations.some((d) => d.endpoint_id === id)) {
+    return res.status(404).send("unknown endpoint");
+  }
+  controlRoomOpens.push(id);
+  res.json({ target_id: `T${id}` });
+});
+
+app.put("/api/v1/control-rooms/:id/account", (req, res) => {
+  controlRoomAccounts[Number(req.params.id)] = {
+    account: req.body.account || null,
+    sure: !!req.body.sure,
+  };
+  res.status(204).end();
+});
+
+app.post("/api/v1/_test/control-rooms", (req, res) => {
+  controlRooms = req.body;
+  controlRoomOpens = [];
+  controlRoomInputs = [];
+  controlRoomAccounts = {};
+  res.json({ ok: true });
+});
+
+app.get("/api/v1/_test/control-rooms", (_req, res) => {
+  res.json({ opens: controlRoomOpens, inputs: controlRoomInputs, accounts: controlRoomAccounts });
+});
+
 // SPA fallback: serve index.html for any non-API route that wasn't matched by static
 app.get("*", (req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
@@ -1465,7 +1516,37 @@ const server = app.listen(PORT, () => {
   console.log(`Mock API server running on http://127.0.0.1:${PORT}`);
 });
 
-const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
+// Two websocket endpoints share the server, so both run in noServer mode
+// (a `{server, path}` WebSocketServer aborts every upgrade for other paths).
+const wss = new WebSocketServer({ noServer: true });
+const crWss = new WebSocketServer({ noServer: true });
+server.on("upgrade", (req, socket, head) => {
+  const { pathname } = new URL(req.url, "http://127.0.0.1");
+  const target = pathname === "/api/v1/ws" ? wss : pathname === "/api/v1/control-rooms/ws" ? crWss : null;
+  if (!target) {
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(req, socket, head, (ws) => target.emit("connection", ws, req));
+});
+
+// #388: the fake control-room screencast: the tab's URL, the frame size,
+// one JPEG frame; every input message is recorded for the spec to read.
+crWss.on("connection", (ws, req) => {
+  const target = new URL(req.url, "http://127.0.0.1").searchParams.get("target") || "";
+  const id = Number(target.replace(/^T/, ""));
+  const dest = controlRooms.destinations.find((d) => d.endpoint_id === id);
+  ws.send(JSON.stringify({ t: "url", url: dest ? dest.url : "about:blank" }));
+  ws.send(JSON.stringify({ t: "meta", w: 16, h: 16 }));
+  ws.send(CONTROL_ROOM_FRAME);
+  ws.on("message", (data) => {
+    try {
+      controlRoomInputs.push({ target, ...JSON.parse(String(data)) });
+    } catch (_) {
+      // not JSON: ignored, as the real relay does
+    }
+  });
+});
 
 // #377: a client can safely receive a test push only when ALL hold:
 //  - it is OPEN;

@@ -60,6 +60,8 @@ mod status;
 pub use status::StatusResponse;
 pub use status::get_status;
 
+mod control_rooms;
+pub use control_rooms::*;
 mod oauth;
 pub use oauth::{link_endpoint_oauth, list_oauth_grants, oauth_suggest};
 

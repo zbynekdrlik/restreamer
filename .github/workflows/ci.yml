@@ -661,6 +661,8 @@ jobs:
             grep -qx "$want" deb-files.txt || { echo "MISSING in .deb: $want"; cat deb-files.txt; exit 1; }
           done
           dpkg-deb -f "$deb" Depends | grep -q ffmpeg || { echo ".deb does not depend on ffmpeg"; exit 1; }
+          # #388: the control-room Chrome draws on Restreamer's own Xvfb display.
+          dpkg-deb -f "$deb" Depends | grep -q xvfb || { echo ".deb does not depend on xvfb (#388)"; exit 1; }
           # #393: the box runs the operator WINDOW (Alt-Tab with OBS), not --headless.
           dpkg-deb -x "$deb" deb-root
           unit=deb-root/usr/lib/systemd/user/restreamer.service

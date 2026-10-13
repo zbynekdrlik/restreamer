@@ -2,7 +2,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, header};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -191,6 +191,17 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         .route("/obs/start-stream", post(handlers::obs_start_stream))
         .route("/obs/stop-stream", post(handlers::obs_stop_stream))
         // YouTube
+        // Control rooms (#388)
+        .route("/control-rooms", get(crate::control_room::handlers::list))
+        .route("/control-rooms/ws", get(crate::control_room::handlers::ws))
+        .route(
+            "/control-rooms/{endpoint_id}/open",
+            post(crate::control_room::handlers::open),
+        )
+        .route(
+            "/control-rooms/{endpoint_id}/account",
+            put(crate::control_room::handlers::set_account),
+        )
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauths", get(youtube::list_oauths))
         .route(

@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 use super::add_endpoint_modal::AddEndpointModal;
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
+use super::control_room::ControlRoomTabs;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
@@ -36,9 +37,13 @@ const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
 pub fn OperatorDashboard() -> impl IntoView {
     let show_add_modal = RwSignal::new(false);
     provide_context(show_add_modal);
+    // #388: `None` = the dashboard, `Some(endpoint id)` = that control room.
+    let room_tab = RwSignal::new(None::<i64>);
 
     view! {
         <div class="operator-dashboard">
+            <ControlRoomTabs selected=room_tab />
+            <div class="operator-dashboard__home" class:cr-hidden=move || room_tab.get().is_some()>
             <RtmpBindErrorBanner />
             <IngestSkewBanner />
             <LongStreamBanner />
@@ -60,6 +65,7 @@ pub fn OperatorDashboard() -> impl IntoView {
                 </aside>
             </div>
             <AddEndpointModal show=show_add_modal />
+            </div>
         </div>
     }
 }
