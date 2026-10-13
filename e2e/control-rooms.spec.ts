@@ -17,7 +17,7 @@ const ROOMS = {
   destinations: [
     {
       endpoint_id: 11, alias: "YT NLCH 4K", service_type: "YT_RTMP", account: "yt-owner@example.com",
-      sure: true, channel_name: "NEW LEVEL CHURCH", profile: "acct-yt-owner-example-com",
+      sure: true, channel: "UC1", channel_name: "NEW LEVEL CHURCH", profile: "acct-yt-owner-example-com",
       url: "https://studio.youtube.com/channel/UC1/livestreaming", target_id: null, signed_in: true,
     },
     {
@@ -119,9 +119,18 @@ test("the account of a destination is set from its room", async ({ page, request
   await page.getByTestId("cr-account-save").click();
   await expect
     .poll(async () => (await (await request.get(`${API}/_test/control-rooms`)).json()).accounts["12"])
-    .toEqual({ account: "fb-owner@example.com", sure: true });
+    .toEqual({ account: "fb-owner@example.com", channel: null, sure: true });
   // The tab strip picks the new account up on its next refresh.
   await page.reload();
   await expect(page.getByTestId("cr-tab-12")).toHaveAttribute("title", "fb-owner@example.com");
+
+  // Editing a YouTube room's account keeps the channel it opens.
+  await page.getByTestId("cr-tab-11").click();
+  await page.getByRole("button", { name: "Zmeniť účet" }).click();
+  await page.getByTestId("cr-account-input").fill("yt-new@example.com");
+  await page.getByTestId("cr-account-save").click();
+  await expect
+    .poll(async () => (await (await request.get(`${API}/_test/control-rooms`)).json()).accounts["11"])
+    .toEqual({ account: "yt-new@example.com", channel: "UC1", sure: true });
   expect(unexpected(consoleMessages)).toEqual([]);
 });

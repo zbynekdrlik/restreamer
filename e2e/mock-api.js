@@ -1486,6 +1486,7 @@ app.post("/api/v1/control-rooms/:id/open", (req, res) => {
 app.put("/api/v1/control-rooms/:id/account", (req, res) => {
   controlRoomAccounts[Number(req.params.id)] = {
     account: req.body.account || null,
+    channel: req.body.channel || null,
     sure: !!req.body.sure,
   };
   res.status(204).end();

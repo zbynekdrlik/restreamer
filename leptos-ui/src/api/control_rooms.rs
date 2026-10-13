@@ -15,6 +15,8 @@ pub struct RoomDestination {
     #[serde(default)]
     pub sure: bool,
     #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
     pub channel_name: Option<String>,
     pub url: String,
     #[serde(default)]

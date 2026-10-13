@@ -260,12 +260,15 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
             }
         });
     };
+    // The editor changes only the email; the channel the room opens is kept.
+    // A StoredValue keeps the closure Copy (it is used inside <Show>).
+    let keep = StoredValue::new((dest.channel.clone(), dest.channel_name.clone()));
     let save_account = move |_| {
         let a = acct_input.get_untracked().trim().to_string();
         let account = RoomAccount {
             account: (!a.is_empty()).then_some(a),
-            channel: None,
-            channel_name: None,
+            channel: keep.get_value().0,
+            channel_name: keep.get_value().1,
             sure: true,
         };
         spawn_local(async move {
@@ -347,6 +350,7 @@ mod tests {
             service_type: "YT_RTMP".into(),
             account: account.map(str::to_string),
             sure,
+            channel: None,
             channel_name: None,
             url: "https://studio.youtube.com/".into(),
             target_id: None,

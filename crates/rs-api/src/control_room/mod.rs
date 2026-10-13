@@ -76,6 +76,8 @@ pub struct Destination {
     pub service_type: String,
     pub account: Option<String>,
     pub sure: bool,
+    /// YouTube channel id the room opens (kept so an account edit preserves it).
+    pub channel: Option<String>,
     pub channel_name: Option<String>,
     pub profile: String,
     pub url: String,
@@ -241,6 +243,7 @@ pub fn destinations(endpoints: &[EndpointConfig], accounts: &AccountsFile) -> Ve
                 service_type: e.service_type.clone(),
                 account: a.account.clone().filter(|s| !s.trim().is_empty()),
                 sure: a.sure,
+                channel: a.channel.clone().filter(|c| !c.trim().is_empty()),
                 channel_name: a.channel_name.clone(),
                 profile: profile_for(&e.service_type, a.account.as_deref(), e.id),
                 url,
@@ -299,6 +302,9 @@ pub struct ControlRooms {
     accounts_path: PathBuf,
     tabs_path: PathBuf,
     tabs: Mutex<TabMap>,
+    /// One open at a time: two concurrent opens would each see the other's new
+    /// tab as "theirs" (duplicate tabs, a tab mapped to the wrong endpoint).
+    open_lock: Mutex<()>,
 }
 
 impl ControlRooms {
@@ -312,6 +318,7 @@ impl ControlRooms {
             browser,
             accounts_path: data_dir.join("control-rooms.json"),
             tabs: Mutex::new(read_json(&tabs_path)),
+            open_lock: Mutex::new(()),
             tabs_path,
         }
     }
@@ -382,6 +389,7 @@ impl ControlRooms {
     /// `sources`: signed-in profiles a missing YouTube profile is cloned from
     /// (see [`clone_sources`]).
     pub async fn open(&self, dest: &Destination, sources: &[String]) -> Result<String> {
+        let _one_at_a_time = self.open_lock.lock().await;
         self.browser.ensure_running().await?;
         let before = self.browser.cdp.pages().await?;
         {

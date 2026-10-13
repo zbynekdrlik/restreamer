@@ -159,6 +159,12 @@ fn destinations_keep_room_types_join_accounts_and_never_carry_the_key() {
         "https://studio.youtube.com/channel/UC1/livestreaming"
     );
     assert_eq!(d[0].account.as_deref(), Some("a@x.com"));
+    assert_eq!(
+        d[0].channel.as_deref(),
+        Some("UC1"),
+        "an account edit must be able to keep it"
+    );
+    assert_eq!(d[1].channel, None);
     assert!(d[0].sure);
     assert_eq!(d[1].profile, "acct-b-x-com");
     let text = serde_json::to_string(&d).unwrap();
