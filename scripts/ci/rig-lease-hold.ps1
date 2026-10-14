@@ -122,11 +122,21 @@ function Invoke-Acquire {
 # runner ends it with the job at the latest; Release stops it first.
 function Start-Beat {
   $exe = (Get-Process -Id $PID).Path
-  $argv = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-Action", "Beat")
-  $opts = @{ FilePath = $exe; ArgumentList = $argv; PassThru = $true; RedirectStandardOutput = $BeatLog; RedirectStandardError = "$BeatLog.err" }
-  if ($IsWindows -or $env:OS -eq "Windows_NT") { $opts.WindowStyle = "Hidden" }
-  $p = Start-Process @opts
-  Set-Content -Path $BeatPidFile -Value $p.Id -Encoding ascii -NoNewline
+  $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Action Beat"
+  if ($PSVersionTable.PSEdition -eq "Desktop") {
+    # Windows PowerShell: ShellExecute, so the child inherits no handle of this step. An
+    # inherited stdout pipe keeps the step open until the heartbeat exits (the same trap
+    # as program-audio-guard.ps1's watchdog). The heartbeat writes its own log.
+    $p = Start-Process -FilePath $exe -ArgumentList $argLine -WindowStyle Hidden -PassThru
+  } else {
+    $p = Start-Process -FilePath $exe -ArgumentList $argLine -RedirectStandardOutput "$BeatLog.out" `
+      -RedirectStandardError "$BeatLog.err" -PassThru
+  }
+  Set-Content -Path $BeatPidFile -Value "$($p.Id) $($p.StartTime.ToUniversalTime().Ticks)" -Encoding ascii -NoNewline
+}
+
+function Write-BeatLog([string]$line) {
+  Add-Content -Path $BeatLog -Value "$([DateTimeOffset]::UtcNow.ToString('HH:mm:ss')) $line" -Encoding utf8
 }
 
 function Invoke-Beat {
@@ -136,24 +146,31 @@ function Invoke-Beat {
     if (-not (Test-Path $LeaseFile)) { break }
     $id = Get-Content -Path $LeaseFile -Raw
     $r = Invoke-LeaseCall "heartbeat" @{ lease_id = $id }
-    $stamp = [DateTimeOffset]::UtcNow.ToString("HH:mm:ss")
-    if ($r.code -eq 200) { Write-Host "$stamp heartbeat ok, release at $($r.body.expected_release_at)"; continue }
+    if ($r.code -eq 200) { Write-BeatLog "heartbeat ok, release at $($r.body.expected_release_at)"; continue }
     if ($r.code -eq 404) {
-      Set-Content -Path $LostFile -Value "$stamp heartbeat answered 404 not_holder: $($r.text)" -Encoding utf8
-      Write-Host "$stamp lease LOST: $($r.text)"
+      Set-Content -Path $LostFile -Value "heartbeat answered 404 not_holder: $($r.text)" -Encoding utf8
+      Write-BeatLog "lease LOST: $($r.text)"
       return
     }
     # 409 over_hold, 5xx or unreachable: keep beating; the server reclaims only after 180 s.
-    Write-Host "$stamp heartbeat answered $($r.code): $($r.text)"
+    Write-BeatLog "heartbeat answered $($r.code): $($r.text)"
   }
 }
 
+# The heartbeat process this job started, or $null (also when its pid was reused).
+function Get-BeatProcess {
+  if (-not (Test-Path $BeatPidFile)) { return $null }
+  $parts = (Get-Content -Path $BeatPidFile -Raw).Trim() -split " "
+  $proc = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
+  if ($null -eq $proc) { return $null }
+  if ($parts.Count -gt 1 -and "$($proc.StartTime.ToUniversalTime().Ticks)" -ne $parts[1]) { return $null }
+  return $proc
+}
+
 function Invoke-Release {
-  if (Test-Path $BeatPidFile) {
-    $beat = Get-Content -Path $BeatPidFile -Raw
-    Stop-Process -Id ([int]$beat) -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $BeatPidFile -ErrorAction SilentlyContinue
-  }
+  $beat = Get-BeatProcess
+  if ($beat) { Stop-Process -Id $beat.Id -Force -ErrorAction SilentlyContinue }
+  Remove-Item -Path $BeatPidFile -ErrorAction SilentlyContinue
   if (Test-Path $BeatLog) { Write-Host "[rig-lease] heartbeat log:"; Get-Content -Path $BeatLog | ForEach-Object { Write-Host "  $_" } }
   if (Test-Path $LeaseFile) {
     $id = Get-Content -Path $LeaseFile -Raw

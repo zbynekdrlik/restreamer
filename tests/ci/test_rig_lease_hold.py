@@ -103,9 +103,30 @@ def interpreter() -> list[str]:
 
 
 def run(action: str, env: dict, timeout: float = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    """Run one step the way the Actions runner does: its stdout/stderr are pipes, and the
+    step ends only when they close. A detached heartbeat that inherited them would keep the
+    step open until the job's timeout (PR #400's first obs-scripts-test run hung 20 min on
+    exactly that), so a pipe still open after the step exited fails fast here."""
+    proc = subprocess.Popen(
         [*interpreter(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT), "-Action", action],
-        env=env, capture_output=True, text=True, timeout=timeout)
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out: list[str] = []
+    err: list[str] = []
+    readers = [threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True),
+               threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)]
+    for r in readers:
+        r.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    for r in readers:
+        r.join(5)
+    if any(r.is_alive() for r in readers):
+        return subprocess.CompletedProcess(proc.args, -99, "", f"-Action {action} exited, but its output pipe "
+                                           "is still open: a child process inherited it (the step would hang)")
+    return subprocess.CompletedProcess(proc.args, code, "".join(out), "".join(err))
 
 
 def job_env(tmp: Path, api: MockLeaseApi | None, **extra: str) -> dict:
@@ -270,6 +291,9 @@ def main() -> int:
                 problems = case(Path(tmp_s))
             except subprocess.TimeoutExpired as e:
                 problems = [f"timed out after {e.timeout}s"]
+            finally:
+                # A failed case must not leave its heartbeat running (Release stops it).
+                run("Release", job_env(Path(tmp_s), None))
         if problems:
             failed += 1
             print(f"FAIL {name}")
