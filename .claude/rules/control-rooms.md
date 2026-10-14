@@ -85,8 +85,13 @@ paths:
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
-  `{t:copy}`, `history.back()`, http(s) `Page.navigate`, and `{t:size,w,h}`. Anything
-  else is dropped. Frames are JPEG binary messages.
+  `{t:copy}`, `{t:reload,hard?}` (`Page.reload`), `history.back()`, http(s)
+  `Page.navigate`, and `{t:size,w,h}`. Anything else is dropped. Frames are JPEG binary
+  messages.
+- **Reload.** F5 or Ctrl+R sent as a CDP key never reloads: Chrome handles them in the
+  browser UI, which `Input.dispatchKeyEvent` does not reach. The room catches F5, Ctrl+R
+  (Shift = skip the cache) and its "⟳ Obnoviť" button as `{t:reload}`, and keeps their
+  keyup local too. "↻" only reattaches the screencast.
 - **Copy out of a room.** A copy inside the box Chrome lands in Xvfb's clipboard, which
   the operator never sees. The relay installs `copy_hook_source()` (new documents AND the
   open one) plus the `Runtime.addBinding` `__restreamerCopy`. The hook reports a `copy`

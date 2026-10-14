@@ -85,6 +85,8 @@ export function cr_attach(canvas, url, onText) {
   const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   const btn = (b) => ['left', 'middle', 'right'][b] || 'none';
   let lastMove = 0;
+  // Keys the room handles itself (reload, copy): their keyup stays here too.
+  const local = new Set();
   // Where the pointer last was over the room: a pasted file is dropped there.
   let lastPos = { x: 0, y: 0 };
   // #399: a file (thumbnail) goes to the page as base64; the relay puts it
@@ -111,13 +113,22 @@ export function cr_attach(canvas, url, onText) {
     contextmenu: (e) => e.preventDefault(),
     keydown: (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+      // Reload the room's page (F5, Ctrl+R; Shift skips the cache): as a key it
+      // would never reach Chrome's reload.
+      if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r')) {
+        local.add(e.code);
+        send({ t: 'reload', hard: e.shiftKey });
+        onText(JSON.stringify({ t: 'reloading' }));
+        e.preventDefault();
+        return;
+      }
       // Copy: the page copies its selection, and the relay sends the text back.
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { send({ t: 'copy' }); e.preventDefault(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { local.add(e.code); send({ t: 'copy' }); e.preventDefault(); return; }
       const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
       send({ t: 'k', type: printable ? 'keyDown' : 'rawKeyDown', key: e.key, code: e.code, text: printable ? e.key : undefined, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) });
       e.preventDefault();
     },
-    keyup: (e) => { send({ t: 'k', type: 'keyUp', key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) }); e.preventDefault(); },
+    keyup: (e) => { if (local.delete(e.code)) { e.preventDefault(); return; } send({ t: 'k', type: 'keyUp', key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) }); e.preventDefault(); },
   };
   for (const [k, f] of Object.entries(h)) canvas.addEventListener(k, f, k === 'wheel' ? { passive: false } : undefined);
   const paste = (e) => {
@@ -190,6 +201,9 @@ pub fn signed_in_text(d: &RoomDestination) -> &'static str {
         None => "",
     }
 }
+
+/// The room status while its page reloads.
+const RELOADING: &str = "obnovujem stránku…";
 
 /// The room status after a copy reached the operator's clipboard, or not.
 pub fn clip_status(ok: bool) -> &'static str {
@@ -315,12 +329,19 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                         if let Some(u) = m.get("url").and_then(|u| u.as_str()) {
                             url.try_set(u.to_string());
                         }
+                        // The reloaded page has navigated: it is back.
+                        if status.try_get_untracked().as_deref() == Some(RELOADING) {
+                            status.try_set("pripojené".into());
+                        }
                     }
                     Some("clip") => {
                         let text = m.get("text").and_then(|t| t.as_str()).unwrap_or_default();
                         let ok = m.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
                         clip.try_set(Some(text.to_string()));
                         status.try_set(clip_status(ok).into());
+                    }
+                    Some("reloading") => {
+                        status.try_set(RELOADING.into());
                     }
                     Some("file-chooser") => {
                         wants_file.try_set(true);
@@ -447,7 +468,18 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                 >
                     "Otvoriť URL"
                 </button>
-                <button class="cr-btn" title="Znova pripojiť" on:click=move |_| {
+                <button
+                    class="cr-btn"
+                    data-testid="cr-reload"
+                    title="Obnoviť stránku (F5)"
+                    on:click=move |_| {
+                        send(r#"{"t":"reload"}"#.into());
+                        status.set(RELOADING.into());
+                    }
+                >
+                    "⟳ Obnoviť"
+                </button>
+                <button class="cr-btn" title="Znova pripojiť obraz" on:click=move |_| {
                     viewer.set_value(None);
                     attach();
                 }>"↻"</button>

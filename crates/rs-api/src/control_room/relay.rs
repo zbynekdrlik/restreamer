@@ -4,7 +4,8 @@
 //! `{"t":"meta","w","h"}` (frame size changed), `{"t":"url","url"}` (the
 //! page navigated) and `{"t":"clip","text"}` (the page copied text).
 //! Dashboard -> Chrome: `{"t":"m"}` mouse, `{"t":"k"}` key,
-//! `{"t":"paste","text"}`, `{"t":"copy"}`, `{"t":"nav","url"}`, `{"t":"back"}`, and
+//! `{"t":"paste","text"}`, `{"t":"copy"}`, `{"t":"nav","url"}`, `{"t":"back"}`,
+//! `{"t":"reload","hard"?}`, and
 //! `{"t":"size","w","h"}` (the canvas size in CSS pixels: the page viewport
 //! follows it, so the room fills the operator's window at full sharpness).
 //! Anything else is dropped, and only the listed fields are forwarded.
@@ -256,6 +257,11 @@ pub fn client_to_cdp(v: &Value) -> Option<(&'static str, Value)> {
         "back" => Some((
             "Runtime.evaluate",
             json!({ "expression": "history.back()" }),
+        )),
+        // F5 as a key never reloads (Chrome handles it in the browser UI).
+        "reload" => Some((
+            "Page.reload",
+            json!({ "ignoreCache": v.get("hard").and_then(Value::as_bool).unwrap_or(false) }),
         )),
         // The page's own copy command, as a user gesture: the hook reports
         // what it copied.
