@@ -146,6 +146,49 @@ fn locate_chrome_takes_the_env_override_when_it_exists() {
     assert_eq!(found, Some(bin));
 }
 
+#[test]
+fn scope_runner_only_under_a_systemd_service_with_systemd_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let sr = dir.path().join("systemd-run");
+    std::fs::write(&sr, b"").unwrap();
+    assert_eq!(scope_runner(true, &sr), Some(sr.clone()));
+    assert_eq!(scope_runner(false, &sr), None, "not a systemd service");
+    assert_eq!(
+        scope_runner(true, &dir.path().join("missing")),
+        None,
+        "no systemd-run on the box"
+    );
+}
+
+#[test]
+fn scoped_command_wraps_in_a_collected_user_scope() {
+    let args = vec!["--a=1".to_string(), "x y".to_string()];
+    let (prog, out) = scoped_command(
+        Some(Path::new("/usr/bin/systemd-run")),
+        "Chrome",
+        Path::new("/opt/chrome"),
+        &args,
+    );
+    assert_eq!(prog, PathBuf::from("/usr/bin/systemd-run"));
+    assert_eq!(
+        out,
+        [
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--description=Restreamer control rooms: Chrome",
+            "--",
+            "/opt/chrome",
+            "--a=1",
+            "x y",
+        ]
+    );
+    let (prog, out) = scoped_command(None, "Chrome", Path::new("/opt/chrome"), &args);
+    assert_eq!(prog, PathBuf::from("/opt/chrome"));
+    assert_eq!(out, args);
+}
+
 #[cfg(unix)]
 mod spawn {
     use super::*;
@@ -245,5 +288,84 @@ mod spawn {
         b.chrome_bin = Some(fake_bin(dir.path(), "bad-chrome", 3, None));
         let err = b.open("dest-7", "https://x/").await.unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
+    }
+
+    /// A `systemd-run` that logs its arguments and runs the command after `--`.
+    fn fake_systemd_run(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("systemd-run");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
+                dir.join("systemd-run.args").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// stream-pp: `systemctl --user restart restreamer` killed the
+    /// control-room Chrome and Xvfb with the service's cgroup (#388).
+    #[tokio::test]
+    async fn under_systemd_chrome_and_xvfb_start_in_their_own_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let display = format!(":{}", 60_000 + std::process::id() % 5_000);
+        let lock = xvfb_lock(&display);
+        let _ = std::fs::remove_file(&lock);
+        let addr = free_addr();
+        let mut b = Browser::at(dir.path(), addr.clone());
+        b.chrome_bin = Some(fake_bin(dir.path(), "chrome", 0, None));
+        b.xvfb_bin = fake_bin(dir.path(), "xvfb", 0, Some(&lock));
+        b.display = display.clone();
+        b.systemd_run = Some(fake_systemd_run(dir.path()));
+
+        let args = dir.path().join("chrome.args");
+        let up = tokio::spawn(async move {
+            while !args.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            FakeChrome::start_on(l).await
+        });
+        tokio::time::timeout(Duration::from_secs(20), b.ensure_running())
+            .await
+            .expect("ensure_running hung")
+            .unwrap();
+        let _chrome = tokio::time::timeout(Duration::from_secs(5), up)
+            .await
+            .expect("Chrome never started")
+            .unwrap();
+        let _ = std::fs::remove_file(&lock);
+        // The handover run exits at once: it needs no scope.
+        b.open("dest-7", "https://studio.youtube.com/")
+            .await
+            .unwrap();
+
+        let runs = std::fs::read_to_string(dir.path().join("systemd-run.args"))
+            .expect("nothing went through systemd-run");
+        let runs: Vec<&str> = runs.lines().collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        let prefix = "--user --scope --collect --quiet --description=Restreamer control rooms:";
+        assert!(
+            runs[0].starts_with(&format!("{prefix} Xvfb -- {}", b.xvfb_bin.display())),
+            "{runs:?}"
+        );
+        assert!(
+            runs[1].starts_with(&format!(
+                "{prefix} Chrome -- {}",
+                b.chrome_bin.as_ref().unwrap().display()
+            )),
+            "{runs:?}"
+        );
+        // Through the scope, Chrome still draws on the hidden display.
+        let disp = std::fs::read_to_string(dir.path().join("chrome.display")).unwrap();
+        assert_eq!(disp, display);
+        let xargs = std::fs::read_to_string(dir.path().join("xvfb.args")).unwrap();
+        assert!(
+            xargs.starts_with(&format!("{display} -screen 0")),
+            "{xargs}"
+        );
     }
 }

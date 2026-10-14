@@ -26,6 +26,8 @@ pub const WINDOW_W: u32 = 1600;
 pub const WINDOW_H: u32 = 900;
 /// Override for the Chrome binary.
 pub const CHROME_ENV: &str = "RESTREAMER_CHROME";
+/// systemd's transient-unit launcher (Linux).
+pub const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 
 /// Where to look for Chrome, in order. `env` is the `RESTREAMER_CHROME`
 /// override, tried first.
@@ -109,12 +111,20 @@ pub struct Browser {
     pub xvfb_bin: PathBuf,
     /// The hidden X display Chrome draws on (Linux).
     pub display: String,
+    /// `systemd-run`, when Chrome and Xvfb must get their own scope (Linux,
+    /// Restreamer running as a systemd service); see [`scope_runner`].
+    pub systemd_run: Option<PathBuf>,
     start_lock: Mutex<()>,
 }
 
 impl Browser {
     pub fn new(data_dir: &Path) -> Self {
-        Self::at(data_dir, format!("127.0.0.1:{CDP_PORT}"))
+        let mut b = Self::at(data_dir, format!("127.0.0.1:{CDP_PORT}"));
+        b.systemd_run = scope_runner(
+            std::env::var_os("INVOCATION_ID").is_some(),
+            Path::new(SYSTEMD_RUN),
+        );
+        b
     }
 
     /// A browser whose debugging port is `cdp_addr` (tests use a free port).
@@ -125,6 +135,7 @@ impl Browser {
             chrome_bin: None,
             xvfb_bin: PathBuf::from("Xvfb"),
             display: XVFB_DISPLAY.into(),
+            systemd_run: None,
             start_lock: Mutex::new(()),
         }
     }
@@ -271,6 +282,25 @@ fn push_windows_arg(out: &mut String, arg: &str) {
         out.extend(std::iter::repeat_n('\\', backslashes));
         out.push('"');
     }
+}
+
+/// `systemd-run` when Chrome and Xvfb need a scope of their own: Restreamer
+/// runs as a systemd service (`INVOCATION_ID` is set) and `systemd_run` exists.
+pub fn scope_runner(under_systemd: bool, systemd_run: &Path) -> Option<PathBuf> {
+    let _ = (under_systemd, systemd_run);
+    None
+}
+
+/// The program and arguments that start `program args`, in a scope of its own
+/// when `systemd_run` is set.
+pub fn scoped_command(
+    systemd_run: Option<&Path>,
+    what: &str,
+    program: &Path,
+    args: &[String],
+) -> (PathBuf, Vec<String>) {
+    let _ = (systemd_run, what);
+    (program.to_path_buf(), args.to_vec())
 }
 
 /// The port of a `host:port` address; [`CDP_PORT`] when there is none.
