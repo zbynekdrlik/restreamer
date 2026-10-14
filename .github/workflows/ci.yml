@@ -3625,7 +3625,7 @@ jobs:
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: never stream room/FOH music to a platform (owner copyright rule). The start
@@ -6605,7 +6605,7 @@ jobs:
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: the program-audio watchdog, as in the YouTube job (see there).
