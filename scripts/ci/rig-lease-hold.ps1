@@ -57,6 +57,10 @@ function Invoke-LeaseCall([string]$path, $body) {
   }
 }
 
+# The lease id as a plain string. Get-Content returns one with ETS notes (PSPath, ...),
+# which Windows PowerShell 5.1's ConvertTo-Json serializes into an object.
+function Read-LeaseId { return [System.IO.File]::ReadAllText($LeaseFile).Trim() }
+
 function Format-Holder($h) {
   if ($null -eq $h) { return "(unknown holder)" }
   $job = if ($h.job) { $h.job } else { "(unknown job)" }
@@ -144,7 +148,7 @@ function Invoke-Beat {
   while (Test-Path $LeaseFile) {
     Start-Sleep -Seconds $every
     if (-not (Test-Path $LeaseFile)) { break }
-    $id = Get-Content -Path $LeaseFile -Raw
+    $id = Read-LeaseId
     $r = Invoke-LeaseCall "heartbeat" @{ lease_id = $id }
     if ($r.code -eq 200) { Write-BeatLog "heartbeat ok, release at $($r.body.expected_release_at)"; continue }
     if ($r.code -eq 404) {
@@ -173,7 +177,7 @@ function Invoke-Release {
   Remove-Item -Path $BeatPidFile -ErrorAction SilentlyContinue
   if (Test-Path $BeatLog) { Write-Host "[rig-lease] heartbeat log:"; Get-Content -Path $BeatLog | ForEach-Object { Write-Host "  $_" } }
   if (Test-Path $LeaseFile) {
-    $id = Get-Content -Path $LeaseFile -Raw
+    $id = Read-LeaseId
     Remove-Item -Path $LeaseFile
     $r = Invoke-LeaseCall "release" @{ lease_id = $id }
     if ($r.code -eq 200) {
