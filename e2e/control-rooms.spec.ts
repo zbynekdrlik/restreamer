@@ -192,3 +192,45 @@ test("a room fills the window and the box-hosted page gets the canvas size", asy
 
   expect(unexpected(consoleMessages)).toEqual([]);
 });
+
+test("a copy in the room reaches the operator's clipboard; Ctrl+C asks the page to copy", async ({
+  page,
+  request,
+  context,
+}) => {
+  const consoleMessages = collectConsole(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+
+  // Ctrl+C in the room: the box-hosted page runs its own copy command.
+  const canvas = page.getByTestId("cr-canvas");
+  await canvas.click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press("Control+c");
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: { t: string }) => i.t === "copy").length;
+    })
+    .toBe(1);
+
+  // The page reports what it copied (a selection, a "Copy" button in Studio).
+  const url = "rtmp://a.rtmp.youtube.com/live2";
+  const sent = await request.post(`${API}/_test/control-rooms/send`, {
+    data: { target: "T11", msg: { t: "clip", text: url } },
+  });
+  expect((await sent.json()).sent).toBe(1);
+  await expect(page.getByTestId("cr-clip")).toHaveValue(url);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+
+  // The bar's own button copies it again (a real click: works where the
+  // automatic copy is refused).
+  await page.evaluate(() => navigator.clipboard.writeText("something else"));
+  await page.getByTestId("cr-clip-copy").click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});

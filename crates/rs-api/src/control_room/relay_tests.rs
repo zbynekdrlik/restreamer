@@ -198,6 +198,10 @@ async fn relay_streams_frames_and_forwards_input() {
         methods,
         vec![
             "Page.enable",
+            "Runtime.enable",
+            "Runtime.addBinding",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Runtime.evaluate",
             "Page.bringToFront",
             "Page.startScreencast",
             "Page.screencastFrameAck",
@@ -586,4 +590,133 @@ async fn every_main_frame_url_reaches_the_dashboard_and_the_url_sink() {
     // The subframe's same-document change is neither shown nor kept.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(urls.try_recv().is_err());
+}
+
+#[test]
+fn copy_runs_the_page_copy_command_as_a_user_gesture() {
+    let (m, p) = client_to_cdp(&json!({"t": "copy"})).unwrap();
+    assert_eq!(m, "Runtime.evaluate");
+    assert_eq!(p["expression"], "document.execCommand('copy')");
+    assert_eq!(p["userGesture"], true);
+}
+
+fn binding_called(name: &str, payload: &str) -> Value {
+    json!({"method": "Runtime.bindingCalled", "params": {
+        "name": name, "payload": payload, "executionContextId": 1}})
+}
+
+#[test]
+fn page_copies_reach_the_dashboard() {
+    let url = "rtmp://a.rtmp.youtube.com/live2";
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, url)),
+        PageOut::Clip(url.into())
+    );
+    assert_eq!(
+        page_to_client(&binding_called("other", url)),
+        PageOut::Ignore
+    );
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, "")),
+        PageOut::Ignore
+    );
+    let most = "x".repeat(CLIP_MAX);
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, &most)),
+        PageOut::Clip(most.clone())
+    );
+    let over = "x".repeat(CLIP_MAX + 1);
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, &over)),
+        PageOut::Ignore
+    );
+}
+
+#[test]
+fn the_copy_hook_reports_through_the_binding() {
+    let src = copy_hook_source();
+    assert!(src.contains(CLIP_BINDING), "the hook calls the binding");
+    assert!(src.contains("'copy'"), "the hook listens to copy events");
+    assert!(
+        src.contains("writeText"),
+        "the hook wraps navigator.clipboard.writeText"
+    );
+}
+
+/// A fake page that answers every request and, once the relay added the
+/// copy binding, reports one copy through it, as the page hook would.
+async fn fake_page_copying(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Runtime.addBinding" {
+                let name = req["params"]["name"].as_str().unwrap();
+                ws.send(TgMessage::Text(
+                    binding_called(name, "rtmp://x/live2").to_string().into(),
+                ))
+                .await
+                .unwrap();
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_copy_in_the_page_reaches_the_dashboard() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_copying(seen_tx).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let clip = async {
+        loop {
+            if let TgMessage::Text(t) = client.next().await.unwrap().unwrap() {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "clip" {
+                    return v;
+                }
+            }
+        }
+    };
+    let clip = tokio::time::timeout(std::time::Duration::from_secs(10), clip)
+        .await
+        .expect("no clip message reached the dashboard");
+    assert_eq!(clip, json!({"t": "clip", "text": "rtmp://x/live2"}));
+
+    // The hook is installed for later documents AND the current one.
+    let mut reqs = Vec::new();
+    while let Ok(r) = seen.try_recv() {
+        reqs.push(r);
+    }
+    let by = |m: &str| reqs.iter().find(|r| r["method"] == m).cloned();
+    assert_eq!(
+        by("Runtime.addBinding").unwrap()["params"]["name"],
+        CLIP_BINDING
+    );
+    assert!(
+        by("Runtime.enable").is_some(),
+        "bindingCalled needs the Runtime domain"
+    );
+    let src = copy_hook_source();
+    assert_eq!(
+        by("Page.addScriptToEvaluateOnNewDocument").unwrap()["params"]["source"],
+        src
+    );
+    assert!(
+        reqs.iter()
+            .any(|r| r["method"] == "Runtime.evaluate" && r["params"]["expression"] == src),
+        "the hook also runs in the page already open"
+    );
 }

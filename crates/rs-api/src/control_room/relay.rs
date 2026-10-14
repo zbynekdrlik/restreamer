@@ -61,6 +61,16 @@ pub fn viewport(w: f64, h: f64) -> Value {
     json!({ "width": w, "height": h, "deviceScaleFactor": 1, "mobile": false })
 }
 
+/// The page binding the copy hook reports copied text through.
+pub const CLIP_BINDING: &str = "__restreamerCopy";
+/// The longest copied text relayed to the dashboard, in bytes.
+pub const CLIP_MAX: usize = 64 * 1024;
+
+/// The script that reports the page's copies through [`CLIP_BINDING`].
+pub fn copy_hook_source() -> String {
+    String::new()
+}
+
 /// The CDP method that sizes the page viewport.
 pub const SET_VIEWPORT: &str = "Emulation.setDeviceMetricsOverride";
 
@@ -118,6 +128,8 @@ pub enum PageOut {
     },
     /// The main frame navigated.
     Url(String),
+    /// The page copied this text.
+    Clip(String),
     Ignore,
 }
 
@@ -302,6 +314,7 @@ pub async fn relay_with(
                             break;
                         }
                     }
+                    PageOut::Clip(_) => {}
                     PageOut::Ignore => {}
                 }
             }
