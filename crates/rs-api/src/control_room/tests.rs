@@ -764,4 +764,70 @@ mod with_fake_chrome {
         assert_eq!(m.ctx.get("C3").map(String::as_str), Some("dest-3"));
         assert_eq!(m.tab.get("T3b"), Some(&3));
     }
+
+    /// Review of PR #398: a room whose tab Chrome refused to close was
+    /// dropped from the map anyway. It stayed open, uncounted and never
+    /// closed again, so Chrome grew past the live-room limit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_room_chrome_refused_to_close_stays_tracked_and_is_closed_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let chrome = FakeChrome::start().await;
+        let tab = |i: i64| {
+            page(
+                &format!("T{i}"),
+                &format!("C{i}"),
+                "https://studio.youtube.com/",
+            )
+        };
+        chrome.set_targets((1..=4).map(tab).collect());
+        chrome.state.lock().unwrap().refuse_close = vec!["T1".into()];
+        let map = TabMap {
+            ctx: (1..=6)
+                .map(|i| (format!("C{i}"), format!("dest-{i}")))
+                .collect(),
+            tab: (1..=4).map(|i| (format!("T{i}"), i)).collect(),
+            recent: vec![4, 3, 2, 1],
+            ..Default::default()
+        };
+        std::fs::write(
+            dir.path().join("control-room-tabs.json"),
+            serde_json::to_vec(&map).unwrap(),
+        )
+        .unwrap();
+        let mut b = Browser::at(dir.path(), chrome.addr.clone());
+        b.chrome_bin = Some(crate::control_room::fake_chrome::fake_bin(
+            dir.path(),
+            "chrome",
+            0,
+            None,
+        ));
+        let rooms = ControlRooms::with_browser(dir.path(), b);
+        let eps: Vec<EndpointConfig> = (1..=6)
+            .map(|i| ep(i, &format!("YT {i}"), "YT_RTMP"))
+            .collect();
+        let dests = destinations(&eps, &AccountsFile::default());
+
+        after_handover(dir.path(), &chrome, 1, (1..=5).map(tab).collect());
+        let open = |i: usize| {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                rooms.open(&dests[i], &[]),
+            )
+        };
+        assert_eq!(open(4).await.expect("open hung").unwrap(), "T5");
+        assert_eq!(target_ids(&chrome), vec!["T1", "T2", "T3", "T4", "T5"]);
+        let m = read_map(dir.path());
+        assert_eq!(
+            m.tab.get("T1"),
+            Some(&1),
+            "a tab still open stays tracked: {m:?}"
+        );
+
+        // Chrome closes it on the next try.
+        chrome.state.lock().unwrap().refuse_close.clear();
+        assert_eq!(open(3).await.expect("open hung").unwrap(), "T4");
+        assert_eq!(target_ids(&chrome), vec!["T2", "T3", "T4", "T5"]);
+        assert!(!read_map(dir.path()).tab.contains_key("T1"));
+    }
 }

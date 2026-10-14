@@ -405,6 +405,31 @@ mod spawn {
         p
     }
 
+    /// Review of PR #398: with `--scope`, systemd-run becomes the program,
+    /// so a non-zero exit is usually the program's own (Chrome crashed or was
+    /// OOM-killed inside its capped scope). Restarting it outside the scope
+    /// would put it back in restreamer.service's cgroup, the 2026-10-14 OOM
+    /// shape. Only systemd-run's own failures move a program out.
+    #[test]
+    fn only_a_systemd_run_failure_moves_a_program_out_of_its_scope() {
+        for own in [
+            "Failed to connect to bus: No medium found\n",
+            "Failed to create bus connection: No such file or directory\n",
+            "Failed to start transient scope unit: Unit run-x.scope already exists.\n",
+            "Failed to find executable /opt/google/chrome/chrome: No such file or directory\n",
+        ] {
+            assert!(systemd_run_failed(own), "{own}");
+        }
+        for program in [
+            "",
+            "[4242:4242:1014/093700.123:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address\n",
+            "Killed\n",
+            "Fatal server error:\n(EE) Server is already active for display 93\n",
+        ] {
+            assert!(!systemd_run_failed(program), "{program}");
+        }
+    }
+
     /// Review of PR #397: a failing systemd-run was silent (stderr nulled),
     /// and Chrome / Xvfb then never started at all.
     #[tokio::test]

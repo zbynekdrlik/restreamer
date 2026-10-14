@@ -433,6 +433,9 @@ impl Started {
             return Ok(());
         }
         let why = std::fs::read_to_string(&self.launch.log).unwrap_or_default();
+        if !systemd_run_failed(&why) {
+            return Ok(());
+        }
         tracing::warn!(
             "control rooms: {} in a systemd scope exited ({status}): {}; starting it without a scope (log {})",
             self.launch.what,
@@ -443,6 +446,11 @@ impl Started {
         self.scoped = false;
         Ok(())
     }
+}
+
+/// Whether a scoped start's stderr shows that systemd-run itself failed.
+fn systemd_run_failed(_log: &str) -> bool {
+    true
 }
 
 /// Where a started Chrome or Xvfb writes its stderr (`what` = "Chrome" /

@@ -354,10 +354,22 @@ fn size_sets_a_clamped_viewport() {
         (p["width"].as_u64(), p["height"].as_u64()),
         (Some(320), Some(240))
     );
+    // Too big: scaled down to fit, keeping the canvas's aspect ratio
+    // (review of PR #398: a 4K canvas got a 2560x1600 page, drawn stretched).
     let (_, p) = client_to_cdp(&json!({"t": "size", "w": 99999, "h": 99999})).unwrap();
     assert_eq!(
         (p["width"].as_u64(), p["height"].as_u64()),
-        (Some(2560), Some(1600))
+        (Some(1600), Some(1600))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 3840, "h": 1600})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(2560), Some(1067))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 2000, "h": 2000})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(1600), Some(1600))
     );
     let (_, p) = client_to_cdp(&json!({"t": "size", "w": 321, "h": 241})).unwrap();
     assert_eq!(
