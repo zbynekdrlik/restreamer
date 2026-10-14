@@ -299,3 +299,33 @@ test("files go into a room: the page's file chooser, a drop and a pasted image",
 
   expect(unexpected(consoleMessages)).toEqual([]);
 });
+
+test("a room's page is reloaded from its button, F5 and Ctrl+R", async ({ page, request }) => {
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+  const reloads = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t: string }) => i.t === "reload").length;
+  };
+  const keys = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t: string; key?: string }) => i.t === "k" && (i.key === "F5" || i.key === "r")).length;
+  };
+
+  await page.getByTestId("cr-reload").click();
+  await expect.poll(reloads).toBe(1);
+  await expect(page.getByTestId("cr-room-status")).toHaveText("obnovujem stránku…");
+  await page.getByTestId("cr-canvas").click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press("F5");
+  await expect.poll(reloads).toBe(2);
+  await page.keyboard.press("Control+r");
+  await expect.poll(reloads).toBe(3);
+  // They reload the room's page, not the dashboard, and are not sent as keys.
+  await expect(page.getByTestId("control-room")).toBeVisible();
+  expect(await keys()).toBe(0);
+  expect(unexpected(consoleMessages)).toEqual([]);
+});

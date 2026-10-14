@@ -722,3 +722,15 @@ async fn a_copy_in_the_page_reaches_the_dashboard() {
         "the hook also runs in the page already open"
     );
 }
+
+#[test]
+fn reload_reloads_the_page_in_chrome() {
+    // F5 sent as a key never reloads: Chrome handles it in the browser UI,
+    // which a CDP key event does not reach.
+    let (m, p) = client_to_cdp(&json!({"t": "reload"})).unwrap();
+    assert_eq!(m, "Page.reload");
+    assert_eq!(p, json!({"ignoreCache": false}));
+    let (m, p) = client_to_cdp(&json!({"t": "reload", "hard": true})).unwrap();
+    assert_eq!(m, "Page.reload");
+    assert_eq!(p, json!({"ignoreCache": true}));
+}
