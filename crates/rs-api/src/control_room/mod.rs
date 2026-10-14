@@ -2,10 +2,12 @@
 //! streaming destination, opened in a box-hosted Chrome and shown inside the
 //! dashboard as a tab (screencast + mouse/keyboard), locally and remotely.
 //!
-//! - One Chrome profile per ACCOUNT (`acct-<email>`): the YT channels are
-//!   brand channels of one Google account, so all of an account's
-//!   destinations share one sign-in. An endpoint with no known account gets
-//!   its own profile (`dest-<id>`).
+//! - One Chrome profile per DESTINATION (`dest-<id>`), YouTube and Facebook
+//!   alike: each room keeps its own sign-in and channel. A new profile is
+//!   cloned from a signed-in one of the same account (`acct-<email>`, or
+//!   another room of that account and service).
+//! - At most [`MAX_LIVE_ROOMS`] room tabs stay open; each room reopens at
+//!   the last room page it showed.
 //! - The account of each endpoint lives in a box-local file,
 //!   `<data_dir>/control-rooms.json` (emails never go into the repo).
 //! - Which tab belongs to which endpoint is kept in
@@ -30,6 +32,12 @@ use rs_core::models::EndpointConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
+
+/// Lock a std mutex, recovering a poisoned one (a panic elsewhere must not
+/// stop the control rooms).
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 use browser::Browser;
 use cdp::TargetInfo;
@@ -70,6 +78,42 @@ pub struct TabMap {
     /// targetId -> endpoint id.
     #[serde(default)]
     pub tab: HashMap<String, i64>,
+    /// endpoint id -> the last room page shown there ([`remember_url`]).
+    #[serde(default)]
+    pub url: BTreeMap<i64, String>,
+    /// Endpoint ids of the live rooms, most recently viewed first.
+    #[serde(default)]
+    pub recent: Vec<i64>,
+}
+
+/// How many room tabs stay open at once (each costs ~500 MB of Chrome
+/// memory; stream-pp ran out of memory with 7, 2026-10-14).
+pub const MAX_LIVE_ROOMS: usize = 4;
+
+/// Whether `url` is a room page worth reopening (not a sign-in or account
+/// picker page on the way to it).
+pub fn remember_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, path) = rest.split_at(end);
+    match host {
+        "studio.youtube.com" => true,
+        "www.facebook.com" | "facebook.com" | "web.facebook.com" => {
+            path.starts_with("/live/producer")
+        }
+        _ => false,
+    }
+}
+
+/// The live rooms to close so at most `max` stay open: the least recently
+/// viewed (`recent` is most recent first; a room never viewed is oldest).
+pub fn rooms_to_close(recent: &[i64], live: &[i64], max: usize) -> Vec<i64> {
+    let mut order: Vec<i64> = live.to_vec();
+    // Stable: rooms never viewed keep their order, after all viewed ones.
+    order.sort_by_key(|id| recent.iter().position(|r| r == id).unwrap_or(usize::MAX));
+    order.into_iter().skip(max).collect()
 }
 
 /// One destination as the dashboard shows it.
@@ -109,23 +153,20 @@ fn non_empty(account: Option<&str>) -> Option<&str> {
     account.map(str::trim).filter(|a| !a.is_empty())
 }
 
-/// The Chrome profile directory of an endpoint.
+/// The Chrome profile directory of an endpoint: one per DESTINATION.
 ///
-/// YouTube: one profile per DESTINATION. A Google profile has one active
-/// channel identity at a time, so two brand channels of one account cannot
-/// share a profile (#388 finding: the second one asks "Select a channel" and
-/// switching breaks the first). Facebook picks the page inside Live
-/// Producer, so FB shares one profile per account.
-pub fn profile_for(service_type: &str, account: Option<&str>, endpoint_id: i64) -> String {
-    match non_empty(account) {
-        Some(a) if service_type == "FB" => account_profile(a),
-        _ => format!("dest-{endpoint_id}"),
-    }
+/// A Google profile has one active channel identity at a time, so two brand
+/// channels of one account cannot share a profile (#388 finding: the second
+/// one asks "Select a channel"). Facebook rooms shared one profile per
+/// account until one room's sign-in change switched every FB room
+/// (stream-pp, 2026-10-14).
+pub fn profile_for(endpoint_id: i64) -> String {
+    format!("dest-{endpoint_id}")
 }
 
-/// Signed-in profiles a new YouTube destination profile can be cloned from
-/// (same account), best first: the account's own profile, then the other
-/// YouTube destinations of that account. Empty for FB or an unknown account.
+/// Signed-in profiles a new destination profile can be cloned from (same
+/// account), best first: the account's own profile, then the other
+/// destinations of that account and service. Empty for an unknown account.
 pub fn clone_sources(
     dest: &Destination,
     endpoints: &[EndpointConfig],
@@ -134,9 +175,6 @@ pub fn clone_sources(
     let Some(account) = non_empty(dest.account.as_deref()) else {
         return vec![];
     };
-    if dest.service_type == "FB" {
-        return vec![];
-    }
     let mut out = vec![account_profile(account)];
     for e in endpoints {
         let same = accounts
@@ -144,8 +182,8 @@ pub fn clone_sources(
             .get(&e.id.to_string())
             .and_then(|a| non_empty(a.account.as_deref()))
             .is_some_and(|a| a.eq_ignore_ascii_case(account));
-        if same && e.id != dest.endpoint_id && e.service_type == "YT_RTMP" {
-            out.push(format!("dest-{}", e.id));
+        if same && e.id != dest.endpoint_id && e.service_type == dest.service_type {
+            out.push(profile_for(e.id));
         }
     }
     out
@@ -249,7 +287,7 @@ pub fn destinations(endpoints: &[EndpointConfig], accounts: &AccountsFile) -> Ve
                 sure: a.sure,
                 channel: a.channel.clone().filter(|c| !c.trim().is_empty()),
                 channel_name: a.channel_name.clone(),
-                profile: profile_for(&e.service_type, a.account.as_deref(), e.id),
+                profile: profile_for(e.id),
                 url,
                 target_id: None,
                 signed_in: None,
@@ -305,7 +343,7 @@ pub struct ControlRooms {
     pub browser: Browser,
     accounts_path: PathBuf,
     tabs_path: PathBuf,
-    tabs: Mutex<TabMap>,
+    tabs: std::sync::Mutex<TabMap>,
     /// One open at a time: two concurrent opens would each see the other's new
     /// tab as "theirs" (duplicate tabs, a tab mapped to the wrong endpoint).
     open_lock: Mutex<()>,
@@ -321,7 +359,7 @@ impl ControlRooms {
         Self {
             browser,
             accounts_path: data_dir.join("control-rooms.json"),
-            tabs: Mutex::new(read_json(&tabs_path)),
+            tabs: std::sync::Mutex::new(read_json(&tabs_path)),
             open_lock: Mutex::new(()),
             tabs_path,
         }
@@ -331,7 +369,14 @@ impl ControlRooms {
         read_json(&self.accounts_path)
     }
 
-    /// Set (or clear, with `Account::default()`) one endpoint's account.
+    fn save_tabs(&self, map: &TabMap) {
+        if let Err(e) = write_json(&self.tabs_path, map) {
+            tracing::warn!("control rooms: could not persist the tab map: {e:#}");
+        }
+    }
+
+    /// Set (or clear, with `Account::default()`) one endpoint's account. The
+    /// room's kept page is dropped: the new account may mean another channel.
     pub fn set_account(&self, endpoint_id: i64, account: Account) -> Result<()> {
         let mut f = self.accounts();
         if account == Account::default() {
@@ -339,17 +384,49 @@ impl ControlRooms {
         } else {
             f.endpoints.insert(endpoint_id.to_string(), account);
         }
-        write_json(&self.accounts_path, &f)
+        write_json(&self.accounts_path, &f)?;
+        let mut map = lock(&self.tabs);
+        if map.url.remove(&endpoint_id).is_some() {
+            self.save_tabs(&map);
+        }
+        Ok(())
+    }
+
+    /// Keep `url` as the page to reopen the room of tab `target_id` at.
+    pub fn note_url(&self, target_id: &str, url: &str) {
+        if !remember_url(url) {
+            return;
+        }
+        let mut map = lock(&self.tabs);
+        let Some(&endpoint_id) = map.tab.get(target_id) else {
+            return;
+        };
+        if map.url.get(&endpoint_id).map(String::as_str) != Some(url) {
+            tracing::info!("control rooms: endpoint {endpoint_id} now reopens at {url}");
+            map.url.insert(endpoint_id, url.to_string());
+            self.save_tabs(&map);
+        }
+    }
+
+    /// Point each destination at the room page it showed last.
+    pub fn apply_saved_urls(&self, dests: &mut [Destination]) {
+        let map = lock(&self.tabs);
+        for d in dests.iter_mut() {
+            if let Some(u) = map.url.get(&d.endpoint_id) {
+                d.url = u.clone();
+            }
+        }
     }
 
     /// The destinations of `endpoints` with their live tab and sign-in state.
     /// Never starts Chrome: without it, nothing is open or signed in.
     pub async fn status(&self, endpoints: &[EndpointConfig]) -> Vec<Destination> {
         let mut dests = destinations(endpoints, &self.accounts());
+        self.apply_saved_urls(&mut dests);
         let Ok(pages) = self.browser.cdp.pages().await else {
             return dests;
         };
-        let map = self.tabs.lock().await.clone();
+        let map = lock(&self.tabs).clone();
         let page_of_profile = attach_tabs(&mut dests, &map, &pages);
         let mut signed: HashMap<String, Option<bool>> = HashMap::new();
         for d in dests.iter_mut() {
@@ -389,9 +466,75 @@ impl ControlRooms {
         }
     }
 
+    /// Close one tab; false when Chrome refused (the tab is still open).
+    async fn close_tab(&self, target_id: &str) -> bool {
+        match self
+            .browser
+            .cdp
+            .browser_call("Target.closeTarget", json!({ "targetId": target_id }))
+            .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("control rooms: closing tab {target_id} failed: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// `endpoint_id` was just viewed: it becomes the most recent room, and
+    /// the least recently viewed rooms beyond [`MAX_LIVE_ROOMS`] are closed.
+    async fn viewed(&self, endpoint_id: i64, pages: &[TargetInfo]) {
+        let close: Vec<(i64, Vec<String>)> = {
+            let mut map = lock(&self.tabs);
+            map.recent.retain(|r| *r != endpoint_id);
+            map.recent.insert(0, endpoint_id);
+            let mut live: Vec<i64> = pages
+                .iter()
+                .filter_map(|p| map.tab.get(&p.target_id).copied())
+                .collect();
+            live.sort_unstable();
+            live.dedup();
+            rooms_to_close(&map.recent, &live, MAX_LIVE_ROOMS)
+                .into_iter()
+                .map(|ep| {
+                    let tabs = map
+                        .tab
+                        .iter()
+                        .filter(|(_, e)| **e == ep)
+                        .map(|(t, _)| t.clone())
+                        .collect();
+                    (ep, tabs)
+                })
+                .collect()
+        };
+        let mut closed = Vec::new();
+        for (ep, tabs) in &close {
+            for t in tabs {
+                tracing::info!(
+                    "control rooms: closing room {ep} (tab {t}): over {MAX_LIVE_ROOMS} open rooms, viewed longest ago; it reopens at its last page"
+                );
+                if self.close_tab(t).await {
+                    closed.push(t.clone());
+                }
+            }
+        }
+        // A tab Chrome refused to close stays tracked, so the next view
+        // counts it and tries again.
+        let mut map = lock(&self.tabs);
+        for t in &closed {
+            map.tab.remove(t);
+        }
+        let open: Vec<i64> = map.tab.values().copied().collect();
+        map.recent.retain(|r| open.contains(r));
+        let snapshot = map.clone();
+        drop(map);
+        self.save_tabs(&snapshot);
+    }
+
     /// Open (or reuse) the room of `dest`; returns its tab's target id.
-    /// `sources`: signed-in profiles a missing YouTube profile is cloned from
-    /// (see [`clone_sources`]).
+    /// `sources`: signed-in profiles a missing profile is cloned from (see
+    /// [`clone_sources`]).
     pub async fn open(&self, dest: &Destination, sources: &[String]) -> Result<String> {
         let _one_at_a_time = self.open_lock.lock().await;
         // Clone BEFORE Chrome starts: Chrome opens its last-used profile and
@@ -407,13 +550,39 @@ impl ControlRooms {
         }
         self.browser.ensure_running().await?;
         let before = self.browser.cdp.pages().await?;
-        {
-            let map = self.tabs.lock().await;
-            if let Some(t) = before
+        let existing = {
+            let map = lock(&self.tabs);
+            before
                 .iter()
                 .find(|t| map.tab.get(&t.target_id) == Some(&dest.endpoint_id))
-            {
-                return Ok(t.target_id.clone());
+                .map(|t| {
+                    let profile = t
+                        .browser_context_id
+                        .as_ref()
+                        .and_then(|c| map.ctx.get(c))
+                        .cloned();
+                    (t.target_id.clone(), profile)
+                })
+        };
+        if let Some((target_id, profile)) = existing {
+            match profile {
+                Some(p) if p != dest.profile => {
+                    // A room still open in a profile it no longer owns (the
+                    // shared FB account profile): reopen it in its own.
+                    tracing::info!(
+                        "control rooms: endpoint {} moves from profile {p} to {}",
+                        dest.endpoint_id,
+                        dest.profile
+                    );
+                    // Refused: it stays tracked, so a later view closes it.
+                    if self.close_tab(&target_id).await {
+                        lock(&self.tabs).tab.remove(&target_id);
+                    }
+                }
+                _ => {
+                    self.viewed(dest.endpoint_id, &before).await;
+                    return Ok(target_id);
+                }
             }
         }
         self.browser.open(&dest.profile, &dest.url).await?;
@@ -421,15 +590,14 @@ impl ControlRooms {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let now = self.browser.cdp.pages().await?;
             if let Some(t) = new_target(&before, &now) {
-                let mut map = self.tabs.lock().await;
-                if let Some(ctx) = &t.browser_context_id {
-                    map.ctx.insert(ctx.clone(), dest.profile.clone());
-                }
-                let alive: Vec<String> = now.iter().map(|p| p.target_id.clone()).collect();
-                map.tab.retain(|k, _| alive.contains(k));
-                map.tab.insert(t.target_id.clone(), dest.endpoint_id);
-                if let Err(e) = write_json(&self.tabs_path, &*map) {
-                    tracing::warn!("control rooms: could not persist the tab map: {e:#}");
+                {
+                    let mut map = lock(&self.tabs);
+                    if let Some(ctx) = &t.browser_context_id {
+                        map.ctx.insert(ctx.clone(), dest.profile.clone());
+                    }
+                    let alive: Vec<String> = now.iter().map(|p| p.target_id.clone()).collect();
+                    map.tab.retain(|k, _| alive.contains(k));
+                    map.tab.insert(t.target_id.clone(), dest.endpoint_id);
                 }
                 tracing::info!(
                     "control rooms: endpoint {} ({}) -> profile {} tab {}",
@@ -438,6 +606,7 @@ impl ControlRooms {
                     dest.profile,
                     t.target_id
                 );
+                self.viewed(dest.endpoint_id, &now).await;
                 return Ok(t.target_id.clone());
             }
         }

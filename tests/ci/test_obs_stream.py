@@ -248,11 +248,15 @@ class MockObs:
 
 
 class MockLease:
-    def __init__(self, body: dict) -> None:
-        payload = json.dumps(body).encode()
+    """Serves `body`; FREE once `free_after_s` seconds have passed (never, when None)."""
+
+    def __init__(self, body: dict, free_after_s: float | None = None) -> None:
+        start = time.monotonic()
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 (http.server API)
+                freed = free_after_s is not None and time.monotonic() - start >= free_after_s
+                payload = json.dumps(FREE if freed else body).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -356,6 +360,8 @@ class Case:
     rebaseline_window_s: float | None = None
     audio: dict | None = field(default_factory=lambda: dict(AUDIO_OK))  # #379 sampler; None = down
     audio_breach: bool = False        # #379: the watchdog already recorded a breach in this job
+    lease_free_after_s: float | None = None  # #349: camera-box releases the rig after this long
+    deadline_in_s: float | None = None  # #349: the job's lease deadline an earlier check recorded
 
     def foreign_kept(self) -> bool:
         return self.state.foreign_stream_after_stop
@@ -395,6 +401,15 @@ CASES = [
          lease=FREE),
     Case("start: rig lease held -> no start, no marker", OS_, START, ObsState(), 1, "holds the rig lease", [],
          lease=HELD, forbid_requests={"StartStream", "GetVersion"}),
+    # #349 (main run on e3272259): the job's last lease check read the rig free, camera-box took
+    # it 2 s later, and Start failed the job. Start waits for the holder up to the job's deadline.
+    Case("start: camera-box took the rig after the last check -> waits for it, then starts", OS_, START,
+         ObsState(), 0, "took the rig after the job's last lease check", ["true"], lease=HELD,
+         lease_free_after_s=3, deadline_in_s=60, require_requests={"StartStream"}, may_change_state=True),
+    Case("start: rig held past the job's lease deadline -> no start, no marker", OS_, START, ObsState(), 1,
+         "holds the rig lease", [], lease=HELD, deadline_in_s=-30, forbid_requests={"StartStream", "GetVersion"}),
+    Case("start: rig held until the job's lease deadline -> no start, no marker", OS_, START, ObsState(), 1,
+         "holds the rig lease", [], lease=HELD, deadline_in_s=3, forbid_requests={"StartStream", "GetVersion"}),
     Case("start: camera-box already streaming -> no start, no marker", OS_, START, ObsState(streaming=True), 1,
          "OBS is already streaming", [], lease=FREE, forbid_requests={"StartStream"}),
     Case("start: recording -> no start, no marker", OS_, START, ObsState(recording=True), 1,
@@ -457,6 +472,10 @@ CASES = [
     Case("republish: camera-box records in the gap -> no restart, marker false", OS_, REPUBLISH,
          ObsState(streaming=True, foreign_record_after_stop=True), 1, "stream OBS is recording", ["false"],
          lease=FREE, forbid_requests={"StartStream"}, may_stop=True, may_change_state=True),
+    # A hold during a republish gap fails the gate anyway: never wait there (a wait would hit the 120 s timeout).
+    Case("republish: rig lease held with job budget left -> refuses at once", OS_, REPUBLISH, ObsState(streaming=True), 1,
+         "holds the rig lease", ["false"], lease=HELD, deadline_in_s=600, forbid_requests={"StartStream"}, may_stop=True,
+         may_change_state=True),
     Case("republish: rig lease held at the restart -> marker false", OS_, REPUBLISH, ObsState(streaming=True), 1,
          "holds the rig lease", ["false"], lease=HELD, forbid_requests={"StartStream"}, may_stop=True,
          may_change_state=True),
@@ -509,7 +528,7 @@ def run_case(case: Case) -> list[str]:
     with tempfile.TemporaryDirectory() as tmp_s:
         tmp = Path(tmp_s)
         obs = None if case.obs_down else MockObs(case.state)
-        lease = MockLease(case.lease) if case.lease else None
+        lease = MockLease(case.lease, case.lease_free_after_s) if case.lease else None
         audio = MockLease(case.audio) if case.audio is not None else None
         api = MockRestreamerApi()
         if case.audio_breach:
@@ -523,8 +542,11 @@ def run_case(case: Case) -> list[str]:
             case.state.stream_age_s if case.state.streaming else None)
         if ours is not None:
             (tmp / "obs-streaming-started-at").write_text(str(time.time() - ours), encoding="ascii")
-        env = dict(os.environ)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("RIG_LEASE_")}
+        if case.deadline_in_s is not None:
+            env["RIG_LEASE_DEADLINE_EPOCH"] = str(int(time.time() + case.deadline_in_s))
         env.update({
+            "RIG_LEASE_POLL_S": "1",
             "OBS_WS_HOST": "127.0.0.1",
             "OBS_WS_PORT": str(obs.port if obs else _closed_port()),
             "OBS_WS_PASSWORD": case.password,

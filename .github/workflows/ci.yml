@@ -1235,6 +1235,14 @@ jobs:
           FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
           check_job "e2e-obs-youtube-test" "$YT_BLOCK"
           check_job "e2e-fb-push-stream-lan" "$FB_BLOCK"
+          # Both lease checks of a job share ONE wait budget (the first records the
+          # deadline in GITHUB_ENV). A per-step RIG_LEASE_BUDGET_S made the second
+          # check give up after 10 min while camera-box held the rig for 30 more,
+          # and Start then refused OBS (main run 38530980091).
+          if echo "$YT_BLOCK$FB_BLOCK" | grep -nE 'RIG_LEASE_(BUDGET_S|DEADLINE_EPOCH)'; then
+            echo "ERROR: an OBS-streaming job overrides the rig-lease budget (#349) -- the job shares one."
+            exit 1
+          fi
           if [ ! -f scripts/ci/rig-lease-wait.ps1 ]; then
             echo "ERROR: scripts/ci/rig-lease-wait.ps1 is missing (#349)."
             exit 1
@@ -1701,6 +1709,8 @@ jobs:
         run: python tests/ci/test_obs_stream.py
       - name: "Run the program-audio guard against a mock sampler + stop endpoint (#379)"
         run: python tests/ci/test_program_audio_guard.py
+      - name: "Run the rig-lease wait against a mock camera-box lease (#349)"
+        run: python tests/ci/test_rig_lease_wait.py
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -3326,12 +3336,12 @@ jobs:
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
 
-      # #349: final short-budget rig-lease re-check RIGHT before the first
+      # #349: final rig-lease re-check RIGHT before the first
       # StartStream, closing the TOCTOU gap between the post-checkout check and
       # here (camera-box could have acquired the lease during our setup steps;
       # its reverse-direction gate keys on OUR streaming state, which is still
-      # false until now). Short budget (10 min) since setup already fenced most
-      # of the wait; fail-open + always exit 0 as before.
+      # false until now). It waits only for the rest of the job's ONE lease
+      # budget (the first check recorded the deadline); fail-open + always exit 0.
       # #374 removed the OBS-direct baseline that used to start streaming here.
       # This re-check stays BEFORE the VPS boots, so a lease wait never idles a
       # booted VPS against the timed delivery gates. The read-only readiness check
@@ -3339,9 +3349,7 @@ jobs:
       # waits, when camera-box started streaming or recording meanwhile).
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
         shell: powershell
-        timeout-minutes: 12
-        env:
-          RIG_LEASE_BUDGET_S: "600"
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: "Pre-flight: verify no stale delivery instances"
@@ -3617,7 +3625,7 @@ jobs:
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: never stream room/FOH music to a platform (owner copyright rule). The start
@@ -6581,14 +6589,13 @@ jobs:
           if (-not $check.receiving_activated) { throw "FAIL: E2E-Test event not activated" }
           Write-Host "Event $($ev.id) activated with FB endpoint $($fb.id)"
 
-      # #349: final short-budget rig-lease re-check RIGHT before OBS starts
-      # streaming (via the API below), closing the TOCTOU gap between the
-      # post-checkout check and here. Short budget (10 min); fail-open; exit 0.
+      # #349: final rig-lease re-check RIGHT before OBS starts streaming,
+      # closing the TOCTOU gap between the post-checkout check and here. It
+      # waits only for the rest of the job's ONE lease budget (the first check
+      # recorded the deadline); fail-open; exit 0.
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
         shell: powershell
-        timeout-minutes: 12
-        env:
-          RIG_LEASE_BUDGET_S: "600"
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
@@ -6598,7 +6605,7 @@ jobs:
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: the program-audio watchdog, as in the YouTube job (see there).
@@ -7206,6 +7213,12 @@ jobs:
             # and timed out at 17:54 on run 26110088219.
             MAX_WAIT=280
             WAIT_INTERVAL=30
+            # A run of failed calls is no longer a transient: a bad token,
+            # a wrong SHA or an exhausted rate limit would otherwise burn
+            # the whole 140 min before failing.
+            MAX_API_FAILURES=5
+            API_FAILURES=0
+            API_ERR=$(mktemp)
             for i in $(seq 1 $MAX_WAIT); do
               # Find E2E Gate check run from the push-triggered workflow on this commit.
               # Filter out check runs from the current workflow run by matching the run ID
@@ -7214,11 +7227,17 @@ jobs:
               # A failed API call (5xx, empty body: "unexpected end of JSON
               # input", PR run 38488331056) is one missed poll, not a verdict.
               if ! PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
-                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last"); then
-                echo "Attempt $i/$MAX_WAIT: GitHub API call failed, retrying in ${WAIT_INTERVAL}s..."
+                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last" 2>"$API_ERR"); then
+                API_FAILURES=$((API_FAILURES + 1))
+                echo "Attempt $i/$MAX_WAIT: GitHub API call failed ($API_FAILURES in a row): $(tail -c 300 "$API_ERR")"
+                if [[ $API_FAILURES -ge $MAX_API_FAILURES ]]; then
+                  echo "FAIL: $API_FAILURES GitHub API calls in a row failed; last error above"
+                  exit 1
+                fi
                 sleep $WAIT_INTERVAL
                 continue
               fi
+              API_FAILURES=0
 
               if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
                 echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."

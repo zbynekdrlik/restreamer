@@ -168,7 +168,13 @@ impl Browser {
         std::fs::create_dir_all(&self.user_data)
             .with_context(|| format!("create {}", self.user_data.display()))?;
         if let Some(display) = self.display_env() {
-            start_xvfb(&self.xvfb_bin, display, self.systemd_run.as_deref()).await?;
+            start_xvfb(
+                &self.xvfb_bin,
+                display,
+                self.systemd_run.as_deref(),
+                &stderr_log(&self.user_data, "Xvfb"),
+            )
+            .await?;
         }
         tracing::info!(
             "control rooms: starting {} (profiles in {}, debugging port {})",
@@ -182,19 +188,23 @@ impl Browser {
             super::spawn_windows::spawn(&chrome, &args)
                 .with_context(|| format!("spawn {}", chrome.display()))?,
         );
+        // Its own scope: a restart of the service must not kill it.
         #[cfg(not(windows))]
-        {
-            // Its own scope: a restart of the service must not kill it.
-            let (program, args) =
-                scoped_command(self.systemd_run.as_deref(), "Chrome", &chrome, &args);
-            let mut cmd = tokio::process::Command::new(&program);
-            cmd.args(args);
-            detach(&mut cmd, self.display_env());
-            cmd.spawn()
-                .with_context(|| format!("spawn {}", program.display()))?;
-        }
+        let mut started = Started::spawn(
+            self.systemd_run.as_deref(),
+            Launch {
+                what: "Chrome",
+                props: CHROME_SCOPE_PROPS,
+                program: chrome,
+                args,
+                display: self.display_env().map(str::to_string),
+                log: stderr_log(&self.user_data, "Chrome"),
+            },
+        )?;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(250)).await;
+            #[cfg(not(windows))]
+            started.fall_back_if_the_scope_failed()?;
             if self.cdp.browser_ws_url().await.is_ok() {
                 tracing::info!("control rooms: Chrome is up");
                 return Ok(());
@@ -294,28 +304,32 @@ pub fn scope_runner(under_systemd: bool, systemd_run: &Path) -> Option<PathBuf> 
     (under_systemd && systemd_run.is_file()).then(|| systemd_run.to_path_buf())
 }
 
+/// Properties of Chrome's scope: a memory cap, and an OOM inside it kills a
+/// renderer (a "tab crashed" page), never the whole scope.
+pub const CHROME_SCOPE_PROPS: &[&str] = &["MemoryHigh=3G", "MemoryMax=3584M", "OOMPolicy=continue"];
+
 /// The program and arguments that start `program args`, in a scope of its own
-/// when `systemd_run` is set.
+/// (with `props`) when `systemd_run` is set.
 pub fn scoped_command(
     systemd_run: Option<&Path>,
     what: &str,
     program: &Path,
     args: &[String],
+    props: &[&str],
 ) -> (PathBuf, Vec<String>) {
     let Some(runner) = systemd_run else {
         return (program.to_path_buf(), args.to_vec());
     };
-    let mut out: Vec<String> = [
-        "--user",
-        "--scope",
-        "--collect",
-        "--quiet",
-        &format!("--description=Restreamer control rooms: {what}"),
-        "--",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut out: Vec<String> = ["--user", "--scope", "--collect", "--quiet"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for p in props {
+        out.push("-p".into());
+        out.push((*p).to_string());
+    }
+    out.push(format!("--description=Restreamer control rooms: {what}"));
+    out.push("--".into());
     out.push(program.display().to_string());
     out.extend(args.iter().cloned());
     (runner.to_path_buf(), out)
@@ -340,13 +354,141 @@ fn detach(cmd: &mut tokio::process::Command, display: Option<&str>) {
     }
 }
 
+/// How to start a Chrome or Xvfb: detached, with stderr to `log`.
+struct Launch {
+    what: &'static str,
+    /// Scope properties (`systemd-run -p`).
+    props: &'static [&'static str],
+    program: PathBuf,
+    args: Vec<String>,
+    display: Option<String>,
+    log: PathBuf,
+}
+
+impl Launch {
+    /// Spawn it, in a systemd scope when `systemd_run` is set. `append` keeps
+    /// what the log already holds, else it is truncated.
+    fn spawn(&self, systemd_run: Option<&Path>, append: bool) -> Result<tokio::process::Child> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true);
+        if append {
+            opts.append(true);
+        } else {
+            opts.write(true).truncate(true);
+        }
+        let file = opts
+            .open(&self.log)
+            .with_context(|| format!("open {}", self.log.display()))?;
+        let (program, args) = scoped_command(
+            systemd_run,
+            self.what,
+            &self.program,
+            &self.args,
+            self.props,
+        );
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(args);
+        detach(&mut cmd, self.display.as_deref());
+        cmd.stderr(file);
+        cmd.spawn()
+            .with_context(|| format!("spawn {}", program.display()))
+    }
+}
+
+/// A Chrome or Xvfb just started.
+struct Started {
+    child: tokio::process::Child,
+    scoped: bool,
+    launch: Launch,
+}
+
+impl Started {
+    /// Start `launch`, in its own scope when `systemd_run` is set.
+    fn spawn(systemd_run: Option<&Path>, launch: Launch) -> Result<Self> {
+        let child = launch.spawn(systemd_run, false)?;
+        if systemd_run.is_some() {
+            tracing::info!(
+                "control rooms: {} starts in its own systemd scope",
+                launch.what
+            );
+        }
+        Ok(Self {
+            child,
+            scoped: systemd_run.is_some(),
+            launch,
+        })
+    }
+
+    /// systemd-run exits at once when it cannot create the scope (no user
+    /// manager, no session bus): start the program directly then, so the
+    /// rooms still work (they only lose surviving a service restart).
+    fn fall_back_if_the_scope_failed(&mut self) -> Result<()> {
+        if !self.scoped {
+            return Ok(());
+        }
+        let Ok(Some(status)) = self.child.try_wait() else {
+            return Ok(());
+        };
+        if status.success() {
+            return Ok(());
+        }
+        let why = std::fs::read_to_string(&self.launch.log).unwrap_or_default();
+        if !systemd_run_failed(&why) {
+            // The program itself exited (a crash, an OOM kill inside its
+            // capped scope): it stays scoped, the next open starts it again.
+            tracing::warn!(
+                "control rooms: {} exited in its systemd scope ({status}): {} (log {})",
+                self.launch.what,
+                why.trim().lines().last().unwrap_or("no output"),
+                self.launch.log.display()
+            );
+            self.scoped = false;
+            return Ok(());
+        }
+        tracing::warn!(
+            "control rooms: {} in a systemd scope exited ({status}): {}; starting it without a scope (log {})",
+            self.launch.what,
+            why.trim().lines().last().unwrap_or("no output"),
+            self.launch.log.display()
+        );
+        self.child = self.launch.spawn(None, true)?;
+        self.scoped = false;
+        Ok(())
+    }
+}
+
+/// systemd-run's own messages when it cannot run a program in a scope
+/// (src/run/run.c). Chrome's similar "Failed to connect to the bus" comes
+/// with a `[pid:tid:...]` prefix and never matches.
+const SYSTEMD_RUN_FAILURES: &[&str] = &[
+    "Failed to connect to bus",
+    "Failed to create bus connection",
+    "Failed to start transient scope unit",
+    "Failed to find executable",
+];
+
+/// Whether a scoped start's stderr shows that systemd-run itself failed.
+fn systemd_run_failed(log: &str) -> bool {
+    log.lines().any(|l| {
+        SYSTEMD_RUN_FAILURES
+            .iter()
+            .any(|f| l.trim_start().starts_with(f))
+    })
+}
+
+/// Where a started Chrome or Xvfb writes its stderr (`what` = "Chrome" /
+/// "Xvfb"): next to the control-room profiles, truncated at each start.
+pub fn stderr_log(user_data: &Path, what: &str) -> PathBuf {
+    user_data.with_file_name(format!("{}.stderr.log", what.to_lowercase()))
+}
+
 /// The X server lock file of `display` (`:93` -> `/tmp/.X93-lock`).
 pub fn xvfb_lock(display: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/.X{}-lock", display.trim_start_matches(':')))
 }
 
 /// Start the hidden X display unless it already runs.
-async fn start_xvfb(bin: &Path, disp: &str, systemd_run: Option<&Path>) -> Result<()> {
+async fn start_xvfb(bin: &Path, disp: &str, systemd_run: Option<&Path>, log: &Path) -> Result<()> {
     let lock = xvfb_lock(disp);
     if lock.exists() {
         return Ok(());
@@ -362,14 +504,19 @@ async fn start_xvfb(bin: &Path, disp: &str, systemd_run: Option<&Path>) -> Resul
     .iter()
     .map(|s| s.to_string())
     .collect();
-    let (program, args) = scoped_command(systemd_run, "Xvfb", bin, &args);
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args);
-    detach(&mut cmd, None);
-    cmd.spawn()
-        .context("spawn Xvfb (install the xvfb package)")?;
+    let launch = Launch {
+        what: "Xvfb",
+        props: &[],
+        program: bin.to_path_buf(),
+        args,
+        display: None,
+        log: log.to_path_buf(),
+    };
+    let mut started =
+        Started::spawn(systemd_run, launch).context("spawn Xvfb (install the xvfb package)")?;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(100)).await;
+        started.fall_back_if_the_scope_failed()?;
         if lock.exists() {
             tracing::info!("control rooms: Xvfb {disp} is up");
             return Ok(());

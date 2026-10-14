@@ -198,6 +198,10 @@ async fn relay_streams_frames_and_forwards_input() {
         methods,
         vec![
             "Page.enable",
+            "Runtime.enable",
+            "Runtime.addBinding",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Runtime.evaluate",
             "Page.bringToFront",
             "Page.startScreencast",
             "Page.screencastFrameAck",
@@ -339,4 +343,381 @@ async fn relay_moves_a_popup_into_the_room_tab() {
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     assert_eq!(navigations(&chrome).len(), 1);
     assert_eq!(closed(&chrome).len(), 1);
+}
+
+#[test]
+fn size_sets_a_clamped_viewport() {
+    let (m, p) = client_to_cdp(&json!({"t": "size", "w": 1890.4, "h": 812.6})).unwrap();
+    assert_eq!(m, "Emulation.setDeviceMetricsOverride");
+    assert_eq!(
+        p,
+        json!({"width": 1890, "height": 813, "deviceScaleFactor": 1, "mobile": false})
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 10, "h": 10})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(320), Some(240))
+    );
+    // Too big: scaled down to fit, keeping the canvas's aspect ratio
+    // (review of PR #398: a 4K canvas got a 2560x1600 page, drawn stretched).
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 99999, "h": 99999})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(1600), Some(1600))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 3840, "h": 1600})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(2560), Some(1067))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 2000, "h": 2000})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(1600), Some(1600))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 321, "h": 241})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(321), Some(241))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 2559, "h": 1599})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(2559), Some(1599))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": -5, "h": 300})).unwrap();
+    assert_eq!(p["width"].as_u64(), Some(320));
+    assert!(client_to_cdp(&json!({"t": "size", "w": 800})).is_none());
+    assert!(client_to_cdp(&json!({"t": "size", "w": "800", "h": 600})).is_none());
+    assert_eq!(
+        screencast_params()["maxWidth"].as_u64(),
+        Some(u64::from(MAX_VIEW_W))
+    );
+    assert_eq!(
+        screencast_params()["maxHeight"].as_u64(),
+        Some(u64::from(MAX_VIEW_H))
+    );
+}
+
+/// A fake page that answers every request and navigates its main frame once,
+/// right after the first viewport change.
+async fn fake_page_navigating_on_resize(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut navigated = false;
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Emulation.setDeviceMetricsOverride" && !navigated {
+                navigated = true;
+                let nav = json!({"method": "Page.frameNavigated", "params": {"frame": {
+                    "id": "F1", "url": "https://www.facebook.com/live/producer/"}}});
+                ws.send(TgMessage::Text(nav.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn the_viewport_follows_the_canvas_and_survives_a_navigation() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_navigating_on_resize(seen_tx).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let size = json!({"t": "size", "w": 1890, "h": 820});
+    client
+        .send(TgMessage::Text(size.to_string().into()))
+        .await
+        .unwrap();
+    let want = json!({"width": 1890, "height": 820, "deviceScaleFactor": 1, "mobile": false});
+    let run = async {
+        // Every request after the size, in order, until the screencast was
+        // restarted after the navigation.
+        let mut after = Vec::new();
+        let mut starts_after_size = 0;
+        while let Some(req) = seen.recv().await {
+            let m = req["method"].as_str().unwrap().to_string();
+            if m == "Emulation.setDeviceMetricsOverride" {
+                assert_eq!(req["params"], want);
+            }
+            if !after.is_empty() || m == "Emulation.setDeviceMetricsOverride" {
+                if m == "Page.startScreencast" {
+                    starts_after_size += 1;
+                }
+                after.push(m);
+                if starts_after_size == 2 {
+                    break;
+                }
+            }
+        }
+        after
+    };
+    let after = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the viewport was not re-applied after the navigation");
+    assert_eq!(
+        after,
+        vec![
+            "Emulation.setDeviceMetricsOverride",
+            "Page.startScreencast",
+            "Emulation.setDeviceMetricsOverride",
+            "Page.startScreencast",
+        ]
+    );
+}
+
+#[test]
+fn same_document_url_only_for_the_main_frame() {
+    let nav = |frame: &str, url: &str| {
+        json!({"method": "Page.navigatedWithinDocument",
+               "params": {"frameId": frame, "url": url, "navigationType": "historyApi"}})
+    };
+    // A page target's id is its main frame's id.
+    assert_eq!(
+        same_document_url(
+            &nav("T1", "https://studio.youtube.com/channel/UC1/livestreaming"),
+            "T1"
+        ),
+        Some("https://studio.youtube.com/channel/UC1/livestreaming".into())
+    );
+    assert_eq!(same_document_url(&nav("F9", "https://ad/"), "T1"), None);
+    let other = json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "T1", "url": "https://a/"}}});
+    assert_eq!(same_document_url(&other, "T1"), None);
+}
+
+/// A fake page that answers every request and, once the screencast runs,
+/// navigates (cross-document) and then pushes a same-document URL change,
+/// the way YT Studio switches pages.
+async fn fake_page_spa(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut done = false;
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Page.startScreencast" && !done {
+                done = true;
+                for ev in [
+                    json!({"method": "Page.frameNavigated", "params": {"frame": {
+                        "id": "T1", "url": "https://studio.youtube.com/"}}}),
+                    json!({"method": "Page.navigatedWithinDocument", "params": {
+                        "frameId": "T1", "url": "https://studio.youtube.com/channel/UC7/livestreaming"}}),
+                    json!({"method": "Page.navigatedWithinDocument", "params": {
+                        "frameId": "AD", "url": "https://ads.example/"}}),
+                ] {
+                    ws.send(TgMessage::Text(ev.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn every_main_frame_url_reaches_the_dashboard_and_the_url_sink() {
+    use axum::extract::WebSocketUpgrade;
+    let (seen_tx, _seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_spa(seen_tx).await;
+    let (url_tx, mut urls) = mpsc::unbounded_channel::<String>();
+    let sink: UrlSink = std::sync::Arc::new(move |u: String| {
+        let _ = url_tx.send(u);
+    });
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let (cdp, sink) = (Cdp::new(page_addr.clone()), sink.clone());
+            async move {
+                ws.on_upgrade(move |s| {
+                    relay_with(s, cdp, "T1".into(), "https://start/".into(), sink)
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let want = [
+        "https://studio.youtube.com/",
+        "https://studio.youtube.com/channel/UC7/livestreaming",
+    ];
+    let run = async {
+        let mut got = Vec::new();
+        while got.len() < want.len() {
+            got.push(urls.recv().await.unwrap());
+        }
+        let mut shown = Vec::new();
+        while shown.len() < want.len() + 1 {
+            if let TgMessage::Text(t) = client.next().await.unwrap().unwrap() {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "url" {
+                    shown.push(v["url"].as_str().unwrap().to_string());
+                }
+            }
+        }
+        (got, shown)
+    };
+    let (got, shown) = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the URL changes never arrived");
+    assert_eq!(got, want);
+    assert_eq!(shown, ["https://start/", want[0], want[1]]);
+    // The subframe's same-document change is neither shown nor kept.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(urls.try_recv().is_err());
+}
+
+#[test]
+fn copy_runs_the_page_copy_command_as_a_user_gesture() {
+    let (m, p) = client_to_cdp(&json!({"t": "copy"})).unwrap();
+    assert_eq!(m, "Runtime.evaluate");
+    assert_eq!(p["expression"], "document.execCommand('copy')");
+    assert_eq!(p["userGesture"], true);
+}
+
+fn binding_called(name: &str, payload: &str) -> Value {
+    json!({"method": "Runtime.bindingCalled", "params": {
+        "name": name, "payload": payload, "executionContextId": 1}})
+}
+
+#[test]
+fn page_copies_reach_the_dashboard() {
+    let url = "rtmp://a.rtmp.youtube.com/live2";
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, url)),
+        PageOut::Clip(url.into())
+    );
+    assert_eq!(
+        page_to_client(&binding_called("other", url)),
+        PageOut::Ignore
+    );
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, "")),
+        PageOut::Ignore
+    );
+    // The 64 KB limit as a literal, so the test pins CLIP_MAX itself.
+    let most = "x".repeat(65_536);
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, &most)),
+        PageOut::Clip(most.clone())
+    );
+    let over = "x".repeat(65_537);
+    assert_eq!(
+        page_to_client(&binding_called(CLIP_BINDING, &over)),
+        PageOut::Ignore
+    );
+}
+
+#[test]
+fn the_copy_hook_reports_through_the_binding() {
+    let src = copy_hook_source();
+    assert!(src.contains(CLIP_BINDING), "the hook calls the binding");
+    assert!(src.contains("'copy'"), "the hook listens to copy events");
+    assert!(
+        src.contains("writeText"),
+        "the hook wraps navigator.clipboard.writeText"
+    );
+}
+
+/// A fake page that answers every request and, once the relay added the
+/// copy binding, reports one copy through it, as the page hook would.
+async fn fake_page_copying(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Runtime.addBinding" {
+                let name = req["params"]["name"].as_str().unwrap();
+                ws.send(TgMessage::Text(
+                    binding_called(name, "rtmp://x/live2").to_string().into(),
+                ))
+                .await
+                .unwrap();
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_copy_in_the_page_reaches_the_dashboard() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_copying(seen_tx).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let clip = async {
+        loop {
+            if let TgMessage::Text(t) = client.next().await.unwrap().unwrap() {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "clip" {
+                    return v;
+                }
+            }
+        }
+    };
+    let clip = tokio::time::timeout(std::time::Duration::from_secs(10), clip)
+        .await
+        .expect("no clip message reached the dashboard");
+    assert_eq!(clip, json!({"t": "clip", "text": "rtmp://x/live2"}));
+
+    // The hook is installed for later documents AND the current one.
+    let mut reqs = Vec::new();
+    while let Ok(r) = seen.try_recv() {
+        reqs.push(r);
+    }
+    let by = |m: &str| reqs.iter().find(|r| r["method"] == m).cloned();
+    assert_eq!(
+        by("Runtime.addBinding").unwrap()["params"]["name"],
+        CLIP_BINDING
+    );
+    assert!(
+        by("Runtime.enable").is_some(),
+        "bindingCalled needs the Runtime domain"
+    );
+    let src = copy_hook_source();
+    assert_eq!(
+        by("Page.addScriptToEvaluateOnNewDocument").unwrap()["params"]["source"],
+        src
+    );
+    assert!(
+        reqs.iter()
+            .any(|r| r["method"] == "Runtime.evaluate" && r["params"]["expression"] == src),
+        "the hook also runs in the page already open"
+    );
 }

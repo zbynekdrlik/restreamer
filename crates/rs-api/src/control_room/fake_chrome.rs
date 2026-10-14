@@ -22,6 +22,8 @@ pub struct FakeState {
     pub cookies: HashMap<String, Vec<String>>,
     /// (socket path, request) of every CDP request received.
     pub requests: Vec<(String, Value)>,
+    /// Target ids whose `Target.closeTarget` fails with a CDP error.
+    pub refuse_close: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -83,6 +85,28 @@ async fn socket(
 async fn serve_socket(mut ws: WebSocket, state: Arc<Mutex<FakeState>>, path: String, id: String) {
     while let Some(Ok(Message::Text(text))) = ws.next().await {
         let req: Value = serde_json::from_str(&text).unwrap();
+        let refused = req["method"] == "Target.closeTarget" && {
+            let s = state.lock().unwrap();
+            s.refuse_close
+                .iter()
+                .any(|t| req["params"]["targetId"] == *t)
+        };
+        if refused {
+            state
+                .lock()
+                .unwrap()
+                .requests
+                .push((path.clone(), req.clone()));
+            let reply = json!({"id": req["id"], "error": {"code": -32000, "message": "refused"}});
+            if ws
+                .send(Message::Text(reply.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
         let result = {
             let mut s = state.lock().unwrap();
             s.requests.push((path.clone(), req.clone()));

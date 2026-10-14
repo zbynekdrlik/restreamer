@@ -168,6 +168,7 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
         "Chrome",
         Path::new("/opt/chrome"),
         &args,
+        &["MemoryMax=1G", "OOMPolicy=continue"],
     );
     assert_eq!(prog, PathBuf::from("/usr/bin/systemd-run"));
     assert_eq!(
@@ -177,6 +178,10 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
             "--scope",
             "--collect",
             "--quiet",
+            "-p",
+            "MemoryMax=1G",
+            "-p",
+            "OOMPolicy=continue",
             "--description=Restreamer control rooms: Chrome",
             "--",
             "/opt/chrome",
@@ -184,7 +189,13 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
             "x y",
         ]
     );
-    let (prog, out) = scoped_command(None, "Chrome", Path::new("/opt/chrome"), &args);
+    let (prog, out) = scoped_command(
+        None,
+        "Chrome",
+        Path::new("/opt/chrome"),
+        &args,
+        &["MemoryMax=1G"],
+    );
     assert_eq!(prog, PathBuf::from("/opt/chrome"));
     assert_eq!(out, args);
 }
@@ -347,14 +358,22 @@ mod spawn {
             .expect("nothing went through systemd-run");
         let runs: Vec<&str> = runs.lines().collect();
         assert_eq!(runs.len(), 2, "{runs:?}");
-        let prefix = "--user --scope --collect --quiet --description=Restreamer control rooms:";
+        let prefix = "--user --scope --collect --quiet";
+        let desc = "--description=Restreamer control rooms:";
         assert!(
-            runs[0].starts_with(&format!("{prefix} Xvfb -- {}", b.xvfb_bin.display())),
+            runs[0].starts_with(&format!("{prefix} {desc} Xvfb -- {}", b.xvfb_bin.display())),
             "{runs:?}"
+        );
+        // stream-pp ran out of memory with Chrome in Restreamer's cgroup
+        // (2026-10-14): Chrome's scope is capped, and an OOM inside it kills
+        // a renderer, never the whole scope.
+        assert_eq!(
+            CHROME_SCOPE_PROPS,
+            ["MemoryHigh=3G", "MemoryMax=3584M", "OOMPolicy=continue"]
         );
         assert!(
             runs[1].starts_with(&format!(
-                "{prefix} Chrome -- {}",
+                "{prefix} -p MemoryHigh=3G -p MemoryMax=3584M -p OOMPolicy=continue {desc} Chrome -- {}",
                 b.chrome_bin.as_ref().unwrap().display()
             )),
             "{runs:?}"
@@ -367,5 +386,98 @@ mod spawn {
             xargs.starts_with(&format!("{display} -screen 0")),
             "{xargs}"
         );
+    }
+
+    /// A `systemd-run` that cannot reach the user manager: it says why on
+    /// stderr and exits 1 without running anything.
+    fn failing_systemd_run(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("systemd-run");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+                dir.join("systemd-run.args").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// Review of PR #398: with `--scope`, systemd-run becomes the program,
+    /// so a non-zero exit is usually the program's own (Chrome crashed or was
+    /// OOM-killed inside its capped scope). Restarting it outside the scope
+    /// would put it back in restreamer.service's cgroup, the 2026-10-14 OOM
+    /// shape. Only systemd-run's own failures move a program out.
+    #[test]
+    fn only_a_systemd_run_failure_moves_a_program_out_of_its_scope() {
+        for own in [
+            "Failed to connect to bus: No medium found\n",
+            "Failed to create bus connection: No such file or directory\n",
+            "Failed to start transient scope unit: Unit run-x.scope already exists.\n",
+            "Failed to find executable /opt/google/chrome/chrome: No such file or directory\n",
+        ] {
+            assert!(systemd_run_failed(own), "{own}");
+        }
+        for program in [
+            "",
+            "[4242:4242:1014/093700.123:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address\n",
+            "Killed\n",
+            "Fatal server error:\n(EE) Server is already active for display 93\n",
+        ] {
+            assert!(!systemd_run_failed(program), "{program}");
+        }
+    }
+
+    /// Review of PR #397: a failing systemd-run was silent (stderr nulled),
+    /// and Chrome / Xvfb then never started at all.
+    #[tokio::test]
+    async fn a_failing_systemd_run_falls_back_to_a_direct_start_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let display = format!(":{}", 65_000 + std::process::id() % 400);
+        let lock = xvfb_lock(&display);
+        let _ = std::fs::remove_file(&lock);
+        let addr = free_addr();
+        let mut b = Browser::at(dir.path(), addr.clone());
+        b.chrome_bin = Some(fake_bin(dir.path(), "chrome", 0, None));
+        b.xvfb_bin = fake_bin(dir.path(), "xvfb", 0, Some(&lock));
+        b.display = display.clone();
+        b.systemd_run = Some(failing_systemd_run(dir.path()));
+
+        let args = dir.path().join("chrome.args");
+        let up = tokio::spawn(async move {
+            while !args.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            FakeChrome::start_on(l).await
+        });
+        let started = tokio::time::timeout(Duration::from_secs(30), b.ensure_running())
+            .await
+            .expect("ensure_running hung");
+        let _ = std::fs::remove_file(&lock);
+        started.unwrap();
+        let _chrome = tokio::time::timeout(Duration::from_secs(5), up)
+            .await
+            .expect("Chrome never started")
+            .unwrap();
+
+        // Both were tried through systemd-run first, then started directly.
+        let runs = std::fs::read_to_string(dir.path().join("systemd-run.args")).unwrap();
+        assert_eq!(runs.lines().count(), 2, "{runs}");
+        let xargs = std::fs::read_to_string(dir.path().join("xvfb.args")).unwrap();
+        assert!(
+            xargs.starts_with(&format!("{display} -screen 0")),
+            "{xargs}"
+        );
+        let disp = std::fs::read_to_string(dir.path().join("chrome.display")).unwrap();
+        assert_eq!(disp, display);
+        // The reason is kept, not thrown away.
+        for what in ["Chrome", "Xvfb"] {
+            let log = std::fs::read_to_string(stderr_log(&b.user_data, what))
+                .unwrap_or_else(|e| panic!("no {what} stderr log: {e}"));
+            assert!(log.contains("Failed to connect to bus"), "{what}: {log}");
+        }
     }
 }

@@ -1500,6 +1500,14 @@ app.post("/api/v1/_test/control-rooms", (req, res) => {
   res.json({ ok: true });
 });
 
+// Send one relay message (e.g. {t:"clip"}) to every open room socket of a target.
+let controlRoomSockets = [];
+app.post("/api/v1/_test/control-rooms/send", (req, res) => {
+  const open = controlRoomSockets.filter((s) => s.target === req.body.target && s.ws.readyState === 1);
+  for (const s of open) s.ws.send(JSON.stringify(req.body.msg));
+  res.json({ sent: open.length });
+});
+
 app.get("/api/v1/_test/control-rooms", (_req, res) => {
   res.json({ opens: controlRoomOpens, inputs: controlRoomInputs, accounts: controlRoomAccounts });
 });
@@ -1540,6 +1548,7 @@ crWss.on("connection", (ws, req) => {
   ws.send(JSON.stringify({ t: "url", url: dest ? dest.url : "about:blank" }));
   ws.send(JSON.stringify({ t: "meta", w: 16, h: 16 }));
   ws.send(CONTROL_ROOM_FRAME);
+  controlRoomSockets.push({ target, ws });
   ws.on("message", (data) => {
     try {
       controlRoomInputs.push({ target, ...JSON.parse(String(data)) });

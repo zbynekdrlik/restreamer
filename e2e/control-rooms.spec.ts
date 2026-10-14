@@ -134,3 +134,103 @@ test("the account of a destination is set from its room", async ({ page, request
     .toEqual({ account: "yt-new@example.com", channel: "UC1", sure: true });
   expect(unexpected(consoleMessages)).toEqual([]);
 });
+
+test("a room fills the window and the box-hosted page gets the canvas size", async ({ page, request }) => {
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+
+  // The dashboard uses the whole window width, not a centred 1200 px column.
+  const app = await page.locator(".app").boundingBox();
+  expect(app!.x).toBeLessThan(1);
+  expect(app!.width).toBeGreaterThan(1850);
+
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+  const canvas = page.getByTestId("cr-canvas");
+  const sizes = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t?: string }) => i.t === "size") as { w: number; h: number }[];
+  };
+
+  // The canvas fills the window below the room header, and the page in the
+  // box-hosted Chrome is told exactly that size.
+  await expect.poll(async () => (await sizes()).length).toBeGreaterThan(0);
+  let box = (await canvas.boundingBox())!;
+  expect(box.width).toBeGreaterThan(1850);
+  expect(box.y + box.height).toBeLessThanOrEqual(1080);
+  expect(box.y + box.height).toBeGreaterThan(1040);
+  let last = (await sizes()).at(-1)!;
+  const inner = await canvas.evaluate((c: HTMLCanvasElement) => [c.clientWidth, c.clientHeight]);
+  expect([last.w, last.h]).toEqual(inner);
+
+  // A smaller window: the canvas shrinks with it and the page follows.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(async () => (await sizes()).at(-1)!.w).toBeLessThan(1280);
+  box = (await canvas.boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(800);
+  last = (await sizes()).at(-1)!;
+  const inner2 = await canvas.evaluate((c: HTMLCanvasElement) => [c.clientWidth, c.clientHeight]);
+  expect([last.w, last.h]).toEqual(inner2);
+
+  // Clicks still land on the page at the right spot: the centre of the
+  // canvas maps to the centre of the (16x16) frame.
+  await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: { type?: string }) => i.type === "mousePressed").length;
+    })
+    .toBeGreaterThan(0);
+  const press = (await (await request.get(`${API}/_test/control-rooms`)).json()).inputs.find(
+    (i: { type?: string }) => i.type === "mousePressed",
+  );
+  expect(press.x).toBeCloseTo(8, 0);
+  expect(press.y).toBeCloseTo(8, 0);
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});
+
+test("a copy in the room reaches the operator's clipboard; Ctrl+C asks the page to copy", async ({
+  page,
+  request,
+  context,
+}) => {
+  const consoleMessages = collectConsole(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+
+  // Ctrl+C in the room: the box-hosted page runs its own copy command.
+  const canvas = page.getByTestId("cr-canvas");
+  await canvas.click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press("Control+c");
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: { t: string }) => i.t === "copy").length;
+    })
+    .toBe(1);
+
+  // The page reports what it copied (a selection, a "Copy" button in Studio).
+  const url = "rtmp://a.rtmp.youtube.com/live2";
+  const sent = await request.post(`${API}/_test/control-rooms/send`, {
+    data: { target: "T11", msg: { t: "clip", text: url } },
+  });
+  expect((await sent.json()).sent).toBe(1);
+  await expect(page.getByTestId("cr-clip")).toHaveValue(url);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+
+  // The bar's own button copies it again (a real click: works where the
+  // automatic copy is refused).
+  await page.evaluate(() => navigator.clipboard.writeText("something else"));
+  await page.getByTestId("cr-clip-copy").click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});

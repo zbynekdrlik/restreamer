@@ -112,9 +112,27 @@ function Wait-StreamActive([bool]$want, [int]$seconds) {
   return $null
 }
 
-# Opens its own session; exits 1 (with the reason) when the rig is not ours to use.
-function Start-OurStream([bool]$sampleBitrate) {
+# #349: camera-box can take the rig between the job's last lease check and Start (main
+# run on e3272259: free at 12:24:51, held at 12:24:52). Start then waits for the holder,
+# but never past the job's deadline that rig-lease-wait.ps1 recorded; without one (no
+# earlier check in this job) it does not wait. Returns the holder still left, or $null.
+function Wait-RigLeaseHolder {
+  $deadline = $env:RIG_LEASE_DEADLINE_EPOCH -as [double]
+  $poll = if ($env:RIG_LEASE_POLL_S) { [int]$env:RIG_LEASE_POLL_S } else { 30 }
   $holder = Get-RigLeaseHolder
+  while ($holder -and $null -ne $deadline -and (Get-NowEpoch) -lt $deadline) {
+    $left = $deadline - (Get-NowEpoch)
+    Write-Host "[rig-lease] camera-box took the rig after the job's last lease check: $holder -- waiting, $([math]::Round($left))s of the job's budget left"
+    Start-Sleep -Seconds ([math]::Max(1, [math]::Min($poll, [math]::Ceiling($left))))
+    $holder = Get-RigLeaseHolder
+  }
+  return $holder
+}
+
+# Opens its own session; exits 1 (with the reason) when the rig is not ours to use.
+# Only Start waits for a lease holder: a hold during a Republish gap fails that gate anyway.
+function Start-OurStream([bool]$sampleBitrate) {
+  $holder = if ($Action -eq "Start") { Wait-RigLeaseHolder } else { Get-RigLeaseHolder }
   if ($holder) { Write-NotReady "camera-box holds the rig lease: $holder"; exit 1 }
   $why = Test-ObsProcess
   if ($why) { Write-NotReady $why; exit 1 }
