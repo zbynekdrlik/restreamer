@@ -16,7 +16,24 @@ export function cr_attach(canvas, url, onText) {
   let meta = { w: canvas.width, h: canvas.height };
   const ws = new WebSocket(url);
   ws.binaryType = 'blob';
-  ws.onopen = () => { onText(JSON.stringify({ t: 'status', s: 'open' })); canvas.focus(); };
+  // The canvas fills the window below it; the box-hosted page gets exactly
+  // that viewport, so the room is as big as the window and stays sharp.
+  let sentSize = '';
+  const fit = () => {
+    const r = canvas.getBoundingClientRect();
+    if (r.width < 1) return;
+    canvas.style.height = Math.max(240, Math.floor(window.innerHeight - (r.top + window.scrollY) - 12)) + 'px';
+    // The viewport is the drawing area: the box minus its border.
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const s = w + 'x' + h;
+    if (s !== sentSize && ws.readyState === 1) { sentSize = s; ws.send(JSON.stringify({ t: 'size', w, h })); }
+  };
+  let fitTimer = 0;
+  const refit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 150); };
+  const ro = new ResizeObserver(refit);
+  ro.observe(canvas.parentElement);
+  window.addEventListener('resize', refit);
+  ws.onopen = () => { onText(JSON.stringify({ t: 'status', s: 'open' })); fit(); canvas.focus(); };
   ws.onclose = () => onText(JSON.stringify({ t: 'status', s: 'closed' }));
   ws.onmessage = async (e) => {
     if (typeof e.data === 'string') {
@@ -62,6 +79,9 @@ export function cr_attach(canvas, url, onText) {
     close: () => {
       for (const [k, f] of Object.entries(h)) canvas.removeEventListener(k, f);
       document.removeEventListener('paste', paste);
+      ro.disconnect();
+      window.removeEventListener('resize', refit);
+      clearTimeout(fitTimer);
       ws.onclose = null;
       ws.close();
     },

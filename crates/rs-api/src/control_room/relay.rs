@@ -3,8 +3,10 @@
 //! Chrome -> dashboard: JPEG frames as binary messages, plus text messages
 //! `{"t":"meta","w","h"}` (frame size changed) and `{"t":"url","url"}` (the
 //! page navigated). Dashboard -> Chrome: `{"t":"m"}` mouse, `{"t":"k"}` key,
-//! `{"t":"paste","text"}`, `{"t":"nav","url"}`, `{"t":"back"}`. Anything else
-//! is dropped, and only the listed fields are forwarded.
+//! `{"t":"paste","text"}`, `{"t":"nav","url"}`, `{"t":"back"}`, and
+//! `{"t":"size","w","h"}` (the canvas size in CSS pixels: the page viewport
+//! follows it, so the room fills the operator's window at full sharpness).
+//! Anything else is dropped, and only the listed fields are forwarded.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +38,25 @@ const KEY_FIELDS: &[&str] = &[
     "windowsVirtualKeyCode",
     "modifiers",
 ];
+
+/// The largest viewport a room asks Chrome for. Screencast frames follow
+/// the viewport, up to this size.
+pub const MAX_VIEW_W: u32 = 2560;
+pub const MAX_VIEW_H: u32 = 1600;
+/// The smallest: below it YT Studio and Live Producer are unusable anyway.
+pub const MIN_VIEW_W: u32 = 320;
+pub const MIN_VIEW_H: u32 = 240;
+
+/// The page viewport for a dashboard canvas of `w` x `h` CSS pixels.
+pub fn viewport(w: f64, h: f64) -> Value {
+    // `as` saturates, and NaN becomes 0: the clamp then gives the minimum.
+    let w = (w.round() as u32).clamp(MIN_VIEW_W, MAX_VIEW_W);
+    let h = (h.round() as u32).clamp(MIN_VIEW_H, MAX_VIEW_H);
+    json!({ "width": w, "height": h, "deviceScaleFactor": 1, "mobile": false })
+}
+
+/// The CDP method that sizes the page viewport.
+pub const SET_VIEWPORT: &str = "Emulation.setDeviceMetricsOverride";
 
 fn pick(v: &Value, fields: &[&str]) -> Value {
     let mut out = Map::new();
@@ -70,6 +91,10 @@ pub fn client_to_cdp(v: &Value) -> Option<(&'static str, Value)> {
         "back" => Some((
             "Runtime.evaluate",
             json!({ "expression": "history.back()" }),
+        )),
+        "size" => Some((
+            SET_VIEWPORT,
+            viewport(v.get("w")?.as_f64()?, v.get("h")?.as_f64()?),
         )),
         _ => None,
     }
@@ -135,7 +160,7 @@ pub fn popups_of(pages: &[TargetInfo], room: &str) -> Vec<TargetInfo> {
 const POPUP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn screencast_params() -> Value {
-    json!({ "format": "jpeg", "quality": 75, "maxWidth": super::browser::WINDOW_W, "maxHeight": super::browser::WINDOW_H })
+    json!({ "format": "jpeg", "quality": 75, "maxWidth": MAX_VIEW_W, "maxHeight": MAX_VIEW_H })
 }
 
 /// Relay `client` to the page `target_id` until either side closes.
@@ -151,6 +176,8 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
     let (mut page_tx, mut page_rx) = page.split();
     let (mut client_tx, mut client_rx) = client.split();
     let seq = Arc::new(AtomicU64::new(0));
+    // The viewport the viewer asked for, re-applied after a navigation.
+    let view: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
 
     // One writer per socket: the reader tasks hand their messages over.
     let (to_page, mut to_page_rx) = mpsc::unbounded_channel::<String>();
@@ -189,6 +216,7 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
     let from_page = {
         let call = call.clone();
         let to_client = to_client.clone();
+        let view = Arc::clone(&view);
         async move {
             let mut last = (0, 0);
             while let Some(Ok(msg)) = page_rx.next().await {
@@ -220,7 +248,12 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
                     }
                     PageOut::Url(u) => {
                         // A cross-site navigation swaps the renderer, and the
-                        // screencast stops with the old one: start it again.
+                        // screencast stops with the old one: start it again,
+                        // in the viewer's viewport.
+                        let size = view.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                        if let Some(size) = size {
+                            call(SET_VIEWPORT, size);
+                        }
                         call("Page.startScreencast", screencast_params());
                         let m = json!({ "t": "url", "url": u }).to_string();
                         if to_client.send(AxMessage::Text(m.into())).is_err() {
@@ -265,6 +298,7 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
             }
         }
     };
+    let tab = target_id.clone();
     let from_client = async move {
         // A Close frame ends the stream, which ends this loop.
         while let Some(Ok(msg)) = client_rx.next().await {
@@ -274,7 +308,19 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
                     .as_ref()
                     .and_then(client_to_cdp)
             {
-                call(method, params);
+                if method == SET_VIEWPORT {
+                    tracing::info!(
+                        "control rooms: tab {tab} viewport {}x{}",
+                        params["width"],
+                        params["height"]
+                    );
+                    *view.lock().unwrap_or_else(|p| p.into_inner()) = Some(params.clone());
+                    call(method, params);
+                    // The frames follow the new size from the next start on.
+                    call("Page.startScreencast", screencast_params());
+                } else {
+                    call(method, params);
+                }
             }
         }
     };

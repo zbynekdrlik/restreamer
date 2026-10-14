@@ -340,3 +340,125 @@ async fn relay_moves_a_popup_into_the_room_tab() {
     assert_eq!(navigations(&chrome).len(), 1);
     assert_eq!(closed(&chrome).len(), 1);
 }
+
+#[test]
+fn size_sets_a_clamped_viewport() {
+    let (m, p) = client_to_cdp(&json!({"t": "size", "w": 1890.4, "h": 812.6})).unwrap();
+    assert_eq!(m, "Emulation.setDeviceMetricsOverride");
+    assert_eq!(
+        p,
+        json!({"width": 1890, "height": 813, "deviceScaleFactor": 1, "mobile": false})
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 10, "h": 10})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(320), Some(240))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 99999, "h": 99999})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(2560), Some(1600))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 321, "h": 241})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(321), Some(241))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": 2559, "h": 1599})).unwrap();
+    assert_eq!(
+        (p["width"].as_u64(), p["height"].as_u64()),
+        (Some(2559), Some(1599))
+    );
+    let (_, p) = client_to_cdp(&json!({"t": "size", "w": -5, "h": 300})).unwrap();
+    assert_eq!(p["width"].as_u64(), Some(320));
+    assert!(client_to_cdp(&json!({"t": "size", "w": 800})).is_none());
+    assert!(client_to_cdp(&json!({"t": "size", "w": "800", "h": 600})).is_none());
+    assert_eq!(
+        screencast_params()["maxWidth"].as_u64(),
+        Some(u64::from(MAX_VIEW_W))
+    );
+    assert_eq!(
+        screencast_params()["maxHeight"].as_u64(),
+        Some(u64::from(MAX_VIEW_H))
+    );
+}
+
+/// A fake page that answers every request and navigates its main frame once,
+/// right after the first viewport change.
+async fn fake_page_navigating_on_resize(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut navigated = false;
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Emulation.setDeviceMetricsOverride" && !navigated {
+                navigated = true;
+                let nav = json!({"method": "Page.frameNavigated", "params": {"frame": {
+                    "id": "F1", "url": "https://www.facebook.com/live/producer/"}}});
+                ws.send(TgMessage::Text(nav.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn the_viewport_follows_the_canvas_and_survives_a_navigation() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_navigating_on_resize(seen_tx).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let size = json!({"t": "size", "w": 1890, "h": 820});
+    client
+        .send(TgMessage::Text(size.to_string().into()))
+        .await
+        .unwrap();
+    let want = json!({"width": 1890, "height": 820, "deviceScaleFactor": 1, "mobile": false});
+    let run = async {
+        // Every request after the size, in order, until the screencast was
+        // restarted after the navigation.
+        let mut after = Vec::new();
+        let mut starts_after_size = 0;
+        while let Some(req) = seen.recv().await {
+            let m = req["method"].as_str().unwrap().to_string();
+            if m == "Emulation.setDeviceMetricsOverride" {
+                assert_eq!(req["params"], want);
+            }
+            if !after.is_empty() || m == "Emulation.setDeviceMetricsOverride" {
+                if m == "Page.startScreencast" {
+                    starts_after_size += 1;
+                }
+                after.push(m);
+                if starts_after_size == 2 {
+                    break;
+                }
+            }
+        }
+        after
+    };
+    let after = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the viewport was not re-applied after the navigation");
+    assert_eq!(
+        after,
+        vec![
+            "Emulation.setDeviceMetricsOverride",
+            "Page.startScreencast",
+            "Emulation.setDeviceMetricsOverride",
+            "Page.startScreencast",
+        ]
+    );
+}

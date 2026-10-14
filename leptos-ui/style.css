@@ -32,7 +32,7 @@ body {
 }
 
 /* Layout */
-.app { max-width: 1200px; margin: 0 auto; padding: var(--spacing-md); }
+.app { padding: var(--spacing-md); }
 
 /* Header — single compact row */
 .header, .app-header {
@@ -843,7 +843,7 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .cr-room__account { color: #fde68a; }
 .cr-room__status { margin-left: auto; color: var(--text-secondary); font-size: 12px; }
 .cr-room__url { flex: 1; min-width: 200px; }
-.cr-room__screen { width: 100%; height: auto; background: #000; outline: none; border: var(--border-w) solid var(--border); }
+.cr-room__screen { display: block; width: 100%; height: 70vh; background: #000; outline: none; border: var(--border-w) solid var(--border); }
 .cr-room__screen:focus { border-color: #2563eb; }
 .cr-input { background: var(--bg-primary); color: var(--text-primary); border: var(--border-w) solid var(--border); padding: 4px 6px; border-radius: 4px; }
 .cr-btn { background: var(--border); color: var(--text-primary); border: 0; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
