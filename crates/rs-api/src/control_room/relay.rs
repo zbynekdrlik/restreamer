@@ -106,6 +106,44 @@ pub fn copy_hook_source() -> String {
     HOOK.replace("BINDING", CLIP_BINDING)
 }
 
+/// The largest file the operator can put into a room (a thumbnail is a few MB).
+pub const FILE_MAX: usize = 20 * 1024 * 1024;
+/// How long an uploaded file stays on the box.
+pub const UPLOAD_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// A file the dashboard sent into the room, and where it was dropped.
+#[derive(Debug, PartialEq)]
+pub struct Upload {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A safe file name for an uploaded file (one path component, the end kept).
+pub fn upload_name(name: &str) -> String {
+    name.to_string()
+}
+
+/// The file in a dashboard `{t:"file"}` message.
+pub fn decode_file(_v: &Value) -> Result<Upload, String> {
+    Err("not implemented".into())
+}
+
+/// The CDP calls that put the file at `path` into the page: into the pending
+/// file chooser `chooser`, else dropped on the page at (x, y).
+pub fn file_actions(
+    _path: &str,
+    _chooser: Option<i64>,
+    _x: f64,
+    _y: f64,
+) -> Vec<(&'static str, Value)> {
+    Vec::new()
+}
+
+/// Delete uploaded files older than `max_age`.
+pub fn prune_uploads(_dir: &std::path::Path, _max_age: std::time::Duration) {}
+
 /// The CDP method that sizes the page viewport.
 pub const SET_VIEWPORT: &str = "Emulation.setDeviceMetricsOverride";
 
@@ -171,6 +209,11 @@ pub enum PageOut {
     Url(String),
     /// The page copied this text.
     Clip(String),
+    /// The page opened a file chooser (`node`: its `<input type=file>`).
+    FileChooser {
+        node: Option<i64>,
+        mode: String,
+    },
     Ignore,
 }
 
@@ -246,6 +289,19 @@ pub type UrlSink = Arc<dyn Fn(String) + Send + Sync>;
 /// [`relay_with`], keeping no URLs.
 pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: String) {
     relay_with(client, cdp, target_id, start_url, Arc::new(|_| {})).await;
+}
+
+/// [`relay_with`], with files the operator puts into the room written to
+/// `uploads`.
+pub async fn relay_room(
+    client: WebSocket,
+    cdp: Cdp,
+    target_id: String,
+    start_url: String,
+    on_url: UrlSink,
+    _uploads: std::path::PathBuf,
+) {
+    relay_with(client, cdp, target_id, start_url, on_url).await;
 }
 
 /// Relay `client` to the page `target_id` until either side closes.
@@ -380,6 +436,7 @@ pub async fn relay_with(
                             break;
                         }
                     }
+                    PageOut::FileChooser { .. } => {}
                     PageOut::Ignore => {}
                 }
             }
@@ -459,3 +516,7 @@ pub async fn relay_with(
 #[cfg(test)]
 #[path = "relay_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "relay_file_tests.rs"]
+mod file_tests;

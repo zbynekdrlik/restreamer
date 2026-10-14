@@ -202,6 +202,7 @@ async fn relay_streams_frames_and_forwards_input() {
             "Runtime.addBinding",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.evaluate",
+            "Page.setInterceptFileChooserDialog",
             "Page.bringToFront",
             "Page.startScreencast",
             "Page.screencastFrameAck",
