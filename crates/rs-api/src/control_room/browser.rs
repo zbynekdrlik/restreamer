@@ -194,6 +194,7 @@ impl Browser {
             self.systemd_run.as_deref(),
             Launch {
                 what: "Chrome",
+                props: CHROME_SCOPE_PROPS,
                 program: chrome,
                 args,
                 display: self.display_env().map(str::to_string),
@@ -303,14 +304,20 @@ pub fn scope_runner(under_systemd: bool, systemd_run: &Path) -> Option<PathBuf> 
     (under_systemd && systemd_run.is_file()).then(|| systemd_run.to_path_buf())
 }
 
+/// Properties of Chrome's scope: a memory cap, and an OOM inside it kills a
+/// renderer (a "tab crashed" page), never the whole scope.
+pub const CHROME_SCOPE_PROPS: &[&str] = &["MemoryHigh=3G", "MemoryMax=3584M", "OOMPolicy=continue"];
+
 /// The program and arguments that start `program args`, in a scope of its own
-/// when `systemd_run` is set.
+/// (with `props`) when `systemd_run` is set.
 pub fn scoped_command(
     systemd_run: Option<&Path>,
     what: &str,
     program: &Path,
     args: &[String],
+    props: &[&str],
 ) -> (PathBuf, Vec<String>) {
+    let _ = props;
     let Some(runner) = systemd_run else {
         return (program.to_path_buf(), args.to_vec());
     };
@@ -352,6 +359,8 @@ fn detach(cmd: &mut tokio::process::Command, display: Option<&str>) {
 /// How to start a Chrome or Xvfb: detached, with stderr to `log`.
 struct Launch {
     what: &'static str,
+    /// Scope properties (`systemd-run -p`).
+    props: &'static [&'static str],
     program: PathBuf,
     args: Vec<String>,
     display: Option<String>,
@@ -372,7 +381,13 @@ impl Launch {
         let file = opts
             .open(&self.log)
             .with_context(|| format!("open {}", self.log.display()))?;
-        let (program, args) = scoped_command(systemd_run, self.what, &self.program, &self.args);
+        let (program, args) = scoped_command(
+            systemd_run,
+            self.what,
+            &self.program,
+            &self.args,
+            self.props,
+        );
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(args);
         detach(&mut cmd, self.display.as_deref());
@@ -462,6 +477,7 @@ async fn start_xvfb(bin: &Path, disp: &str, systemd_run: Option<&Path>, log: &Pa
     .collect();
     let launch = Launch {
         what: "Xvfb",
+        props: &[],
         program: bin.to_path_buf(),
         args,
         display: None,

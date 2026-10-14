@@ -168,6 +168,7 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
         "Chrome",
         Path::new("/opt/chrome"),
         &args,
+        &["MemoryMax=1G", "OOMPolicy=continue"],
     );
     assert_eq!(prog, PathBuf::from("/usr/bin/systemd-run"));
     assert_eq!(
@@ -177,6 +178,10 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
             "--scope",
             "--collect",
             "--quiet",
+            "-p",
+            "MemoryMax=1G",
+            "-p",
+            "OOMPolicy=continue",
             "--description=Restreamer control rooms: Chrome",
             "--",
             "/opt/chrome",
@@ -184,7 +189,13 @@ fn scoped_command_wraps_in_a_collected_user_scope() {
             "x y",
         ]
     );
-    let (prog, out) = scoped_command(None, "Chrome", Path::new("/opt/chrome"), &args);
+    let (prog, out) = scoped_command(
+        None,
+        "Chrome",
+        Path::new("/opt/chrome"),
+        &args,
+        &["MemoryMax=1G"],
+    );
     assert_eq!(prog, PathBuf::from("/opt/chrome"));
     assert_eq!(out, args);
 }
@@ -347,14 +358,22 @@ mod spawn {
             .expect("nothing went through systemd-run");
         let runs: Vec<&str> = runs.lines().collect();
         assert_eq!(runs.len(), 2, "{runs:?}");
-        let prefix = "--user --scope --collect --quiet --description=Restreamer control rooms:";
+        let prefix = "--user --scope --collect --quiet";
+        let desc = "--description=Restreamer control rooms:";
         assert!(
-            runs[0].starts_with(&format!("{prefix} Xvfb -- {}", b.xvfb_bin.display())),
+            runs[0].starts_with(&format!("{prefix} {desc} Xvfb -- {}", b.xvfb_bin.display())),
             "{runs:?}"
+        );
+        // stream-pp ran out of memory with Chrome in Restreamer's cgroup
+        // (2026-10-14): Chrome's scope is capped, and an OOM inside it kills
+        // a renderer, never the whole scope.
+        assert_eq!(
+            CHROME_SCOPE_PROPS,
+            ["MemoryHigh=3G", "MemoryMax=3584M", "OOMPolicy=continue"]
         );
         assert!(
             runs[1].starts_with(&format!(
-                "{prefix} Chrome -- {}",
+                "{prefix} -p MemoryHigh=3G -p MemoryMax=3584M -p OOMPolicy=continue {desc} Chrome -- {}",
                 b.chrome_bin.as_ref().unwrap().display()
             )),
             "{runs:?}"

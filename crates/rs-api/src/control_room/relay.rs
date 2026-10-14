@@ -142,6 +142,13 @@ pub fn page_to_client(m: &Value) -> PageOut {
     }
 }
 
+/// The URL of a same-document navigation (YT Studio's page switches) of the
+/// main frame. A page target's id is its main frame's id.
+pub fn same_document_url(m: &Value, main_frame: &str) -> Option<String> {
+    let _ = (m, main_frame);
+    None
+}
+
 /// The tabs the room tab `room` opened (`window.open`, a `target=_blank`
 /// link) that already carry an http(s) URL: the room shows them in its own
 /// tab, since the viewer only ever sees that one.
@@ -163,8 +170,23 @@ fn screencast_params() -> Value {
     json!({ "format": "jpeg", "quality": 75, "maxWidth": MAX_VIEW_W, "maxHeight": MAX_VIEW_H })
 }
 
-/// Relay `client` to the page `target_id` until either side closes.
+/// Told every main-frame URL the page reaches.
+pub type UrlSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// [`relay_with`], keeping no URLs.
 pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: String) {
+    relay_with(client, cdp, target_id, start_url, Arc::new(|_| {})).await;
+}
+
+/// Relay `client` to the page `target_id` until either side closes.
+pub async fn relay_with(
+    client: WebSocket,
+    cdp: Cdp,
+    target_id: String,
+    start_url: String,
+    on_url: UrlSink,
+) {
+    let _ = &on_url;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(&target_id)).await {
         Ok((ws, _)) => ws,
         Err(e) => {

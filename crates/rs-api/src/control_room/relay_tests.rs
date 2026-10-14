@@ -462,3 +462,116 @@ async fn the_viewport_follows_the_canvas_and_survives_a_navigation() {
         ]
     );
 }
+
+#[test]
+fn same_document_url_only_for_the_main_frame() {
+    let nav = |frame: &str, url: &str| {
+        json!({"method": "Page.navigatedWithinDocument",
+               "params": {"frameId": frame, "url": url, "navigationType": "historyApi"}})
+    };
+    // A page target's id is its main frame's id.
+    assert_eq!(
+        same_document_url(
+            &nav("T1", "https://studio.youtube.com/channel/UC1/livestreaming"),
+            "T1"
+        ),
+        Some("https://studio.youtube.com/channel/UC1/livestreaming".into())
+    );
+    assert_eq!(same_document_url(&nav("F9", "https://ad/"), "T1"), None);
+    let other = json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "T1", "url": "https://a/"}}});
+    assert_eq!(same_document_url(&other, "T1"), None);
+}
+
+/// A fake page that answers every request and, once the screencast runs,
+/// navigates (cross-document) and then pushes a same-document URL change,
+/// the way YT Studio switches pages.
+async fn fake_page_spa(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut done = false;
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Page.startScreencast" && !done {
+                done = true;
+                for ev in [
+                    json!({"method": "Page.frameNavigated", "params": {"frame": {
+                        "id": "T1", "url": "https://studio.youtube.com/"}}}),
+                    json!({"method": "Page.navigatedWithinDocument", "params": {
+                        "frameId": "T1", "url": "https://studio.youtube.com/channel/UC7/livestreaming"}}),
+                    json!({"method": "Page.navigatedWithinDocument", "params": {
+                        "frameId": "AD", "url": "https://ads.example/"}}),
+                ] {
+                    ws.send(TgMessage::Text(ev.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn every_main_frame_url_reaches_the_dashboard_and_the_url_sink() {
+    use axum::extract::WebSocketUpgrade;
+    let (seen_tx, _seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_spa(seen_tx).await;
+    let (url_tx, mut urls) = mpsc::unbounded_channel::<String>();
+    let sink: UrlSink = std::sync::Arc::new(move |u: String| {
+        let _ = url_tx.send(u);
+    });
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let (cdp, sink) = (Cdp::new(page_addr.clone()), sink.clone());
+            async move {
+                ws.on_upgrade(move |s| {
+                    relay_with(s, cdp, "T1".into(), "https://start/".into(), sink)
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let want = [
+        "https://studio.youtube.com/",
+        "https://studio.youtube.com/channel/UC7/livestreaming",
+    ];
+    let run = async {
+        let mut got = Vec::new();
+        while got.len() < want.len() {
+            got.push(urls.recv().await.unwrap());
+        }
+        let mut shown = Vec::new();
+        while shown.len() < want.len() + 1 {
+            if let TgMessage::Text(t) = client.next().await.unwrap().unwrap() {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "url" {
+                    shown.push(v["url"].as_str().unwrap().to_string());
+                }
+            }
+        }
+        (got, shown)
+    };
+    let (got, shown) = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the URL changes never arrived");
+    assert_eq!(got, want);
+    assert_eq!(shown, ["https://start/", want[0], want[1]]);
+    // The subframe's same-document change is neither shown nor kept.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(urls.try_recv().is_err());
+}

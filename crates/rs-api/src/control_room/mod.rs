@@ -70,6 +70,30 @@ pub struct TabMap {
     /// targetId -> endpoint id.
     #[serde(default)]
     pub tab: HashMap<String, i64>,
+    /// endpoint id -> the last room page shown there ([`remember_url`]).
+    #[serde(default)]
+    pub url: BTreeMap<i64, String>,
+    /// Endpoint ids of the live rooms, most recently viewed first.
+    #[serde(default)]
+    pub recent: Vec<i64>,
+}
+
+/// How many room tabs stay open at once (each costs ~500 MB of Chrome
+/// memory; stream-pp ran out of memory with 7, 2026-10-14).
+pub const MAX_LIVE_ROOMS: usize = 4;
+
+/// Whether `url` is a room page worth reopening (not a sign-in or account
+/// picker page on the way to it).
+pub fn remember_url(url: &str) -> bool {
+    let _ = url;
+    false
+}
+
+/// The live rooms to close so at most `max` stay open: the least recently
+/// viewed (`recent` is most recent first; a room never viewed is oldest).
+pub fn rooms_to_close(recent: &[i64], live: &[i64], max: usize) -> Vec<i64> {
+    let _ = (recent, live, max);
+    vec![]
 }
 
 /// One destination as the dashboard shows it.
@@ -340,6 +364,11 @@ impl ControlRooms {
             f.endpoints.insert(endpoint_id.to_string(), account);
         }
         write_json(&self.accounts_path, &f)
+    }
+
+    /// Keep `url` as the page to reopen the room of tab `target_id` at.
+    pub async fn note_url(&self, target_id: &str, url: &str) {
+        let _ = (target_id, url);
     }
 
     /// The destinations of `endpoints` with their live tab and sign-in state.
