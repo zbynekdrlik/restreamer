@@ -169,9 +169,13 @@ pub async fn ws(
     // Called in the relay's order (no spawn): the last URL is the one kept.
     let on_url: super::relay::UrlSink =
         std::sync::Arc::new(move |url: String| rooms.note_url(&tab, &url));
-    upgrade.max_message_size(1 << 20).on_upgrade(move |socket| {
-        super::relay::relay_with(socket, cdp, page.target_id, page.url, on_url)
-    })
+    let uploads = state.control_rooms.uploads_dir();
+    // A file (thumbnail, #399) travels base64 in one message: up to ~27 MB.
+    upgrade
+        .max_message_size(32 << 20)
+        .on_upgrade(move |socket| {
+            super::relay::relay_room(socket, cdp, page.target_id, page.url, on_url, uploads)
+        })
 }
 
 #[cfg(test)]

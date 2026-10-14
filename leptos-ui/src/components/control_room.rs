@@ -1,7 +1,8 @@
 //! Control-room tabs (#388): one tab per YT/FB destination of the active
 //! event (every destination when no event is active). A tab shows that
 //! destination's YT Studio / FB Live Producer page from the box-hosted
-//! Chrome: a screencast on a canvas, with mouse, keyboard and paste sent back.
+//! Chrome: a screencast on a canvas, with mouse, keyboard, paste and files
+//! (a page's file chooser, a drop, a pasted image: #399) sent back.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -84,10 +85,28 @@ export function cr_attach(canvas, url, onText) {
   const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   const btn = (b) => ['left', 'middle', 'right'][b] || 'none';
   let lastMove = 0;
+  // Where the pointer last was over the room: a pasted file is dropped there.
+  let lastPos = { x: 0, y: 0 };
+  // #399: a file (thumbnail) goes to the page as base64; the relay puts it
+  // into the page's file chooser or drops it at (x, y).
+  const MAX_FILE = 20 * 1024 * 1024;
+  const sendFile = (file, p) => {
+    if (!file) return;
+    if (file.size > MAX_FILE) { onText(JSON.stringify({ t: 'file-error', error: 'súbor je väčší ako 20 MB' })); return; }
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result);
+      send({ t: 'file', name: file.name || 'obrazok.png', type: file.type, b64: s.slice(s.indexOf(',') + 1), x: p.x, y: p.y });
+    };
+    r.onerror = () => onText(JSON.stringify({ t: 'file-error', error: 'súbor sa nedal prečítať' }));
+    r.readAsDataURL(file);
+  };
   const h = {
     mousedown: (e) => { canvas.focus(); send({ t: 'm', type: 'mousePressed', ...pos(e), button: btn(e.button), clickCount: e.detail || 1, modifiers: mods(e) }); e.preventDefault(); },
     mouseup: (e) => send({ t: 'm', type: 'mouseReleased', ...pos(e), button: btn(e.button), clickCount: e.detail || 1, modifiers: mods(e) }),
-    mousemove: (e) => { const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send({ t: 'm', type: 'mouseMoved', ...pos(e), button: 'none', modifiers: mods(e) }); },
+    mousemove: (e) => { lastPos = pos(e); const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send({ t: 'm', type: 'mouseMoved', ...lastPos, button: 'none', modifiers: mods(e) }); },
+    dragover: (e) => e.preventDefault(),
+    drop: (e) => { e.preventDefault(); canvas.focus(); lastPos = pos(e); sendFile(e.dataTransfer && e.dataTransfer.files[0], lastPos); },
     wheel: (e) => { send({ t: 'm', type: 'mouseWheel', ...pos(e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: mods(e) }); e.preventDefault(); },
     contextmenu: (e) => e.preventDefault(),
     keydown: (e) => {
@@ -101,10 +120,17 @@ export function cr_attach(canvas, url, onText) {
     keyup: (e) => { send({ t: 'k', type: 'keyUp', key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) }); e.preventDefault(); },
   };
   for (const [k, f] of Object.entries(h)) canvas.addEventListener(k, f, k === 'wheel' ? { passive: false } : undefined);
-  const paste = (e) => { if (document.activeElement === canvas) { send({ t: 'paste', text: e.clipboardData.getData('text') }); e.preventDefault(); } };
+  const paste = (e) => {
+    if (document.activeElement !== canvas) return;
+    const file = e.clipboardData.files && e.clipboardData.files[0];
+    if (file) sendFile(file, lastPos);
+    else send({ t: 'paste', text: e.clipboardData.getData('text') });
+    e.preventDefault();
+  };
   document.addEventListener('paste', paste);
   return {
     send: (s) => { if (ws.readyState === 1) ws.send(s); },
+    sendInput: (input) => { sendFile(input.files && input.files[0], lastPos); input.value = ''; },
     close: () => {
       for (const [k, f] of Object.entries(h)) canvas.removeEventListener(k, f);
       document.removeEventListener('paste', paste);
@@ -125,6 +151,8 @@ extern "C" {
     fn send(this: &CrHandle, json: &str);
     #[wasm_bindgen(method)]
     fn close(this: &CrHandle);
+    #[wasm_bindgen(method, js_name = sendInput)]
+    fn send_input(this: &CrHandle, input: &JsValue);
 }
 
 /// A live viewer; closing it on drop releases the socket and the listeners
@@ -258,6 +286,8 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
     let url: RwSignal<String> = RwSignal::new(dest.url.clone());
     // The last text the page copied; shown with a button that copies it again.
     let clip: RwSignal<Option<String>> = RwSignal::new(None);
+    // The page opened a file chooser ("Upload thumbnail", #399).
+    let wants_file = RwSignal::new(false);
     let viewer = StoredValue::new_local(None::<Viewer>);
     let editing = RwSignal::new(false);
     let acct_input = RwSignal::new(dest.account.clone().unwrap_or_default());
@@ -291,6 +321,19 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                         let ok = m.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
                         clip.try_set(Some(text.to_string()));
                         status.try_set(clip_status(ok).into());
+                    }
+                    Some("file-chooser") => {
+                        wants_file.try_set(true);
+                        status.try_set("stránka chce súbor".into());
+                    }
+                    Some("file-done") => {
+                        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                        wants_file.try_set(false);
+                        status.try_set(format!("vložené: {name}"));
+                    }
+                    Some("file-error") => {
+                        let e = m.get("error").and_then(|e| e.as_str()).unwrap_or_default();
+                        status.try_set(format!("súbor sa nevložil: {e}"));
                     }
                     Some("status") => {
                         let s = if m.get("s").and_then(|s| s.as_str()) == Some("open") {
@@ -409,6 +452,23 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                     attach();
                 }>"↻"</button>
             </div>
+            <Show when=move || wants_file.get()>
+                <div class="cr-room__clip" data-testid="cr-file-bar">
+                    <span>"Stránka chce súbor:"</span>
+                    <input
+                        type="file"
+                        data-testid="cr-file-input"
+                        on:change=move |ev| {
+                            let input = event_target::<web_sys::HtmlInputElement>(&ev);
+                            viewer.with_value(|v| {
+                                if let Some(v) = v {
+                                    v.handle.send_input(&input);
+                                }
+                            });
+                        }
+                    />
+                </div>
+            </Show>
             <Show when=move || clip.get().is_some()>
                 <div class="cr-room__clip">
                     <span>"Skopírované v miestnosti:"</span>

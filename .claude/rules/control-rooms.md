@@ -65,6 +65,20 @@ paths:
 - **Only `acct-*` profiles carry a session.** On stream-pp the spike's `dest-*`
   were never signed in. To check, count the `SID` (Google) or `c_user` (FB) rows
   in `<profile>/Cookies` with python's sqlite3 (the box has no `sqlite3` CLI).
+- **Files into a room (thumbnails, #399).** The relay turns on
+  `Page.setInterceptFileChooserDialog`. A `Page.fileChooserOpened` goes to the
+  dashboard as `{t:file-chooser}`, which shows a bar with a real `<input type=file>`:
+  an automatic picker needs a user gesture that WebKitGTK may not grant.
+  - The dashboard sends `{t:file,name,b64,x,y}` from the bar, from a drop on the canvas,
+    or from an image or file pasted with Ctrl+V.
+  - The relay caps it at 20 MB and makes the name one safe path component. It writes
+    the file to `<data_dir>/browser-profiles/uploads/<uuid>-<name>`; files older than
+    1 h are pruned on each upload.
+  - A pending chooser then gets `DOM.setFileInputFiles` on its `backendNodeId`.
+    Otherwise the file is dropped at (x, y) with `Input.dispatchDragEvent`
+    (dragEnter/dragOver/drop, `data.files`).
+  - The relay answers `{t:file-done,name,how}` or `{t:file-error,error}`. The room
+    WebSocket allows 32 MB messages for this.
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.

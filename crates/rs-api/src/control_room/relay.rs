@@ -120,29 +120,105 @@ pub struct Upload {
     pub y: f64,
 }
 
-/// A safe file name for an uploaded file (one path component, the end kept).
+/// A safe file name for an uploaded file: one path component of ASCII
+/// letters, digits, `.`, `_` and `-`, no leading dot, at most 80 bytes with
+/// the end (the extension) kept.
 pub fn upload_name(name: &str) -> String {
-    name.to_string()
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_start_matches('.');
+    // ASCII only by now, so any byte offset is a char boundary.
+    let safe = &safe[safe.len().saturating_sub(80)..];
+    if safe.is_empty() {
+        "file".into()
+    } else {
+        safe.into()
+    }
 }
 
 /// The file in a dashboard `{t:"file"}` message.
-pub fn decode_file(_v: &Value) -> Result<Upload, String> {
-    Err("not implemented".into())
+pub fn decode_file(v: &Value) -> Result<Upload, String> {
+    let b64 = v["b64"].as_str().ok_or("chýba obsah súboru")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("poškodený súbor ({e})"))?;
+    if bytes.is_empty() {
+        return Err("prázdny súbor".into());
+    }
+    if bytes.len() > FILE_MAX {
+        return Err(format!("súbor je väčší ako {} MB", FILE_MAX >> 20));
+    }
+    Ok(Upload {
+        name: upload_name(v["name"].as_str().unwrap_or_default()),
+        bytes,
+        x: v["x"].as_f64().unwrap_or(0.0),
+        y: v["y"].as_f64().unwrap_or(0.0),
+    })
 }
 
 /// The CDP calls that put the file at `path` into the page: into the pending
 /// file chooser `chooser`, else dropped on the page at (x, y).
 pub fn file_actions(
-    _path: &str,
-    _chooser: Option<i64>,
-    _x: f64,
-    _y: f64,
+    path: &str,
+    chooser: Option<i64>,
+    x: f64,
+    y: f64,
 ) -> Vec<(&'static str, Value)> {
-    Vec::new()
+    if let Some(node) = chooser {
+        return vec![(
+            "DOM.setFileInputFiles",
+            json!({ "files": [path], "backendNodeId": node }),
+        )];
+    }
+    let data = json!({ "items": [], "files": [path], "dragOperationsMask": 1 });
+    ["dragEnter", "dragOver", "drop"]
+        .into_iter()
+        .map(|t| {
+            (
+                "Input.dispatchDragEvent",
+                json!({ "type": t, "x": x, "y": y, "data": data }),
+            )
+        })
+        .collect()
 }
 
-/// Delete uploaded files older than `max_age`.
-pub fn prune_uploads(_dir: &std::path::Path, _max_age: std::time::Duration) {}
+/// Delete uploaded files older than `max_age`. A missing directory is fine.
+pub fn prune_uploads(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if old && let Err(err) = std::fs::remove_file(e.path()) {
+            tracing::warn!(
+                "control rooms: cannot delete old upload {:?}: {err}",
+                e.path()
+            );
+        }
+    }
+}
+
+/// Write an uploaded file into `dir` under a unique name.
+fn store_upload(dir: &std::path::Path, up: &Upload) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    prune_uploads(dir, UPLOAD_MAX_AGE);
+    let path = dir.join(format!("{}-{}", uuid::Uuid::new_v4().simple(), up.name));
+    std::fs::write(&path, &up.bytes)?;
+    Ok(path)
+}
 
 /// The CDP method that sizes the page viewport.
 pub const SET_VIEWPORT: &str = "Emulation.setDeviceMetricsOverride";
@@ -241,6 +317,10 @@ pub fn page_to_client(m: &Value) -> PageOut {
                 _ => PageOut::Ignore,
             }
         }
+        Some("Page.fileChooserOpened") => PageOut::FileChooser {
+            node: m["params"]["backendNodeId"].as_i64(),
+            mode: m["params"]["mode"].as_str().unwrap_or_default().into(),
+        },
         Some("Page.frameNavigated") if m["params"]["frame"].get("parentId").is_none() => {
             m["params"]["frame"]["url"]
                 .as_str()
@@ -291,26 +371,67 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
     relay_with(client, cdp, target_id, start_url, Arc::new(|_| {})).await;
 }
 
-/// [`relay_with`], with files the operator puts into the room written to
-/// `uploads`.
-pub async fn relay_room(
-    client: WebSocket,
-    cdp: Cdp,
-    target_id: String,
-    start_url: String,
-    on_url: UrlSink,
-    _uploads: std::path::PathBuf,
-) {
-    relay_with(client, cdp, target_id, start_url, on_url).await;
+/// Put the file of a dashboard `{t:"file"}` message into the page (#399):
+/// into the pending file chooser, else dropped where it was let go. Returns
+/// the reply for the dashboard, `file-done` or `file-error`.
+fn put_file(
+    v: &Value,
+    uploads: &std::path::Path,
+    chooser: &std::sync::Mutex<Option<i64>>,
+    call: &impl Fn(&str, Value),
+    tab: &str,
+) -> Value {
+    let up = match decode_file(v) {
+        Ok(up) => up,
+        Err(e) => {
+            tracing::warn!("control rooms: tab {tab}: file refused: {e}");
+            return json!({ "t": "file-error", "error": e });
+        }
+    };
+    let path = match store_upload(uploads, &up) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                "control rooms: tab {tab}: cannot store {} in {uploads:?}: {e}",
+                up.name
+            );
+            return json!({ "t": "file-error", "error": format!("súbor sa nedal uložiť ({e})") });
+        }
+    };
+    let node = chooser.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let how = if node.is_some() { "chooser" } else { "drop" };
+    tracing::info!(
+        "control rooms: tab {tab}: {} ({} bytes) into the page by {how}",
+        up.name,
+        up.bytes.len()
+    );
+    for (method, params) in file_actions(&path.to_string_lossy(), node, up.x, up.y) {
+        call(method, params);
+    }
+    json!({ "t": "file-done", "name": up.name, "how": how })
 }
 
-/// Relay `client` to the page `target_id` until either side closes.
+/// [`relay_room`], with uploads in the system temp directory.
 pub async fn relay_with(
     client: WebSocket,
     cdp: Cdp,
     target_id: String,
     start_url: String,
     on_url: UrlSink,
+) {
+    let uploads = std::env::temp_dir().join("restreamer-room-uploads");
+    relay_room(client, cdp, target_id, start_url, on_url, uploads).await;
+}
+
+/// Relay `client` to the page `target_id` until either side closes. Files
+/// the operator puts into the room are written to `uploads`.
+pub async fn relay_room(
+    client: WebSocket,
+    cdp: Cdp,
+    target_id: String,
+    start_url: String,
+    on_url: UrlSink,
+    uploads: std::path::PathBuf,
 ) {
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(&target_id)).await {
         Ok((ws, _)) => ws,
@@ -325,6 +446,9 @@ pub async fn relay_with(
     let seq = Arc::new(AtomicU64::new(0));
     // The viewport the viewer asked for, re-applied after a navigation.
     let view: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
+    // The <input type=file> of a file chooser the page opened that no file
+    // went into yet.
+    let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
 
     // One writer per socket: the reader tasks hand their messages over.
     let (to_page, mut to_page_rx) = mpsc::unbounded_channel::<String>();
@@ -354,6 +478,11 @@ pub async fn relay_with(
         json!({ "source": hook }),
     );
     call("Runtime.evaluate", json!({ "expression": hook }));
+    // The page's file choosers ("Upload thumbnail") come to the operator.
+    call(
+        "Page.setInterceptFileChooserDialog",
+        json!({ "enabled": true }),
+    );
     call("Page.bringToFront", json!({}));
     call("Page.startScreencast", screencast_params());
 
@@ -373,6 +502,7 @@ pub async fn relay_with(
         let call = call.clone();
         let to_client = to_client.clone();
         let view = Arc::clone(&view);
+        let chooser = Arc::clone(&chooser);
         let main_frame = target_id.clone();
         async move {
             let mut last = (0, 0);
@@ -436,7 +566,16 @@ pub async fn relay_with(
                             break;
                         }
                     }
-                    PageOut::FileChooser { .. } => {}
+                    PageOut::FileChooser { node, mode } => {
+                        tracing::info!(
+                            "control rooms: tab {main_frame} opened a file chooser ({mode}, input {node:?})"
+                        );
+                        *chooser.lock().unwrap_or_else(|p| p.into_inner()) = node;
+                        let m = json!({ "t": "file-chooser", "mode": mode }).to_string();
+                        if to_client.send(AxMessage::Text(m.into())).is_err() {
+                            break;
+                        }
+                    }
                     PageOut::Ignore => {}
                 }
             }
@@ -476,15 +615,25 @@ pub async fn relay_with(
         }
     };
     let tab = target_id.clone();
+    let to_viewer = to_client.clone();
     let from_client = async move {
         // A Close frame ends the stream, which ends this loop.
         while let Some(Ok(msg)) = client_rx.next().await {
-            if let AxMessage::Text(text) = msg
-                && let Some((method, params)) = serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .as_ref()
-                    .and_then(client_to_cdp)
-            {
+            let AxMessage::Text(text) = msg else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if v["t"] == "file" {
+                let reply = put_file(&v, &uploads, &chooser, &call, &tab);
+                if to_viewer
+                    .send(AxMessage::Text(reply.to_string().into()))
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            if let Some((method, params)) = client_to_cdp(&v) {
                 if method == SET_VIEWPORT {
                     tracing::info!(
                         "control rooms: tab {tab} viewport {}x{}",
