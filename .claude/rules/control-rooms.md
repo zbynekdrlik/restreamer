@@ -27,13 +27,27 @@ paths:
     read them first when a room never comes up).
   - `RESTREAMER_CHROME` overrides the binary. stream-pp uses the system
     `google-chrome-stable`, installed by camera-box setup-strih step 16j.
+- **Memory (stream-pp OOM, 2026-10-14).** Each room tab costs ~500 MB; 7 tabs (4.4 GB)
+  plus no swap on the box made the OOM killer hit strih OBS and Chrome, and
+  restreamer.service (`OOMPolicy=stop`) died with its in-cgroup Chrome. Now:
+  - Chrome's scope carries `CHROME_SCOPE_PROPS`: MemoryHigh=3G, MemoryMax=3584M,
+    OOMPolicy=continue. An OOM stays inside Chrome (a renderer dies);
+  - at most `MAX_LIVE_ROOMS` (4) room tabs are open. `open()` updates `TabMap.recent`
+    and closes the least recently viewed beyond that.
+- **Each room reopens at its last page.** The relay reports every main-frame URL:
+  `Page.frameNavigated` plus `Page.navigatedWithinDocument` (YT Studio is an SPA; a page
+  target's id is its main frame id). `remember_url` keeps only `https://studio.youtube.com/*`
+  and `facebook.com/live/producer*`, never sign-in or picker pages. The URL is stored in
+  `control-room-tabs.json` (`url`) and dropped when the account is edited.
 - **One Google profile = ONE active YouTube channel identity.** A second brand channel
   in the same profile gets "Select a channel" or "Oops, you don't have permission"
   (probed 2026-10-13).
-  - So YouTube is one profile per destination (`dest-<id>`). FB is one per account
-    (`acct-<email>`), because Live Producer picks the page in its UI.
-  - A missing YT profile is CLONED from a signed-in profile of the same account (caches
-    skipped). The operator then only clicks "Switch account" and picks the channel.
+  - So every destination has its own profile (`dest-<id>`), FB too. A shared FB
+    account profile made one room's sign-in change every FB room (2026-10-14). A room
+    still open in a profile it no longer owns is closed and reopened in its own.
+  - A missing profile is CLONED from a signed-in profile of the same account and
+    service (`acct-*`, or another room's `dest-*`; caches skipped). On YouTube the
+    operator then only clicks "Switch account" and picks the channel.
 - **Account mapping** lives box-local in `<data_dir>/control-rooms.json`, keyed by
   endpoint id. It holds emails, so it never goes in the repo. Set it with
   `PUT /api/v1/control-rooms/{id}/account`, or from the room's "Zmeniť účet".
