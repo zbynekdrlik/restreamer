@@ -620,12 +620,13 @@ fn page_copies_reach_the_dashboard() {
         page_to_client(&binding_called(CLIP_BINDING, "")),
         PageOut::Ignore
     );
-    let most = "x".repeat(CLIP_MAX);
+    // The 64 KB limit as a literal, so the test pins CLIP_MAX itself.
+    let most = "x".repeat(65_536);
     assert_eq!(
         page_to_client(&binding_called(CLIP_BINDING, &most)),
         PageOut::Clip(most.clone())
     );
-    let over = "x".repeat(CLIP_MAX + 1);
+    let over = "x".repeat(65_537);
     assert_eq!(
         page_to_client(&binding_called(CLIP_BINDING, &over)),
         PageOut::Ignore
