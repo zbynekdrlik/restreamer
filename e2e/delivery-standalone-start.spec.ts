@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import * as fs from "fs";
 import * as path from "path";
+import { waitForWsClient } from "./lib/ws";
 
 const tauriMockScript = fs.readFileSync(
   path.join(__dirname, "tauri-mock.js"),
@@ -54,6 +55,10 @@ test.describe("standalone POST /delivery/start", () => {
     });
 
     await page.goto("/");
+    // /delivery/start pushes the warming-up DeliveryStatus over the WS: a
+    // socket whose connect-time snapshot is still pending would overwrite it
+    // (the #377 race), so wait until the page is broadcast-ready.
+    await waitForWsClient(page, request);
 
     // --- Baseline: dashboard header shows IDLE, event dropdown is selectable ---
     await expect(page.locator(".event-selector")).toBeVisible({
