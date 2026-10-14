@@ -1235,6 +1235,14 @@ jobs:
           FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
           check_job "e2e-obs-youtube-test" "$YT_BLOCK"
           check_job "e2e-fb-push-stream-lan" "$FB_BLOCK"
+          # Both lease checks of a job share ONE wait budget (the first records the
+          # deadline in GITHUB_ENV). A per-step RIG_LEASE_BUDGET_S made the second
+          # check give up after 10 min while camera-box held the rig for 30 more,
+          # and Start then refused OBS (main run 38530980091).
+          if echo "$YT_BLOCK$FB_BLOCK" | grep -nE 'RIG_LEASE_(BUDGET_S|DEADLINE_EPOCH)'; then
+            echo "ERROR: an OBS-streaming job overrides the rig-lease budget (#349) -- the job shares one."
+            exit 1
+          fi
           if [ ! -f scripts/ci/rig-lease-wait.ps1 ]; then
             echo "ERROR: scripts/ci/rig-lease-wait.ps1 is missing (#349)."
             exit 1
@@ -1701,6 +1709,8 @@ jobs:
         run: python tests/ci/test_obs_stream.py
       - name: "Run the program-audio guard against a mock sampler + stop endpoint (#379)"
         run: python tests/ci/test_program_audio_guard.py
+      - name: "Run the rig-lease wait against a mock camera-box lease (#349)"
+        run: python tests/ci/test_rig_lease_wait.py
 
   rust-ci-gate:
     name: Rust CI Gate
