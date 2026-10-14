@@ -19,6 +19,8 @@
     --spacing-md: 16px;
     --spacing-lg: 24px;
     --spacing-xl: 32px;
+    /* Native controls (spinners, select popups, scrollbars) follow the dark theme. */
+    color-scheme: dark;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -73,7 +75,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .event-selector-label { font-weight: 600; color: var(--text-label); font-size: 13px; }
 .event-selector {
     padding: 8px 12px; border: var(--border-w) solid var(--border); border-radius: var(--radius);
-    background: var(--bg-primary); color: var(--text-primary);
+    background-color: var(--bg-primary); color: var(--text-primary);
     font-family: var(--font-sans); font-size: 14px; min-width: 200px;
 }
 .event-selector:focus { border-color: var(--border-active); outline: none; }
@@ -409,7 +411,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 
 /* Start position select (used in modal) */
 .start-position-select {
-    background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
+    background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 6px 10px; font-family: var(--font-mono); font-size: 12px;
     max-width: 150px;
 }
@@ -508,6 +510,16 @@ input[type="text"], input[type="number"], input[type="password"], select {
     font-family: var(--font-sans); font-size: 14px; outline: none;
 }
 input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus, select:focus { border-color: var(--border-active); }
+/* stream-pp (WebKitGTK, 2026-10-14): a select with the native look is drawn in the light GTK
+   theme, white with our light text, unreadable. Draw it ourselves; the options carry the
+   dark colours too, since the popup list does not inherit the select's background. */
+select:not([multiple]) {  /* outranks a one-class rule's padding */
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2394a3b8'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+    padding-right: 28px;
+}
+option, optgroup { background-color: var(--bg-card); color: var(--text-primary); }
 button {
     padding: 8px 16px; border: var(--border-w) solid var(--border); border-radius: var(--radius);
     background: var(--bg-card); color: var(--text-primary); font-family: var(--font-sans);
