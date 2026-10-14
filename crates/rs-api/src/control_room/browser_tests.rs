@@ -368,4 +368,72 @@ mod spawn {
             "{xargs}"
         );
     }
+
+    /// A `systemd-run` that cannot reach the user manager: it says why on
+    /// stderr and exits 1 without running anything.
+    fn failing_systemd_run(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("systemd-run");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+                dir.join("systemd-run.args").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// Review of PR #397: a failing systemd-run was silent (stderr nulled),
+    /// and Chrome / Xvfb then never started at all.
+    #[tokio::test]
+    async fn a_failing_systemd_run_falls_back_to_a_direct_start_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let display = format!(":{}", 65_000 + std::process::id() % 400);
+        let lock = xvfb_lock(&display);
+        let _ = std::fs::remove_file(&lock);
+        let addr = free_addr();
+        let mut b = Browser::at(dir.path(), addr.clone());
+        b.chrome_bin = Some(fake_bin(dir.path(), "chrome", 0, None));
+        b.xvfb_bin = fake_bin(dir.path(), "xvfb", 0, Some(&lock));
+        b.display = display.clone();
+        b.systemd_run = Some(failing_systemd_run(dir.path()));
+
+        let args = dir.path().join("chrome.args");
+        let up = tokio::spawn(async move {
+            while !args.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            FakeChrome::start_on(l).await
+        });
+        let started = tokio::time::timeout(Duration::from_secs(30), b.ensure_running())
+            .await
+            .expect("ensure_running hung");
+        let _ = std::fs::remove_file(&lock);
+        started.unwrap();
+        let _chrome = tokio::time::timeout(Duration::from_secs(5), up)
+            .await
+            .expect("Chrome never started")
+            .unwrap();
+
+        // Both were tried through systemd-run first, then started directly.
+        let runs = std::fs::read_to_string(dir.path().join("systemd-run.args")).unwrap();
+        assert_eq!(runs.lines().count(), 2, "{runs}");
+        let xargs = std::fs::read_to_string(dir.path().join("xvfb.args")).unwrap();
+        assert!(
+            xargs.starts_with(&format!("{display} -screen 0")),
+            "{xargs}"
+        );
+        let disp = std::fs::read_to_string(dir.path().join("chrome.display")).unwrap();
+        assert_eq!(disp, display);
+        // The reason is kept, not thrown away.
+        for what in ["Chrome", "Xvfb"] {
+            let log = std::fs::read_to_string(stderr_log(&b.user_data, what))
+                .unwrap_or_else(|e| panic!("no {what} stderr log: {e}"));
+            assert!(log.contains("Failed to connect to bus"), "{what}: {log}");
+        }
+    }
 }

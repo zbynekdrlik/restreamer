@@ -340,6 +340,12 @@ fn detach(cmd: &mut tokio::process::Command, display: Option<&str>) {
     }
 }
 
+/// Where a started Chrome or Xvfb writes its stderr (`what` = "Chrome" /
+/// "Xvfb"): next to the control-room profiles, truncated at each start.
+pub fn stderr_log(user_data: &Path, what: &str) -> PathBuf {
+    user_data.with_file_name(format!("{}.stderr.log", what.to_lowercase()))
+}
+
 /// The X server lock file of `display` (`:93` -> `/tmp/.X93-lock`).
 pub fn xvfb_lock(display: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/.X{}-lock", display.trim_start_matches(':')))
