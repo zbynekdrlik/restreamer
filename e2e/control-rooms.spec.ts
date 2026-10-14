@@ -85,6 +85,14 @@ test("active event: tabs per destination, a room shows the screencast and forwar
   });
   expect(pixel[0]).toBeGreaterThan(200); // the red test frame was drawn
   expect(pixel[2]).toBeLessThan(60);
+  // ... and reported as drawn: the relay lets Chrome send the next frame only
+  // then, so a playing video never floods a slow viewer.
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: { t: string }) => i.t === "drawn").length;
+    })
+    .toBe(1);
 
   // Mouse and keyboard go back to the box-hosted Chrome.
   await canvas.click({ position: { x: 20, y: 20 } });
