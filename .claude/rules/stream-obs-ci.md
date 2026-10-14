@@ -45,6 +45,11 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
     budget early in the job and then proceeds. Start then FAILS on a lease that is still held
     and not stale, instead of streaming over a live camera-box run. An unreachable lease
     endpoint is still fail-open (warning).
+  - **Both lease checks of a job share ONE 60-min budget.** The first records
+    `RIG_LEASE_DEADLINE_EPOCH` in GITHUB_ENV; the final re-check waits up to it. Never give
+    a step its own `RIG_LEASE_BUDGET_S` (test-integrity fails): a 10-min one gave up while
+    camera-box held the rig 30 more minutes (main run 38530980091). Tested by
+    `tests/ci/test_rig_lease_wait.py` in obs-scripts-test.
   - **AssertNotStreaming**: read-only. It fails when OBS streams, and only warns when OBS is
     unreachable.
 - **Teardown**: `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`, exactly. Otherwise a

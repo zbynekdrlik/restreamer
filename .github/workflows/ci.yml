@@ -3336,12 +3336,12 @@ jobs:
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
 
-      # #349: final short-budget rig-lease re-check RIGHT before the first
+      # #349: final rig-lease re-check RIGHT before the first
       # StartStream, closing the TOCTOU gap between the post-checkout check and
       # here (camera-box could have acquired the lease during our setup steps;
       # its reverse-direction gate keys on OUR streaming state, which is still
-      # false until now). Short budget (10 min) since setup already fenced most
-      # of the wait; fail-open + always exit 0 as before.
+      # false until now). It waits only for the rest of the job's ONE lease
+      # budget (the first check recorded the deadline); fail-open + always exit 0.
       # #374 removed the OBS-direct baseline that used to start streaming here.
       # This re-check stays BEFORE the VPS boots, so a lease wait never idles a
       # booted VPS against the timed delivery gates. The read-only readiness check
@@ -3349,9 +3349,7 @@ jobs:
       # waits, when camera-box started streaming or recording meanwhile).
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
         shell: powershell
-        timeout-minutes: 12
-        env:
-          RIG_LEASE_BUDGET_S: "600"
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: "Pre-flight: verify no stale delivery instances"
@@ -6591,14 +6589,13 @@ jobs:
           if (-not $check.receiving_activated) { throw "FAIL: E2E-Test event not activated" }
           Write-Host "Event $($ev.id) activated with FB endpoint $($fb.id)"
 
-      # #349: final short-budget rig-lease re-check RIGHT before OBS starts
-      # streaming (via the API below), closing the TOCTOU gap between the
-      # post-checkout check and here. Short budget (10 min); fail-open; exit 0.
+      # #349: final rig-lease re-check RIGHT before OBS starts streaming,
+      # closing the TOCTOU gap between the post-checkout check and here. It
+      # waits only for the rest of the job's ONE lease budget (the first check
+      # recorded the deadline); fail-open; exit 0.
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
         shell: powershell
-        timeout-minutes: 12
-        env:
-          RIG_LEASE_BUDGET_S: "600"
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:

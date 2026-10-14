@@ -22,6 +22,13 @@
 #                      direction)
 #   budget exhausted while still held -> proceed anyway (never deadlock CI)
 #
+# ONE budget per job. The first check records the job's deadline (now + budget) as
+# RIG_LEASE_DEADLINE_EPOCH in GITHUB_ENV; a later check (the final re-check right
+# before StartStream) waits for the holder up to that deadline, never past it, and
+# never re-records it. Main run 38530980091: a separate 10-min budget on the final
+# re-check gave up while camera-box held the rig for 30 more minutes, and Start then
+# refused OBS. The deadline bounds only the WAIT: a free rig is used at any time.
+#
 # This script ALWAYS exits 0 -- it is a courtesy serialization wait, never a hard
 # gate, so it can never fail the CI job.
 
@@ -46,7 +53,22 @@ if ($null -eq $HttpTimeoutS -or $HttpTimeoutS -le 0) { $HttpTimeoutS = 5 }
 
 Write-Host "[rig-lease] pre-StartStream check against $Url (budget ${BudgetS}s, poll ${PollS}s, http-timeout ${HttpTimeoutS}s)"
 
-$deadline = $null   # set on the FIRST held-and-not-stale observation
+function Get-NowEpoch { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0 }
+
+# -as [double] yields $null on a missing/non-numeric value; "" yields 0.
+$JobDeadline = $env:RIG_LEASE_DEADLINE_EPOCH -as [double]
+if ($null -eq $JobDeadline -or $JobDeadline -le 0) {
+  $JobDeadline = [Math]::Floor((Get-NowEpoch) + $BudgetS)
+  if ($env:GITHUB_ENV) {
+    "RIG_LEASE_DEADLINE_EPOCH=$JobDeadline" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+  }
+  Write-Host "[rig-lease] job wait budget ${BudgetS}s starts now; the job's later lease checks share it."
+} else {
+  $left = [Math]::Max(0, [Math]::Round($JobDeadline - (Get-NowEpoch)))
+  Write-Host "[rig-lease] ${left}s left of the job's wait budget (set by its first lease check)."
+}
+
+$deadline = $null   # set on the FIRST held-and-not-stale observation (epoch seconds)
 $attempt = 0
 
 while ($true) {
@@ -89,11 +111,12 @@ while ($true) {
     $ttl = $lease.ttl_s -as [int]   # $null on non-numeric / overflow -- never throws
     if ($null -eq $ttl -or $ttl -le 0) { $ttl = $BudgetS }
     $waitCap = [Math]::Min($ttl + $GraceS, $BudgetS)
-    $deadline = (Get-Date).AddSeconds($waitCap)
-    Write-Host "[rig-lease] rig HELD by $holderJob ($holderUrl); will wait up to ${waitCap}s (min(ttl_s+grace, budget); ttl_s=$($lease.ttl_s))."
+    $deadline = [Math]::Min((Get-NowEpoch) + $waitCap, $JobDeadline)
+    $waitS = [Math]::Max(0, [Math]::Round($deadline - (Get-NowEpoch)))
+    Write-Host "[rig-lease] rig HELD by $holderJob ($holderUrl); will wait up to ${waitS}s (min(ttl_s+grace, budget, the job's deadline); ttl_s=$($lease.ttl_s))."
   }
 
-  if ((Get-Date) -ge $deadline) {
+  if ((Get-NowEpoch) -ge $deadline) {
     Write-Host "::warning::[rig-lease] wait budget exhausted, rig still held by $holderUrl -- PROCEEDING anyway so CI is not deadlocked by a stuck lease (bounded budget)."
     exit 0
   }
