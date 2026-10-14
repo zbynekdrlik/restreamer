@@ -317,21 +317,19 @@ pub fn scoped_command(
     args: &[String],
     props: &[&str],
 ) -> (PathBuf, Vec<String>) {
-    let _ = props;
     let Some(runner) = systemd_run else {
         return (program.to_path_buf(), args.to_vec());
     };
-    let mut out: Vec<String> = [
-        "--user",
-        "--scope",
-        "--collect",
-        "--quiet",
-        &format!("--description=Restreamer control rooms: {what}"),
-        "--",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut out: Vec<String> = ["--user", "--scope", "--collect", "--quiet"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for p in props {
+        out.push("-p".into());
+        out.push((*p).to_string());
+    }
+    out.push(format!("--description=Restreamer control rooms: {what}"));
+    out.push("--".into());
     out.push(program.display().to_string());
     out.extend(args.iter().cloned());
     (runner.to_path_buf(), out)

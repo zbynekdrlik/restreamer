@@ -87,13 +87,17 @@ pub async fn open(State(state): State<AppState>, Path(endpoint_id): Path<i64>) -
         Err(e) => return internal(e),
     };
     let accounts = state.control_rooms.accounts();
-    let Some(dest) = super::destinations(std::slice::from_ref(&endpoint), &accounts).pop() else {
+    let Some(mut dest) = super::destinations(std::slice::from_ref(&endpoint), &accounts).pop()
+    else {
         return (
             StatusCode::BAD_REQUEST,
             "this endpoint type has no control room",
         )
             .into_response();
     };
+    state
+        .control_rooms
+        .apply_saved_urls(std::slice::from_mut(&mut dest));
     tracing::info!(
         "control rooms: opening {} ({}) in profile {}",
         dest.alias,
@@ -159,9 +163,16 @@ pub async fn ws(
         return (StatusCode::NOT_FOUND, "no such tab").into_response();
     };
     let cdp = state.control_rooms.browser.cdp.clone();
-    upgrade
-        .max_message_size(1 << 20)
-        .on_upgrade(move |socket| super::relay::relay(socket, cdp, page.target_id, page.url))
+    // Every room page the operator reaches is kept, so the room reopens there.
+    let rooms = state.control_rooms.clone();
+    let tab = page.target_id.clone();
+    let on_url: super::relay::UrlSink = std::sync::Arc::new(move |url: String| {
+        let (rooms, tab) = (rooms.clone(), tab.clone());
+        tokio::spawn(async move { rooms.note_url(&tab, &url).await });
+    });
+    upgrade.max_message_size(1 << 20).on_upgrade(move |socket| {
+        super::relay::relay_with(socket, cdp, page.target_id, page.url, on_url)
+    })
 }
 
 #[cfg(test)]

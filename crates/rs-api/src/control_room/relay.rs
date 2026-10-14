@@ -145,8 +145,13 @@ pub fn page_to_client(m: &Value) -> PageOut {
 /// The URL of a same-document navigation (YT Studio's page switches) of the
 /// main frame. A page target's id is its main frame's id.
 pub fn same_document_url(m: &Value, main_frame: &str) -> Option<String> {
-    let _ = (m, main_frame);
-    None
+    if m.get("method").and_then(Value::as_str) != Some("Page.navigatedWithinDocument") {
+        return None;
+    }
+    let p = &m["params"];
+    (p["frameId"].as_str() == Some(main_frame))
+        .then(|| p["url"].as_str().map(str::to_string))
+        .flatten()
 }
 
 /// The tabs the room tab `room` opened (`window.open`, a `target=_blank`
@@ -186,7 +191,6 @@ pub async fn relay_with(
     start_url: String,
     on_url: UrlSink,
 ) {
-    let _ = &on_url;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(&target_id)).await {
         Ok((ws, _)) => ws,
         Err(e) => {
@@ -239,6 +243,7 @@ pub async fn relay_with(
         let call = call.clone();
         let to_client = to_client.clone();
         let view = Arc::clone(&view);
+        let main_frame = target_id.clone();
         async move {
             let mut last = (0, 0);
             while let Some(Ok(msg)) = page_rx.next().await {
@@ -246,6 +251,14 @@ pub async fn relay_with(
                 let Ok(v) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
+                if let Some(u) = same_document_url(&v, &main_frame) {
+                    on_url(u.clone());
+                    let m = json!({ "t": "url", "url": u }).to_string();
+                    if to_client.send(AxMessage::Text(m.into())).is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 match page_to_client(&v) {
                     PageOut::Frame {
                         w,
@@ -277,6 +290,7 @@ pub async fn relay_with(
                             call(SET_VIEWPORT, size);
                         }
                         call("Page.startScreencast", screencast_params());
+                        on_url(u.clone());
                         let m = json!({ "t": "url", "url": u }).to_string();
                         if to_client.send(AxMessage::Text(m.into())).is_err() {
                             break;
