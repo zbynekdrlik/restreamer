@@ -202,11 +202,8 @@ impl Browser {
             let code = tokio::task::spawn_blocking(move || child.wait(Duration::from_secs(15)))
                 .await
                 .context("wait for Chrome")?
-                .context("wait for Chrome")?
-                .context("Chrome did not hand the tab over within 15 s")?;
-            if code != 0 {
-                bail!("Chrome exited with code {code} while opening {url}");
-            }
+                .context("wait for Chrome")?;
+            handover_result(code, url)?;
         }
         #[cfg(not(windows))]
         {
@@ -222,6 +219,16 @@ impl Browser {
             }
         }
         Ok(())
+    }
+}
+
+/// The outcome of a Chrome handover run that exited with `code` (`None`:
+/// still running when the wait ended).
+pub fn handover_result(code: Option<u32>, url: &str) -> Result<()> {
+    match code {
+        None => bail!("Chrome did not hand the tab over within 15 s"),
+        Some(0) => Ok(()),
+        Some(c) => bail!("Chrome exited with code {c} while opening {url}"),
     }
 }
 

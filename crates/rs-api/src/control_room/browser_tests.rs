@@ -73,6 +73,17 @@ fn browser_keeps_profiles_under_the_data_dir() {
 }
 
 #[test]
+fn handover_succeeds_only_on_exit_code_zero() {
+    assert!(handover_result(Some(0), "https://a/").is_ok());
+    let e = handover_result(Some(3), "https://a/")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("code 3") && e.contains("https://a/"), "{e}");
+    let e = handover_result(None, "https://a/").unwrap_err().to_string();
+    assert!(e.contains("within 15 s"), "{e}");
+}
+
+#[test]
 fn windows_command_line_quotes_like_command_line_to_argv() {
     let args: Vec<String> = [
         "--user-data-dir=C:\\ProgramData\\Restreamer\\browser-profiles\\control-rooms",
