@@ -5,7 +5,8 @@
 //! page navigated) and `{"t":"clip","text"}` (the page copied text).
 //! Dashboard -> Chrome: `{"t":"m"}` mouse, `{"t":"k"}` key,
 //! `{"t":"paste","text"}`, `{"t":"copy"}`, `{"t":"nav","url"}`, `{"t":"back"}`,
-//! `{"t":"reload","hard"?}`, and
+//! `{"t":"reload","hard"?}`, `{"t":"drawn"}` (the last frame was drawn: only
+//! then does Chrome get its ack and send the next), and
 //! `{"t":"size","w","h"}` (the canvas size in CSS pixels: the page viewport
 //! follows it, so the room fills the operator's window at full sharpness).
 //! Anything else is dropped, and only the listed fields are forwarded.
@@ -455,6 +456,10 @@ pub async fn relay_room(
     // The <input type=file> of a file chooser the page opened that no file
     // went into yet.
     let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
+    // The screencast session of the frame the dashboard has not drawn yet.
+    // Chrome sends the next frame only after an ack, so acking on "drawn"
+    // paces the frames to the viewer (no queue grows behind a slow one).
+    let unacked: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
 
     // One writer per socket: the reader tasks hand their messages over.
     let (to_page, mut to_page_rx) = mpsc::unbounded_channel::<String>();
@@ -509,6 +514,7 @@ pub async fn relay_room(
         let to_client = to_client.clone();
         let view = Arc::clone(&view);
         let chooser = Arc::clone(&chooser);
+        let unacked = Arc::clone(&unacked);
         let main_frame = target_id.clone();
         async move {
             let mut last = (0, 0);
@@ -542,10 +548,8 @@ pub async fn relay_room(
                         if to_client.send(AxMessage::Binary(jpeg.into())).is_err() {
                             break;
                         }
-                        call(
-                            "Page.screencastFrameAck",
-                            json!({ "sessionId": session_id }),
-                        );
+                        // Acked when the dashboard reports it drawn.
+                        *unacked.lock().unwrap_or_else(|p| p.into_inner()) = Some(session_id);
                     }
                     PageOut::Url(u) => {
                         // A cross-site navigation swaps the renderer, and the
@@ -629,6 +633,16 @@ pub async fn relay_room(
             let Ok(v) = serde_json::from_str::<Value>(&text) else {
                 continue;
             };
+            if v["t"] == "drawn" {
+                let pending = unacked.lock().unwrap_or_else(|p| p.into_inner()).take();
+                if let Some(session_id) = pending {
+                    call(
+                        "Page.screencastFrameAck",
+                        json!({ "sessionId": session_id }),
+                    );
+                }
+                continue;
+            }
             if v["t"] == "file" {
                 let reply = put_file(&v, &uploads, &chooser, &call, &tab);
                 if to_viewer

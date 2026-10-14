@@ -75,10 +75,16 @@ export function cr_attach(canvas, url, onText) {
       onText(e.data);
       return;
     }
-    const bmp = await createImageBitmap(e.data);
-    g.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-    bmp.close();
-    canvas.dataset.frames = String((Number(canvas.dataset.frames) || 0) + 1);
+    try {
+      const bmp = await createImageBitmap(e.data);
+      g.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+      canvas.dataset.frames = String((Number(canvas.dataset.frames) || 0) + 1);
+    } finally {
+      // Chrome sends the next frame only now: frames come at the pace this
+      // viewer draws them, never queued behind it.
+      if (ws.readyState === 1) ws.send('{"t":"drawn"}');
+    }
   };
   const send = (o) => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
   const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left - canvas.clientLeft) * meta.w / canvas.clientWidth, y: (e.clientY - r.top - canvas.clientTop) * meta.h / canvas.clientHeight }; };

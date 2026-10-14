@@ -82,6 +82,11 @@ paths:
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.
+- **Frames are paced by the viewer.** Chrome sends the next screencast frame only after
+  the last one is acked. The relay acks when the dashboard reports `{t:drawn}` after
+  drawing, never on queueing: acking on queueing let a playing video (a YouTube seek, a
+  freshly opened tab) flood an unbounded queue, and the room froze (stream-pp,
+  2026-10-14).
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
