@@ -38,3 +38,12 @@ value (the placeholder-instead-of-value symptom). A test that only selects a new
 value and saves never sees it. Always add a case that: sets a value, reloads
 (fresh store — avoids racing the async post-save refetch), re-opens the form,
 and asserts the dropdown shows the persisted value.
+
+## Native form controls on Linux WebKitGTK (the stream-pp operator window)
+
+WebKitGTK draws a `<select>` (and number spinners) with the light GTK theme and ignores
+our dark background, while the text keeps our light colour: white on white (stream-pp,
+2026-10-14). `style.css` therefore sets `color-scheme: dark` on `:root`,
+`appearance: none` + our own arrow on `select:not([multiple])`, and dark `option`
+colours. A select rule must use `background-color`, not the `background` shorthand,
+or it wipes the arrow image. Guarded by `e2e/dark-form-controls.spec.ts`.

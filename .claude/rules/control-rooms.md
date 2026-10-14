@@ -71,8 +71,17 @@ paths:
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
-  `history.back()`, http(s) `Page.navigate`, and `{t:size,w,h}`. Anything else is
-  dropped. Frames are JPEG binary messages.
+  `{t:copy}`, `history.back()`, http(s) `Page.navigate`, and `{t:size,w,h}`. Anything
+  else is dropped. Frames are JPEG binary messages.
+- **Copy out of a room.** A copy inside the box Chrome lands in Xvfb's clipboard, which
+  the operator never sees. The relay installs `copy_hook_source()` (new documents AND the
+  open one) plus the `Runtime.addBinding` `__restreamerCopy`. The hook reports a `copy`
+  event (page data, else the selection) and `navigator.clipboard.writeText` (Studio's
+  "Copy" buttons). `Runtime.bindingCalled` then goes to the dashboard as `{t:clip,text}`
+  (max 64 KB). Ctrl+C on the canvas sends `{t:copy}`: `execCommand('copy')` with
+  `userGesture: true`. The dashboard tries `navigator.clipboard` (secure context only;
+  `http://<box-ip>` is not one), then `execCommand`, and always shows the text with a
+  "Kopírovať" button: a real click works where the automatic copy is refused.
 - **The page viewport follows the dashboard canvas.** The canvas fills the window below
   it; its content size goes as `{t:size}` to `Emulation.setDeviceMetricsOverride`
   (scaled down to fit 2560x1600 keeping its aspect ratio, at least 320x240, re-applied

@@ -849,7 +849,7 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .cr-dot--on { background: #22c55e; }
 .cr-dot--off { background: #f59e0b; }
 .cr-room { display: flex; flex-direction: column; gap: var(--spacing-xs); }
-.cr-room__head, .cr-room__bar, .cr-room__edit { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); align-items: center; }
+.cr-room__head, .cr-room__bar, .cr-room__edit, .cr-room__clip { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); align-items: center; }
 .cr-room__alias { font-size: 15px; }
 .cr-room__channel { color: var(--text-secondary); }
 .cr-room__account { color: #fde68a; }

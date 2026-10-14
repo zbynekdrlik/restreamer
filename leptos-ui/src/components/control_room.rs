@@ -11,6 +11,28 @@ use wasm_bindgen::prelude::*;
 use crate::api::{self, RoomAccount, RoomDestination, RoomsResponse};
 
 #[wasm_bindgen(inline_js = r#"
+// Put text on the operator's clipboard. navigator.clipboard needs a secure
+// context (http://<box-ip> is not one); execCommand needs a recent user
+// gesture. Resolves whether either worked.
+export async function cr_copy(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch (_) { /* refused: try the older way */ }
+  const prev = document.activeElement;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+  ta.remove();
+  if (prev && prev.focus) prev.focus();
+  return ok;
+}
+
 export function cr_attach(canvas, url, onText) {
   const g = canvas.getContext('2d');
   let meta = { w: canvas.width, h: canvas.height };
@@ -39,6 +61,11 @@ export function cr_attach(canvas, url, onText) {
     if (typeof e.data === 'string') {
       try {
         const m = JSON.parse(e.data);
+        if (m.t === 'clip' && typeof m.text === 'string') {
+          const ok = await cr_copy(m.text);
+          onText(JSON.stringify({ t: 'clip', text: m.text, ok }));
+          return;
+        }
         if (m.t === 'meta' && m.w > 0 && m.h > 0) {
           meta = m;
           if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
@@ -64,7 +91,9 @@ export function cr_attach(canvas, url, onText) {
     wheel: (e) => { send({ t: 'm', type: 'mouseWheel', ...pos(e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: mods(e) }); e.preventDefault(); },
     contextmenu: (e) => e.preventDefault(),
     keydown: (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+      // Copy: the page copies its selection, and the relay sends the text back.
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { send({ t: 'copy' }); e.preventDefault(); return; }
       const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
       send({ t: 'k', type: printable ? 'keyDown' : 'rawKeyDown', key: e.key, code: e.code, text: printable ? e.key : undefined, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) });
       e.preventDefault();
@@ -91,6 +120,7 @@ export function cr_attach(canvas, url, onText) {
 extern "C" {
     type CrHandle;
     fn cr_attach(canvas: &JsValue, url: &str, on_text: &Closure<dyn FnMut(String)>) -> CrHandle;
+    fn cr_copy(text: &str) -> js_sys::Promise;
     #[wasm_bindgen(method)]
     fn send(this: &CrHandle, json: &str);
     #[wasm_bindgen(method)]
@@ -130,6 +160,15 @@ pub fn signed_in_text(d: &RoomDestination) -> &'static str {
         Some(true) => "prihlásený",
         Some(false) => "neprihlásený",
         None => "",
+    }
+}
+
+/// The room status after a copy reached the operator's clipboard, or not.
+pub fn clip_status(ok: bool) -> &'static str {
+    if ok {
+        "skopírované do schránky"
+    } else {
+        "schránka odmietla kópiu: klikni Kopírovať"
     }
 }
 
@@ -217,6 +256,8 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let status: RwSignal<String> = RwSignal::new("otváram…".into());
     let url: RwSignal<String> = RwSignal::new(dest.url.clone());
+    // The last text the page copied; shown with a button that copies it again.
+    let clip: RwSignal<Option<String>> = RwSignal::new(None);
     let viewer = StoredValue::new_local(None::<Viewer>);
     let editing = RwSignal::new(false);
     let acct_input = RwSignal::new(dest.account.clone().unwrap_or_default());
@@ -244,6 +285,12 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                         if let Some(u) = m.get("url").and_then(|u| u.as_str()) {
                             url.try_set(u.to_string());
                         }
+                    }
+                    Some("clip") => {
+                        let text = m.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                        let ok = m.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+                        clip.try_set(Some(text.to_string()));
+                        status.try_set(clip_status(ok).into());
                     }
                     Some("status") => {
                         let s = if m.get("s").and_then(|s| s.as_str()) == Some("open") {
@@ -298,6 +345,21 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
             editing.try_set(false);
         });
     };
+    let copy_again = move |_| {
+        let Some(text) = clip.get_untracked() else {
+            return;
+        };
+        // Called inside the click, so the browser sees the user gesture.
+        let promise = cr_copy(&text);
+        spawn_local(async move {
+            let ok = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            status.try_set(clip_status(ok).into());
+        });
+    };
     let svc_class = if dest.service_type == "FB" {
         "cr-badge cr-badge--fb"
     } else {
@@ -347,6 +409,18 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                     attach();
                 }>"↻"</button>
             </div>
+            <Show when=move || clip.get().is_some()>
+                <div class="cr-room__clip">
+                    <span>"Skopírované v miestnosti:"</span>
+                    <input
+                        class="cr-input cr-room__url"
+                        data-testid="cr-clip"
+                        readonly=true
+                        prop:value=move || clip.get().unwrap_or_default()
+                    />
+                    <button class="cr-btn" data-testid="cr-clip-copy" on:click=copy_again>"Kopírovať"</button>
+                </div>
+            </Show>
             <canvas
                 class="cr-room__screen"
                 data-testid="cr-canvas"
@@ -393,5 +467,11 @@ mod tests {
             "neprihlásený"
         );
         assert_eq!(signed_in_text(&dest(None, false, None)), "");
+    }
+
+    #[test]
+    fn clip_status_says_whether_the_copy_landed() {
+        assert_eq!(clip_status(true), "skopírované do schránky");
+        assert!(clip_status(false).contains("Kopírovať"));
     }
 }

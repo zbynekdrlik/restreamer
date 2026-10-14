@@ -1,9 +1,10 @@
 //! Screencast relay between a dashboard tab and one Chrome page (#388).
 //!
 //! Chrome -> dashboard: JPEG frames as binary messages, plus text messages
-//! `{"t":"meta","w","h"}` (frame size changed) and `{"t":"url","url"}` (the
-//! page navigated). Dashboard -> Chrome: `{"t":"m"}` mouse, `{"t":"k"}` key,
-//! `{"t":"paste","text"}`, `{"t":"nav","url"}`, `{"t":"back"}`, and
+//! `{"t":"meta","w","h"}` (frame size changed), `{"t":"url","url"}` (the
+//! page navigated) and `{"t":"clip","text"}` (the page copied text).
+//! Dashboard -> Chrome: `{"t":"m"}` mouse, `{"t":"k"}` key,
+//! `{"t":"paste","text"}`, `{"t":"copy"}`, `{"t":"nav","url"}`, `{"t":"back"}`, and
 //! `{"t":"size","w","h"}` (the canvas size in CSS pixels: the page viewport
 //! follows it, so the room fills the operator's window at full sharpness).
 //! Anything else is dropped, and only the listed fields are forwarded.
@@ -66,9 +67,43 @@ pub const CLIP_BINDING: &str = "__restreamerCopy";
 /// The longest copied text relayed to the dashboard, in bytes.
 pub const CLIP_MAX: usize = 64 * 1024;
 
-/// The script that reports the page's copies through [`CLIP_BINDING`].
+/// The script that reports the page's copies through [`CLIP_BINDING`]: a
+/// `copy` event (Ctrl+C, a page's `execCommand('copy')`) and
+/// `navigator.clipboard.writeText` (YT Studio's "Copy" buttons). The copy
+/// lands in the box Chrome's own clipboard, which the operator never sees.
 pub fn copy_hook_source() -> String {
-    String::new()
+    const HOOK: &str = r#"(() => {
+  if (window.__restreamerCopyHooked) return;
+  window.__restreamerCopyHooked = true;
+  const report = (t) => { try { if (typeof t === 'string' && t) BINDING(t); } catch (_) {} };
+  const selected = () => {
+    const a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && typeof a.selectionStart === 'number') {
+      return a.value.slice(a.selectionStart, a.selectionEnd);
+    }
+    return String(window.getSelection() || '');
+  };
+  // A page handler may set its own data during the event: read it after the
+  // event reached the window; a handler that stops it gets the selection.
+  let pending = null;
+  document.addEventListener('copy', () => {
+    const sel = selected();
+    pending = sel;
+    setTimeout(() => { if (pending !== null) { pending = null; report(sel); } }, 0);
+  }, true);
+  window.addEventListener('copy', (e) => {
+    const data = e.clipboardData && e.clipboardData.getData('text/plain');
+    const sel = pending;
+    pending = null;
+    report(data || sel || selected());
+  });
+  const c = navigator.clipboard;
+  if (c && c.writeText) {
+    const write = c.writeText.bind(c);
+    c.writeText = (t) => { report(String(t)); return write(t); };
+  }
+})()"#;
+    HOOK.replace("BINDING", CLIP_BINDING)
 }
 
 /// The CDP method that sizes the page viewport.
@@ -107,6 +142,12 @@ pub fn client_to_cdp(v: &Value) -> Option<(&'static str, Value)> {
         "back" => Some((
             "Runtime.evaluate",
             json!({ "expression": "history.back()" }),
+        )),
+        // The page's own copy command, as a user gesture: the hook reports
+        // what it copied.
+        "copy" => Some((
+            "Runtime.evaluate",
+            json!({ "expression": "document.execCommand('copy')", "userGesture": true }),
         )),
         "size" => Some((
             SET_VIEWPORT,
@@ -148,6 +189,12 @@ pub fn page_to_client(m: &Value) -> PageOut {
                     jpeg,
                     session_id,
                 },
+                _ => PageOut::Ignore,
+            }
+        }
+        Some("Runtime.bindingCalled") if m["params"]["name"] == CLIP_BINDING => {
+            match m["params"]["payload"].as_str() {
+                Some(t) if !t.is_empty() && t.len() <= CLIP_MAX => PageOut::Clip(t.into()),
                 _ => PageOut::Ignore,
             }
         }
@@ -242,6 +289,15 @@ pub async fn relay_with(
     };
 
     call("Page.enable", json!({}));
+    // Copies in the page come back through a binding (Runtime.bindingCalled).
+    let hook = copy_hook_source();
+    call("Runtime.enable", json!({}));
+    call("Runtime.addBinding", json!({ "name": CLIP_BINDING }));
+    call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": hook }),
+    );
+    call("Runtime.evaluate", json!({ "expression": hook }));
     call("Page.bringToFront", json!({}));
     call("Page.startScreencast", screencast_params());
 
@@ -314,7 +370,16 @@ pub async fn relay_with(
                             break;
                         }
                     }
-                    PageOut::Clip(_) => {}
+                    PageOut::Clip(text) => {
+                        tracing::info!(
+                            "control rooms: tab {main_frame} copied {} characters",
+                            text.chars().count()
+                        );
+                        let m = json!({ "t": "clip", "text": text }).to_string();
+                        if to_client.send(AxMessage::Text(m.into())).is_err() {
+                            break;
+                        }
+                    }
                     PageOut::Ignore => {}
                 }
             }
