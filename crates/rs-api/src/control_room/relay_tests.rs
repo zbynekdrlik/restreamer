@@ -78,13 +78,15 @@ fn page_frames_urls_and_noise() {
 }
 
 /// A fake Chrome page: records every request method, sends one screencast
-/// frame once the screencast starts.
-async fn fake_page(seen: mpsc::UnboundedSender<Value>) -> String {
+/// frame each time the screencast starts. With `navigate`, the first frame is
+/// followed by a cross-site main-frame navigation.
+async fn fake_page(seen: mpsc::UnboundedSender<Value>, navigate: bool) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut navigated = !navigate;
         while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
             let req: Value = serde_json::from_str(&text).unwrap();
             let _ = seen.send(req.clone());
@@ -99,6 +101,14 @@ async fn fake_page(seen: mpsc::UnboundedSender<Value>) -> String {
                 ws.send(TgMessage::Text(f.to_string().into()))
                     .await
                     .unwrap();
+                if !navigated {
+                    navigated = true;
+                    let nav = json!({"method": "Page.frameNavigated", "params": {"frame": {
+                        "id": "F1", "url": "https://www.youtube.com/account"}}});
+                    ws.send(TgMessage::Text(nav.to_string().into()))
+                        .await
+                        .unwrap();
+                }
             }
         }
     });
@@ -109,7 +119,7 @@ async fn fake_page(seen: mpsc::UnboundedSender<Value>) -> String {
 async fn relay_streams_frames_and_forwards_input() {
     use axum::extract::WebSocketUpgrade;
     let (seen_tx, mut seen) = mpsc::unbounded_channel();
-    let page_addr = fake_page(seen_tx).await;
+    let page_addr = fake_page(seen_tx, false).await;
 
     let app =
         axum::Router::new().route(
@@ -194,4 +204,139 @@ async fn relay_streams_frames_and_forwards_input() {
             "Input.dispatchMouseEvent"
         ]
     );
+}
+
+/// Serve [`relay`] for `target` at `ws://<addr>/ws`.
+async fn serve_relay(cdp: Cdp, target: &str) -> std::net::SocketAddr {
+    use axum::extract::WebSocketUpgrade;
+    let target = target.to_string();
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let (cdp, target) = (cdp.clone(), target.clone());
+            async move { ws.on_upgrade(move |s| relay(s, cdp, target, "https://start/".into())) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+#[tokio::test]
+async fn screencast_restarts_after_a_main_frame_navigation() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page(seen_tx, true).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let run = async {
+        let mut starts = 0;
+        while let Some(req) = seen.recv().await {
+            if req["method"] == "Page.startScreencast" {
+                assert_eq!(req["params"]["format"], "jpeg");
+                starts += 1;
+                if starts == 2 {
+                    break;
+                }
+            }
+        }
+        let mut url_seen = false;
+        while let Some(Ok(m)) = client.next().await {
+            if let TgMessage::Text(t) = m {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "url" && v["url"] == "https://www.youtube.com/account" {
+                    url_seen = true;
+                    break;
+                }
+            }
+        }
+        url_seen
+    };
+    let url_seen = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the screencast was not restarted after the navigation");
+    assert!(url_seen, "the dashboard hears about the new URL");
+}
+
+fn tinfo(id: &str, url: &str, opener: Option<&str>) -> TargetInfo {
+    TargetInfo {
+        target_id: id.into(),
+        kind: "page".into(),
+        url: url.into(),
+        title: String::new(),
+        browser_context_id: None,
+        opener_id: opener.map(Into::into),
+    }
+}
+
+#[test]
+fn popups_are_the_http_tabs_the_room_opened() {
+    let pages = vec![
+        tinfo("R", "https://studio.youtube.com/", None),
+        tinfo("P1", "https://www.youtube.com/account", Some("R")),
+        tinfo("P2", "about:blank", Some("R")),
+        tinfo("P3", "https://x/", Some("OTHER")),
+        tinfo("P4", "http://y/", Some("R")),
+        tinfo("P5", "chrome://newtab/", Some("R")),
+    ];
+    let ids: Vec<String> = popups_of(&pages, "R")
+        .into_iter()
+        .map(|t| t.target_id)
+        .collect();
+    assert_eq!(ids, vec!["P1", "P4"]);
+}
+
+#[tokio::test]
+async fn relay_moves_a_popup_into_the_room_tab() {
+    use crate::control_room::fake_chrome::FakeChrome;
+    let chrome = FakeChrome::start().await;
+    chrome.set_targets(vec![
+        json!({"targetId": "T1", "type": "page", "url": "https://studio.youtube.com/", "title": "r"}),
+        json!({"targetId": "P1", "type": "page", "url": "https://www.youtube.com/account",
+               "title": "p", "openerId": "T1"}),
+    ]);
+    let addr = serve_relay(Cdp::new(chrome.addr.clone()), "T1").await;
+    let (_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let navigations = |c: &FakeChrome| -> Vec<Value> {
+        c.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(path, r)| path == "page/T1" && r["method"] == "Page.navigate")
+            .map(|(_, r)| r["params"].clone())
+            .collect()
+    };
+    let closed = |c: &FakeChrome| -> Vec<Value> {
+        c.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(path, r)| path.starts_with("browser/") && r["method"] == "Target.closeTarget")
+            .map(|(_, r)| r["params"].clone())
+            .collect()
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while closed(&chrome).is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the popup was never taken over; requests: {:?}",
+            chrome.methods()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(closed(&chrome), vec![json!({"targetId": "P1"})]);
+    assert_eq!(
+        navigations(&chrome),
+        vec![json!({"url": "https://www.youtube.com/account"})]
+    );
+    // The popup is gone now: later polls must not navigate again.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(navigations(&chrome).len(), 1);
+    assert_eq!(closed(&chrome).len(), 1);
 }

@@ -164,11 +164,20 @@ impl Browser {
             self.user_data.display(),
             self.port()
         );
-        let mut cmd = tokio::process::Command::new(&chrome);
-        cmd.args(launch_args(&self.user_data, self.port(), cfg!(windows)));
-        detach(&mut cmd, self.display_env());
-        cmd.spawn()
-            .with_context(|| format!("spawn {}", chrome.display()))?;
+        let args = launch_args(&self.user_data, self.port(), cfg!(windows));
+        #[cfg(windows)]
+        drop(
+            super::spawn_windows::spawn(&chrome, &args)
+                .with_context(|| format!("spawn {}", chrome.display()))?,
+        );
+        #[cfg(not(windows))]
+        {
+            let mut cmd = tokio::process::Command::new(&chrome);
+            cmd.args(args);
+            detach(&mut cmd, self.display_env());
+            cmd.spawn()
+                .with_context(|| format!("spawn {}", chrome.display()))?;
+        }
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             if self.cdp.browser_ws_url().await.is_ok() {
@@ -185,17 +194,82 @@ impl Browser {
     /// Open `url` in `profile` (a new tab of the running browser).
     pub async fn open(&self, profile: &str, url: &str) -> Result<()> {
         let chrome = self.chrome()?;
-        let mut cmd = tokio::process::Command::new(&chrome);
-        cmd.args(open_args(&self.user_data, profile, url, cfg!(windows)));
-        detach(&mut cmd, self.display_env());
-        let status = tokio::time::timeout(Duration::from_secs(15), cmd.status())
-            .await
-            .context("Chrome did not hand the tab over within 15 s")?
-            .context("run Chrome")?;
-        if !status.success() {
-            bail!("Chrome exited with {status} while opening {url}");
+        let args = open_args(&self.user_data, profile, url, cfg!(windows));
+        #[cfg(windows)]
+        {
+            let child = super::spawn_windows::spawn(&chrome, &args)
+                .with_context(|| format!("run {}", chrome.display()))?;
+            let code = tokio::task::spawn_blocking(move || child.wait(Duration::from_secs(15)))
+                .await
+                .context("wait for Chrome")?
+                .context("wait for Chrome")?;
+            handover_result(code, url)?;
+        }
+        #[cfg(not(windows))]
+        {
+            let mut cmd = tokio::process::Command::new(&chrome);
+            cmd.args(args);
+            detach(&mut cmd, self.display_env());
+            let status = tokio::time::timeout(Duration::from_secs(15), cmd.status())
+                .await
+                .context("Chrome did not hand the tab over within 15 s")?
+                .context("run Chrome")?;
+            if !status.success() {
+                bail!("Chrome exited with {status} while opening {url}");
+            }
         }
         Ok(())
+    }
+}
+
+/// The outcome of a Chrome handover run that exited with `code` (`None`:
+/// still running when the wait ended).
+pub fn handover_result(code: Option<u32>, url: &str) -> Result<()> {
+    match code {
+        None => bail!("Chrome did not hand the tab over within 15 s"),
+        Some(0) => Ok(()),
+        Some(c) => bail!("Chrome exited with code {c} while opening {url}"),
+    }
+}
+
+/// The command line `CreateProcessW` gets for `program` + `args`, quoted the
+/// way `CommandLineToArgvW` (and Chrome) splits it back.
+pub fn windows_command_line(program: &str, args: &[String]) -> String {
+    let mut out = String::new();
+    for (i, arg) in std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(' ');
+        }
+        push_windows_arg(&mut out, arg);
+    }
+    out
+}
+
+/// One argument: quoted when empty or holding a space, tab or quote; a
+/// backslash run is doubled only where it precedes a quote.
+fn push_windows_arg(out: &mut String, arg: &str) {
+    let quote = arg.is_empty() || arg.contains([' ', '\t', '"']);
+    if quote {
+        out.push('"');
+    }
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            if c == '"' {
+                out.extend(std::iter::repeat_n('\\', backslashes + 1));
+            }
+            backslashes = 0;
+        }
+        out.push(c);
+    }
+    if quote {
+        out.extend(std::iter::repeat_n('\\', backslashes));
+        out.push('"');
     }
 }
 

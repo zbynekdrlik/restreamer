@@ -18,6 +18,8 @@ pub mod cdp;
 pub(crate) mod fake_chrome;
 pub mod handlers;
 pub mod relay;
+#[cfg(windows)]
+mod spawn_windows;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -392,6 +394,17 @@ impl ControlRooms {
     /// (see [`clone_sources`]).
     pub async fn open(&self, dest: &Destination, sources: &[String]) -> Result<String> {
         let _one_at_a_time = self.open_lock.lock().await;
+        // Clone BEFORE Chrome starts: Chrome opens its last-used profile and
+        // creates that directory when it is missing, which would make the
+        // clone skip and the room open signed out.
+        match clone_profile(&self.browser.user_data, &dest.profile, sources) {
+            Ok(Some(src)) => tracing::info!(
+                "control rooms: profile {} cloned from signed-in {src} (pick the channel once in the tab)",
+                dest.profile
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("control rooms: {e:#}; {} starts signed out", dest.profile),
+        }
         self.browser.ensure_running().await?;
         let before = self.browser.cdp.pages().await?;
         {
@@ -402,14 +415,6 @@ impl ControlRooms {
             {
                 return Ok(t.target_id.clone());
             }
-        }
-        match clone_profile(&self.browser.user_data, &dest.profile, sources) {
-            Ok(Some(src)) => tracing::info!(
-                "control rooms: profile {} cloned from signed-in {src} (pick the channel once in the tab)",
-                dest.profile
-            ),
-            Ok(None) => {}
-            Err(e) => tracing::warn!("control rooms: {e:#}; {} starts signed out", dest.profile),
         }
         self.browser.open(&dest.profile, &dest.url).await?;
         for _ in 0..60 {

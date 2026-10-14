@@ -1,6 +1,7 @@
 //! Test-only fake of Chrome's debugging port (#388): `/json/version`, the
 //! browser websocket (`Target.getTargets`) and page websockets
-//! (`Network.getCookies`, everything else answered `{}`). Every request is
+//! (`Network.getCookies`, `Target.closeTarget` drops the target, everything
+//! else answered `{}`). Every request is
 //! recorded, and the target list and cookies can be changed while it runs.
 
 use std::collections::HashMap;
@@ -87,6 +88,11 @@ async fn serve_socket(mut ws: WebSocket, state: Arc<Mutex<FakeState>>, path: Str
             s.requests.push((path.clone(), req.clone()));
             match req["method"].as_str() {
                 Some("Target.getTargets") => json!({"targetInfos": s.targets}),
+                Some("Target.closeTarget") => {
+                    let id = req["params"]["targetId"].clone();
+                    s.targets.retain(|t| t["targetId"] != id);
+                    json!({"success": true})
+                }
                 Some("Network.getCookies") => {
                     let names = s.cookies.get(&id).cloned().unwrap_or_default();
                     json!({"cookies": names.iter().map(|n| json!({"name": n, "value": "x"})).collect::<Vec<_>>()})

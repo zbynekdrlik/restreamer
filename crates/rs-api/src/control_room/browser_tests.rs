@@ -73,6 +73,52 @@ fn browser_keeps_profiles_under_the_data_dir() {
 }
 
 #[test]
+fn handover_succeeds_only_on_exit_code_zero() {
+    assert!(handover_result(Some(0), "https://a/").is_ok());
+    let e = handover_result(Some(3), "https://a/")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("code 3") && e.contains("https://a/"), "{e}");
+    let e = handover_result(None, "https://a/").unwrap_err().to_string();
+    assert!(e.contains("within 15 s"), "{e}");
+}
+
+#[test]
+fn windows_command_line_quotes_like_command_line_to_argv() {
+    let args: Vec<String> = [
+        "--user-data-dir=C:\\ProgramData\\Restreamer\\browser-profiles\\control-rooms",
+        "",
+        "a b",
+        "say \"hi\"",
+        "C:\\dir with space\\",
+        "back\\\\\"slash",
+        "tab\there",
+        "https://studio.youtube.com/?a=1&b=2",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        windows_command_line(
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            &args
+        ),
+        concat!(
+            "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" ",
+            "--user-data-dir=C:\\ProgramData\\Restreamer\\browser-profiles\\control-rooms ",
+            "\"\" ",
+            "\"a b\" ",
+            "\"say \\\"hi\\\"\" ",
+            "\"C:\\dir with space\\\\\" ",
+            "\"back\\\\\\\\\\\"slash\" ",
+            "\"tab\there\" ",
+            "https://studio.youtube.com/?a=1&b=2"
+        )
+    );
+    assert_eq!(windows_command_line("chrome.exe", &[]), "chrome.exe");
+}
+
+#[test]
 fn port_of_reads_the_debugging_port() {
     assert_eq!(port_of("127.0.0.1:9239"), 9239);
     assert_eq!(port_of("127.0.0.1"), CDP_PORT);

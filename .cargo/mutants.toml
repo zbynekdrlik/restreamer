@@ -98,4 +98,5 @@ exclude_globs = [
     "crates/rs-runtime/src/stall_resources_windows.rs",
     "crates/rs-runtime/src/rtmp_bind_windows.rs",
     "crates/rs-runtime/src/ingest_priority_windows.rs",
+    "crates/rs-api/src/control_room/spawn_windows.rs",
 ]

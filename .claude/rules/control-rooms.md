@@ -30,6 +30,18 @@ paths:
   copied between user-data-dirs keeps its SID.
 - **A profile's own startup window adds `about:blank` / `chrome://newtab/` tabs** next
   to the requested URL. `new_target` skips them; never take the first new page blindly.
+- **Clone BEFORE `ensure_running`.** Chrome starts in its `Local State`
+  `profile.last_used` and creates that directory when it is missing. A clone
+  checked after the start then sees the directory and skips, and the room opens
+  signed out (stream-pp, 2026-10-14).
+- **Only `acct-*` profiles carry a session.** On stream-pp the spike's `dest-*`
+  were never signed in. To check, count the `SID` (Google) or `c_user` (FB) rows
+  in `<profile>/Cookies` with python's sqlite3 (the box has no `sqlite3` CLI).
+- **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
+  The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
+  navigates the room tab there, and closes the popup.
+- **The screencast stops on a cross-site navigation** (renderer swap). The relay
+  restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
   `history.back()`, and http(s) `Page.navigate`. Anything else is dropped. Frames are
   JPEG binary messages.

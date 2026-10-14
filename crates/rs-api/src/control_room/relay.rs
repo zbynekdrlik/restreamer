@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
-use super::cdp::{self, Cdp};
+use super::cdp::{self, Cdp, TargetInfo};
 
 const MOUSE_FIELDS: &[&str] = &[
     "type",
@@ -117,6 +117,27 @@ pub fn page_to_client(m: &Value) -> PageOut {
     }
 }
 
+/// The tabs the room tab `room` opened (`window.open`, a `target=_blank`
+/// link) that already carry an http(s) URL: the room shows them in its own
+/// tab, since the viewer only ever sees that one.
+pub fn popups_of(pages: &[TargetInfo], room: &str) -> Vec<TargetInfo> {
+    pages
+        .iter()
+        .filter(|t| {
+            t.opener_id.as_deref() == Some(room)
+                && (t.url.starts_with("https://") || t.url.starts_with("http://"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// How often the relay looks for tabs the room opened.
+const POPUP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn screencast_params() -> Value {
+    json!({ "format": "jpeg", "quality": 75, "maxWidth": super::browser::WINDOW_W, "maxHeight": super::browser::WINDOW_H })
+}
+
 /// Relay `client` to the page `target_id` until either side closes.
 pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: String) {
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(&target_id)).await {
@@ -151,10 +172,7 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
 
     call("Page.enable", json!({}));
     call("Page.bringToFront", json!({}));
-    call(
-        "Page.startScreencast",
-        json!({ "format": "jpeg", "quality": 75, "maxWidth": super::browser::WINDOW_W, "maxHeight": super::browser::WINDOW_H }),
-    );
+    call("Page.startScreencast", screencast_params());
 
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
     let _ = to_client.send(AxMessage::Text(
@@ -201,12 +219,48 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
                         );
                     }
                     PageOut::Url(u) => {
+                        // A cross-site navigation swaps the renderer, and the
+                        // screencast stops with the old one: start it again.
+                        call("Page.startScreencast", screencast_params());
                         let m = json!({ "t": "url", "url": u }).to_string();
                         if to_client.send(AxMessage::Text(m.into())).is_err() {
                             break;
                         }
                     }
                     PageOut::Ignore => {}
+                }
+            }
+        }
+    };
+    let follow_popups = {
+        let cdp = cdp.clone();
+        let room = target_id.clone();
+        let call = call.clone();
+        async move {
+            loop {
+                tokio::time::sleep(POPUP_POLL).await;
+                let pages = match cdp.pages().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!("control rooms: tab list for popups failed: {e:#}");
+                        continue;
+                    }
+                };
+                for p in popups_of(&pages, &room) {
+                    tracing::info!(
+                        "control rooms: tab {room} opened {}; showing it in the room tab",
+                        p.url
+                    );
+                    call("Page.navigate", json!({ "url": p.url }));
+                    if let Err(e) = cdp
+                        .browser_call("Target.closeTarget", json!({ "targetId": p.target_id }))
+                        .await
+                    {
+                        tracing::warn!(
+                            "control rooms: closing popup {} failed: {e:#}",
+                            p.target_id
+                        );
+                    }
                 }
             }
         }
@@ -227,6 +281,7 @@ pub async fn relay(client: WebSocket, cdp: Cdp, target_id: String, start_url: St
     tokio::select! {
         _ = from_page => {}
         _ = from_client => {}
+        _ = follow_popups => {}
     }
     drop(to_page);
     drop(to_client);
