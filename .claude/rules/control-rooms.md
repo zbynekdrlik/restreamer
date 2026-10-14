@@ -14,6 +14,12 @@ paths:
   - Windows: a real window parked at -32000,-32000.
   - Linux: Chrome draws on Restreamer's own `Xvfb :93`, so the kiosk screen and tint2
     never show it. The .deb `Depends: xvfb`.
+  - Linux under systemd (`INVOCATION_ID` set): Chrome and Xvfb start through
+    `systemd-run --user --scope --collect`. The unit's `KillMode=control-group`
+    otherwise kills them on every `systemctl --user restart restreamer`, and all
+    room tabs close (stream-pp, 0.29.41). The handover run exits at once and needs
+    no scope. Do NOT set `KillMode=process` on the unit: Restreamer's ffmpeg
+    children must die with it.
   - `RESTREAMER_CHROME` overrides the binary. stream-pp uses the system
     `google-chrome-stable`, installed by camera-box setup-strih step 16j.
 - **One Google profile = ONE active YouTube channel identity.** A second brand channel
