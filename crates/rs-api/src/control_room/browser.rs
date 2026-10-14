@@ -6,7 +6,8 @@
 //! - Linux: Chrome draws on its own Xvfb display, so nothing appears on the
 //!   kiosk screen or in its panel.
 //!
-//! Chrome and Xvfb outlive a Restreamer restart on purpose: the next start
+//! Chrome and Xvfb outlive a Restreamer restart on purpose (on Linux under
+//! systemd they get a scope of their own, see [`scoped_command`]): the next start
 //! finds the debugging port answering and reuses them, logins included.
 
 use std::path::{Path, PathBuf};
@@ -167,7 +168,7 @@ impl Browser {
         std::fs::create_dir_all(&self.user_data)
             .with_context(|| format!("create {}", self.user_data.display()))?;
         if let Some(display) = self.display_env() {
-            start_xvfb(&self.xvfb_bin, display).await?;
+            start_xvfb(&self.xvfb_bin, display, self.systemd_run.as_deref()).await?;
         }
         tracing::info!(
             "control rooms: starting {} (profiles in {}, debugging port {})",
@@ -183,11 +184,14 @@ impl Browser {
         );
         #[cfg(not(windows))]
         {
-            let mut cmd = tokio::process::Command::new(&chrome);
+            // Its own scope: a restart of the service must not kill it.
+            let (program, args) =
+                scoped_command(self.systemd_run.as_deref(), "Chrome", &chrome, &args);
+            let mut cmd = tokio::process::Command::new(&program);
             cmd.args(args);
             detach(&mut cmd, self.display_env());
             cmd.spawn()
-                .with_context(|| format!("spawn {}", chrome.display()))?;
+                .with_context(|| format!("spawn {}", program.display()))?;
         }
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -287,8 +291,7 @@ fn push_windows_arg(out: &mut String, arg: &str) {
 /// `systemd-run` when Chrome and Xvfb need a scope of their own: Restreamer
 /// runs as a systemd service (`INVOCATION_ID` is set) and `systemd_run` exists.
 pub fn scope_runner(under_systemd: bool, systemd_run: &Path) -> Option<PathBuf> {
-    let _ = (under_systemd, systemd_run);
-    None
+    (under_systemd && systemd_run.is_file()).then(|| systemd_run.to_path_buf())
 }
 
 /// The program and arguments that start `program args`, in a scope of its own
@@ -299,8 +302,23 @@ pub fn scoped_command(
     program: &Path,
     args: &[String],
 ) -> (PathBuf, Vec<String>) {
-    let _ = (systemd_run, what);
-    (program.to_path_buf(), args.to_vec())
+    let Some(runner) = systemd_run else {
+        return (program.to_path_buf(), args.to_vec());
+    };
+    let mut out: Vec<String> = [
+        "--user",
+        "--scope",
+        "--collect",
+        "--quiet",
+        &format!("--description=Restreamer control rooms: {what}"),
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    out.push(program.display().to_string());
+    out.extend(args.iter().cloned());
+    (runner.to_path_buf(), out)
 }
 
 /// The port of a `host:port` address; [`CDP_PORT`] when there is none.
@@ -328,20 +346,25 @@ pub fn xvfb_lock(display: &str) -> PathBuf {
 }
 
 /// Start the hidden X display unless it already runs.
-async fn start_xvfb(bin: &Path, disp: &str) -> Result<()> {
+async fn start_xvfb(bin: &Path, disp: &str, systemd_run: Option<&Path>) -> Result<()> {
     let lock = xvfb_lock(disp);
     if lock.exists() {
         return Ok(());
     }
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args([
+    let args: Vec<String> = [
         disp,
         "-screen",
         "0",
         &format!("{WINDOW_W}x{WINDOW_H}x24"),
         "-nolisten",
         "tcp",
-    ]);
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let (program, args) = scoped_command(systemd_run, "Xvfb", bin, &args);
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
     detach(&mut cmd, None);
     cmd.spawn()
         .context("spawn Xvfb (install the xvfb package)")?;
