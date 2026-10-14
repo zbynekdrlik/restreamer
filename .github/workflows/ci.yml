@@ -7206,6 +7206,12 @@ jobs:
             # and timed out at 17:54 on run 26110088219.
             MAX_WAIT=280
             WAIT_INTERVAL=30
+            # A run of failed calls is no longer a transient: a bad token,
+            # a wrong SHA or an exhausted rate limit would otherwise burn
+            # the whole 140 min before failing.
+            MAX_API_FAILURES=5
+            API_FAILURES=0
+            API_ERR=$(mktemp)
             for i in $(seq 1 $MAX_WAIT); do
               # Find E2E Gate check run from the push-triggered workflow on this commit.
               # Filter out check runs from the current workflow run by matching the run ID
@@ -7214,11 +7220,17 @@ jobs:
               # A failed API call (5xx, empty body: "unexpected end of JSON
               # input", PR run 38488331056) is one missed poll, not a verdict.
               if ! PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
-                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last"); then
-                echo "Attempt $i/$MAX_WAIT: GitHub API call failed, retrying in ${WAIT_INTERVAL}s..."
+                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last" 2>"$API_ERR"); then
+                API_FAILURES=$((API_FAILURES + 1))
+                echo "Attempt $i/$MAX_WAIT: GitHub API call failed ($API_FAILURES in a row): $(tail -c 300 "$API_ERR")"
+                if [[ $API_FAILURES -ge $MAX_API_FAILURES ]]; then
+                  echo "FAIL: $API_FAILURES GitHub API calls in a row failed; last error above"
+                  exit 1
+                fi
                 sleep $WAIT_INTERVAL
                 continue
               fi
+              API_FAILURES=0
 
               if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
                 echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."
