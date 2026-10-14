@@ -192,6 +192,11 @@ pub fn file_actions(
         .collect()
 }
 
+/// An upload of this age is past `max_age` (exactly `max_age` still stays).
+pub fn is_expired(age: std::time::Duration, max_age: std::time::Duration) -> bool {
+    age > max_age
+}
+
 /// Delete uploaded files older than `max_age`. A missing directory is fine.
 pub fn prune_uploads(dir: &std::path::Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -203,7 +208,7 @@ pub fn prune_uploads(dir: &std::path::Path, max_age: std::time::Duration) {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > max_age);
+            .is_some_and(|age| is_expired(age, max_age));
         if old && let Err(err) = std::fs::remove_file(e.path()) {
             tracing::warn!(
                 "control rooms: cannot delete old upload {:?}: {err}",

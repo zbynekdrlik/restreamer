@@ -95,6 +95,14 @@ fn file_chooser_events_reach_the_dashboard() {
 }
 
 #[test]
+fn an_upload_expires_only_past_its_max_age() {
+    let hour = std::time::Duration::from_secs(3600);
+    assert!(!is_expired(hour, hour), "exactly the max age stays");
+    assert!(is_expired(hour + std::time::Duration::from_millis(1), hour));
+    assert!(!is_expired(std::time::Duration::ZERO, hour));
+}
+
+#[test]
 fn old_uploads_are_pruned() {
     let dir = tempfile::tempdir().unwrap();
     let old = dir.path().join("old.png");
