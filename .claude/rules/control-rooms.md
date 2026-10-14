@@ -20,6 +20,11 @@ paths:
     room tabs close (stream-pp, 0.29.41). The handover run exits at once and needs
     no scope. Do NOT set `KillMode=process` on the unit: Restreamer's ffmpeg
     children must die with it.
+  - If systemd-run exits non-zero before the program is up (no user manager or
+    bus), a warning carries its last stderr line and the program starts
+    directly. Chrome and Xvfb stderr go to
+    `<data_dir>/browser-profiles/{chrome,xvfb}.stderr.log` (truncated per start;
+    read them first when a room never comes up).
   - `RESTREAMER_CHROME` overrides the binary. stream-pp uses the system
     `google-chrome-stable`, installed by camera-box setup-strih step 16j.
 - **One Google profile = ONE active YouTube channel identity.** A second brand channel
@@ -49,8 +54,13 @@ paths:
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
-  `history.back()`, and http(s) `Page.navigate`. Anything else is dropped. Frames are
-  JPEG binary messages.
+  `history.back()`, http(s) `Page.navigate`, and `{t:size,w,h}`. Anything else is
+  dropped. Frames are JPEG binary messages.
+- **The page viewport follows the dashboard canvas.** The canvas fills the window below
+  it; its content size goes as `{t:size}` to `Emulation.setDeviceMetricsOverride`
+  (clamped 320x240..2560x1600, re-applied after a navigation). The screencast's
+  maxWidth/maxHeight is that maximum, so frames arrive 1:1 with the canvas: big AND
+  sharp. The Chrome window and Xvfb stay 1600x900; the emulated viewport may exceed them.
 - **Tests.**
   - `control_room/*_tests.rs` use a fake CDP websocket page and a real axum relay.
   - The Playwright spec uses the mock's `/api/v1/control-rooms*` routes and a second
