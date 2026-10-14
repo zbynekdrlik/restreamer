@@ -20,9 +20,11 @@ paths:
     room tabs close (stream-pp, 0.29.41). The handover run exits at once and needs
     no scope. Do NOT set `KillMode=process` on the unit: Restreamer's ffmpeg
     children must die with it.
-  - If systemd-run exits non-zero before the program is up (no user manager or
-    bus), a warning carries its last stderr line and the program starts
-    directly. Chrome and Xvfb stderr go to
+  - If systemd-run itself fails before the program is up (no user manager or
+    bus: its own `Failed to connect to bus` / `Failed to start transient scope
+    unit` lines), a warning carries the line and the program starts directly.
+    Any other non-zero exit is the program's own (with `--scope` systemd-run
+    becomes it): it stays scoped, and is never restarted in the service cgroup. Chrome and Xvfb stderr go to
     `<data_dir>/browser-profiles/{chrome,xvfb}.stderr.log` (truncated per start;
     read them first when a room never comes up).
   - `RESTREAMER_CHROME` overrides the binary. stream-pp uses the system
@@ -33,7 +35,8 @@ paths:
   - Chrome's scope carries `CHROME_SCOPE_PROPS`: MemoryHigh=3G, MemoryMax=3584M,
     OOMPolicy=continue. An OOM stays inside Chrome (a renderer dies);
   - at most `MAX_LIVE_ROOMS` (4) room tabs are open. `open()` updates `TabMap.recent`
-    and closes the least recently viewed beyond that.
+    and closes the least recently viewed beyond that. A tab Chrome refuses to close
+    stays tracked and is closed on a later view.
 - **Each room reopens at its last page.** The relay reports every main-frame URL:
   `Page.frameNavigated` plus `Page.navigatedWithinDocument` (YT Studio is an SPA; a page
   target's id is its main frame id). `remember_url` keeps only `https://studio.youtube.com/*`
@@ -72,7 +75,8 @@ paths:
   dropped. Frames are JPEG binary messages.
 - **The page viewport follows the dashboard canvas.** The canvas fills the window below
   it; its content size goes as `{t:size}` to `Emulation.setDeviceMetricsOverride`
-  (clamped 320x240..2560x1600, re-applied after a navigation). The screencast's
+  (scaled down to fit 2560x1600 keeping its aspect ratio, at least 320x240, re-applied
+  after a navigation). One viewer per room: with two, the last resize wins. The screencast's
   maxWidth/maxHeight is that maximum, so frames arrive 1:1 with the canvas: big AND
   sharp. The Chrome window and Xvfb stay 1600x900; the emulated viewport may exceed them.
 - **Tests.**

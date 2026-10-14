@@ -50,8 +50,14 @@ pub const MIN_VIEW_H: u32 = 240;
 /// The page viewport for a dashboard canvas of `w` x `h` CSS pixels.
 pub fn viewport(w: f64, h: f64) -> Value {
     // `as` saturates, and NaN becomes 0: the clamp then gives the minimum.
-    let w = (w.round() as u32).clamp(MIN_VIEW_W, MAX_VIEW_W);
-    let h = (h.round() as u32).clamp(MIN_VIEW_H, MAX_VIEW_H);
+    let (w, h) = (w.round() as u32 as f64, h.round() as u32 as f64);
+    // Too big: scale down to fit, keeping the aspect ratio, so the frames
+    // are never drawn stretched on a 4K or ultrawide canvas.
+    let fit = (f64::from(MAX_VIEW_W) / w)
+        .min(f64::from(MAX_VIEW_H) / h)
+        .min(1.0);
+    let w = ((w * fit).round() as u32).clamp(MIN_VIEW_W, MAX_VIEW_W);
+    let h = ((h * fit).round() as u32).clamp(MIN_VIEW_H, MAX_VIEW_H);
     json!({ "width": w, "height": h, "deviceScaleFactor": 1, "mobile": false })
 }
 

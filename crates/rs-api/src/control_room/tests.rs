@@ -146,16 +146,14 @@ async fn a_room_reopens_at_its_last_page_until_its_account_changes() {
     let rooms =
         ControlRooms::with_browser(dir.path(), Browser::at(dir.path(), "127.0.0.1:9".into()));
     let page = "https://studio.youtube.com/channel/UC9/livestreaming";
-    rooms
-        .note_url("T1", "https://accounts.google.com/signin")
-        .await;
-    rooms.note_url("T2", page).await;
+    rooms.note_url("T1", "https://accounts.google.com/signin");
+    rooms.note_url("T2", page);
     let d = rooms.status(&[ep(1, "YT A", "YT_RTMP")]).await;
     assert_eq!(
         d[0].url, "https://studio.youtube.com/",
         "nothing worth keeping yet"
     );
-    rooms.note_url("T1", page).await;
+    rooms.note_url("T1", page);
     let d = rooms.status(&[ep(1, "YT A", "YT_RTMP")]).await;
     assert_eq!(d[0].url, page);
     // It survives a Restreamer restart.

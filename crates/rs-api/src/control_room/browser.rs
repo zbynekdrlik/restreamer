@@ -434,6 +434,15 @@ impl Started {
         }
         let why = std::fs::read_to_string(&self.launch.log).unwrap_or_default();
         if !systemd_run_failed(&why) {
+            // The program itself exited (a crash, an OOM kill inside its
+            // capped scope): it stays scoped, the next open starts it again.
+            tracing::warn!(
+                "control rooms: {} exited in its systemd scope ({status}): {} (log {})",
+                self.launch.what,
+                why.trim().lines().last().unwrap_or("no output"),
+                self.launch.log.display()
+            );
+            self.scoped = false;
             return Ok(());
         }
         tracing::warn!(
@@ -448,9 +457,23 @@ impl Started {
     }
 }
 
+/// systemd-run's own messages when it cannot run a program in a scope
+/// (src/run/run.c). Chrome's similar "Failed to connect to the bus" comes
+/// with a `[pid:tid:...]` prefix and never matches.
+const SYSTEMD_RUN_FAILURES: &[&str] = &[
+    "Failed to connect to bus",
+    "Failed to create bus connection",
+    "Failed to start transient scope unit",
+    "Failed to find executable",
+];
+
 /// Whether a scoped start's stderr shows that systemd-run itself failed.
-fn systemd_run_failed(_log: &str) -> bool {
-    true
+fn systemd_run_failed(log: &str) -> bool {
+    log.lines().any(|l| {
+        SYSTEMD_RUN_FAILURES
+            .iter()
+            .any(|f| l.trim_start().starts_with(f))
+    })
 }
 
 /// Where a started Chrome or Xvfb writes its stderr (`what` = "Chrome" /

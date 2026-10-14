@@ -166,10 +166,9 @@ pub async fn ws(
     // Every room page the operator reaches is kept, so the room reopens there.
     let rooms = state.control_rooms.clone();
     let tab = page.target_id.clone();
-    let on_url: super::relay::UrlSink = std::sync::Arc::new(move |url: String| {
-        let (rooms, tab) = (rooms.clone(), tab.clone());
-        tokio::spawn(async move { rooms.note_url(&tab, &url).await });
-    });
+    // Called in the relay's order (no spawn): the last URL is the one kept.
+    let on_url: super::relay::UrlSink =
+        std::sync::Arc::new(move |url: String| rooms.note_url(&tab, &url));
     upgrade.max_message_size(1 << 20).on_upgrade(move |socket| {
         super::relay::relay_with(socket, cdp, page.target_id, page.url, on_url)
     })

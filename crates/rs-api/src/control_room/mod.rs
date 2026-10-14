@@ -393,7 +393,7 @@ impl ControlRooms {
     }
 
     /// Keep `url` as the page to reopen the room of tab `target_id` at.
-    pub async fn note_url(&self, target_id: &str, url: &str) {
+    pub fn note_url(&self, target_id: &str, url: &str) {
         if !remember_url(url) {
             return;
         }
@@ -466,14 +466,19 @@ impl ControlRooms {
         }
     }
 
-    async fn close_tab(&self, target_id: &str) {
-        if let Err(e) = self
+    /// Close one tab; false when Chrome refused (the tab is still open).
+    async fn close_tab(&self, target_id: &str) -> bool {
+        match self
             .browser
             .cdp
             .browser_call("Target.closeTarget", json!({ "targetId": target_id }))
             .await
         {
-            tracing::warn!("control rooms: closing tab {target_id} failed: {e:#}");
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("control rooms: closing tab {target_id} failed: {e:#}");
+                false
+            }
         }
     }
 
@@ -503,17 +508,22 @@ impl ControlRooms {
                 })
                 .collect()
         };
+        let mut closed = Vec::new();
         for (ep, tabs) in &close {
             for t in tabs {
                 tracing::info!(
                     "control rooms: closing room {ep} (tab {t}): over {MAX_LIVE_ROOMS} open rooms, viewed longest ago; it reopens at its last page"
                 );
-                self.close_tab(t).await;
+                if self.close_tab(t).await {
+                    closed.push(t.clone());
+                }
             }
         }
+        // A tab Chrome refused to close stays tracked, so the next view
+        // counts it and tries again.
         let mut map = lock(&self.tabs);
-        for (ep, _) in &close {
-            map.tab.retain(|_, e| e != ep);
+        for t in &closed {
+            map.tab.remove(t);
         }
         let open: Vec<i64> = map.tab.values().copied().collect();
         map.recent.retain(|r| open.contains(r));
@@ -564,8 +574,10 @@ impl ControlRooms {
                         dest.endpoint_id,
                         dest.profile
                     );
-                    self.close_tab(&target_id).await;
-                    lock(&self.tabs).tab.remove(&target_id);
+                    // Refused: it stays tracked, so a later view closes it.
+                    if self.close_tab(&target_id).await {
+                        lock(&self.tabs).tab.remove(&target_id);
+                    }
                 }
                 _ => {
                     self.viewed(dest.endpoint_id, &before).await;

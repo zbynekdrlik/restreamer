@@ -53,7 +53,7 @@ export function cr_attach(canvas, url, onText) {
     canvas.dataset.frames = String((Number(canvas.dataset.frames) || 0) + 1);
   };
   const send = (o) => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
-  const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * meta.w / r.width, y: (e.clientY - r.top) * meta.h / r.height }; };
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left - canvas.clientLeft) * meta.w / canvas.clientWidth, y: (e.clientY - r.top - canvas.clientTop) * meta.h / canvas.clientHeight }; };
   const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   const btn = (b) => ['left', 'middle', 'right'][b] || 'none';
   let lastMove = 0;
