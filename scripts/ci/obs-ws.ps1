@@ -162,6 +162,12 @@ function Get-RigLeaseHolder {
     return $null
   }
   if (-not $lease.held -or $lease.stale) { return $null }
+  # #349: the lease this job took itself (rig-lease-hold.ps1, right before Start) is no
+  # holder to wait for: Start and every Republish of the job run under it.
+  if ($lease.holder -and $env:GITHUB_RUN_ID -and $lease.holder.job -eq $env:GITHUB_JOB -and
+      ("$($lease.holder.run_id)" -eq $env:GITHUB_RUN_ID -or "$($lease.holder.run_url)" -like "*/runs/$($env:GITHUB_RUN_ID)")) {
+    return $null
+  }
   $job = if ($lease.holder -and $lease.holder.job) { $lease.holder.job } else { "(unknown)" }
   $run = if ($lease.holder -and $lease.holder.run_url) { $lease.holder.run_url } else { "(unknown)" }
   return "$job ($run)"

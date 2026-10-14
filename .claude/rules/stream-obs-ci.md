@@ -54,6 +54,22 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
     the lease free never reserves the rig: camera-box admits its run after 60 s of idle OBS and
     took it 1 s after our final re-check (main run on e3272259). So the Start steps carry
     `timeout-minutes: 63`. Republish never waits; without a recorded deadline Start does not wait.
+  - **The job TAKES the lease while it streams** (camera-box contract, #349 comments
+    6179376408 + 6179710985; camera-box issue 1432). `rig-lease-hold.ps1 -Action Acquire` runs
+    between the final re-check and Start:
+    - POST `http://dev1:8890/rig-lease/acquire` with `Bearer $RIG_LEASE_TOKEN` (repo secret);
+    - a 409 retries inside the job's deadline, then fails naming the holder;
+    - a detached `-Action Beat` copy heartbeats every 30 s;
+    - `-Action Release` runs in `if: always() && env.RIG_LEASE_HELD == 'true'` after the OBS
+      stop, and fails the job if a heartbeat got 404 (lease reclaimed after 180 s without a
+      beat).
+
+    No token or an unreachable server is fail-open; 400/401 fail. `Get-RigLeaseHolder` ignores
+    the job's OWN lease (same run_id/run_url and `GITHUB_JOB`), or Start and Republish would wait
+    on themselves. test-integrity's rig-lease step checks Acquire < Start, Release > Stop as an
+    always() step, and the secret. Tested by `tests/ci/test_rig_lease_hold.py` (7 scenarios).
+    The OBS-streaming jobs run on the stream box (`[self-hosted, windows, stream-lan]`), never on
+    dev1.
   - **AssertNotStreaming**: read-only. It fails when OBS streams, and only warns when OBS is
     unreachable.
 - **Teardown**: `if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'`, exactly. Otherwise a
@@ -84,7 +100,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
   obs-stream.ps1 `Start-OurStream`, and StopStream only in `Stop-OurStream`.
 - **`tests/ci/test_obs_stream.py`** (ci.yml job `obs-scripts-test`, windows-latest = PowerShell
   5.1, part of the Rust CI Gate) runs every action against a stdlib mock obs-websocket, a mock
-  lease, a mock program-audio sampler (#379) and a fake `obs64` process, in 50 scenarios. It asserts:
+  lease, a mock program-audio sampler (#379) and a fake `obs64` process, in 53 scenarios. It asserts:
   - the exit codes and the marker sequence;
   - that only allowlisted requests were sent (the list is read from the guard);
   - that StopStream is sent only by stop/republish;
