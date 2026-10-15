@@ -67,7 +67,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
     No token or an unreachable server is fail-open; 400/401 fail. `Get-RigLeaseHolder` ignores
     the job's OWN lease (same run_id/run_url and `GITHUB_JOB`), or Start and Republish would wait
     on themselves. test-integrity's rig-lease step checks Acquire < Start, Release > Stop as an
-    always() step, and the secret. Tested by `tests/ci/test_rig_lease_hold.py` (7 scenarios).
+    always() step, and the secret. Tested by `tests/ci/test_rig_lease_hold.py` (9 scenarios).
     The OBS-streaming jobs run on the stream box (`[self-hosted, windows, stream-lan]`), never on
     dev1.
   - **AssertNotStreaming**: read-only. It fails when OBS streams, and only warns when OBS is
@@ -205,6 +205,29 @@ UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
     handle; an inherited stdout pipe would hold the step open.
   - On Core it redirects to files.
   - The runner's job-end cleanup reaps it.
+  - **A force-cancel skips that cleanup (#349).** `gh api .../force-cancel` kills Runner.Worker
+    with no job-end cleanup and no teardown step, and detached helpers live on. Run
+    38745691029's lease heartbeat beat on until it was killed by hand. An orphaned watchdog is
+    worse: with RUNNER_TEMP cleaned, the owned file is gone, so it reads any stream as ours. In
+    EVENT mode the verdict is UNKNOWN, so it would stop the church stream every time it starts.
+    So both helpers are bound to their job through `scripts/ci/job-owner.ps1`:
+    - the starting step records the job's Runner.Worker (pid + start ticks, a parent-chain walk);
+    - the helper reads that record ONCE at its start;
+    - when that process is gone, the helper ends. The heartbeat first releases ITS own lease
+      (captured at start; it never touches a newer lease id in the file) and writes the lost
+      file, so a live job with a false "gone" fails at Release.
+    - The watchdog exits WITHOUT any OBS stop (`Invoke-ProgramAudioOrphanExit`). It makes ONE
+      attempt to cut the dead job's CI-event delivery, never the retry loop: the runner may
+      already be starting the next job. From then on it writes only `program-audio-orphan.log`,
+      because a breach line in the next job's RUNNER_TEMP would refuse that job's start. The
+      job check runs before the heartbeat write in every loop.
+    - The verifier pins all of this: the exit sits right under `if (Test-ProgramAudioJobEnded)`,
+      it makes no OBS stop and no retry, the orphan flag is set before the cut, and no
+      scripts/ci file except job-owner.ps1 names `CI_JOB_OWNER_PID`.
+    - No Runner.Worker found on GitHub prints a `::warning::`.
+
+    `CI_JOB_OWNER_PID` replaces the walk in the mock tests; no workflow may set it (the
+    verify_program_audio_guard knob check). Any NEW detached helper must take the same record.
   - On a breach it writes the marker FIRST, then POSTs `/api/v1/obs/stop-stream`. That POST
     only QUEUES a command (`obs.rs`: 200 = queued). So the watchdog re-POSTs until
     `GET /api/v1/obs/status` reports `connected:true, streaming:false` three times in a

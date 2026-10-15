@@ -45,7 +45,13 @@
 #
 # All state is job-scoped in $env:RUNNER_TEMP (the same place obs-stream.ps1 keeps
 # its records), so the steps of one job share it and the next job starts clean.
-# The runner reaps the detached watchdog at job end even if the teardown never ran.
+# The runner reaps the detached watchdog at job end even if the teardown never ran. A
+# force-cancel kills Runner.Worker WITHOUT that cleanup (#349): the watchdog then ends
+# itself when its job's Runner.Worker is gone (job-owner.ps1), and never stops a later
+# stream -- with RUNNER_TEMP cleaned it would read the church's stream as "ours". On
+# the way out it makes ONE attempt to cut the dead job's CI-event delivery (a CI event
+# only, never OBS), and from then on it writes only program-audio-orphan.log: the next
+# job reuses RUNNER_TEMP, and a stray breach line there would refuse its start.
 #
 # Knobs (env, for tests; no workflow may set them -- verify_program_audio_guard.py):
 #   PROGRAM_AUDIO_URL               default http://10.77.9.202:8891/program-audio.json
@@ -56,6 +62,7 @@
 #   PROGRAM_AUDIO_FLAP_WINDOW_S     default 60   (3 tolerated non-OK polls in it = breach)
 #   PROGRAM_AUDIO_API_BASE          default http://127.0.0.1:8910 (Restreamer's API)
 #   PROGRAM_AUDIO_DELIVERY_BUDGET_S default 120  (wait for the CI event's instances to go)
+#   CI_JOB_OWNER_PID                the job's owner process instead of its Runner.Worker
 # The job env's EVENT_NAME names the CI event whose delivery a breach cuts; only the
 # CI-owned E2E events ($script:ProgramAudioCiEvents) are ever touched.
 #
@@ -64,6 +71,8 @@
 # Tests: tests/ci/test_program_audio_guard.py (mock sampler + mock Restreamer API).
 
 param([switch]$RunWatchdog)
+
+. (Join-Path $PSScriptRoot "job-owner.ps1")
 
 $script:ProgramAudioGuardScript = $PSCommandPath
 # The operator request shared with camera-box (its E2E_PROGRAM_AUDIO_OPERATOR_MSG,
@@ -75,6 +84,10 @@ $script:ProgramAudioOkVerdicts = @("MEASUREMENT", "SILENT")
 # The CI-owned E2E events (ci.yml EVENT_NAME of the OBS-streaming jobs; pinned by
 # verify_program_audio_guard.py). A breach never cuts the delivery of any other event.
 $script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")
+# The watchdog's job (Read-JobOwnerRecord, once at its start); $null = unknown.
+$script:ProgramAudioJobOwner = $null
+# Set once the job is gone: every write goes to program-audio-orphan.log from then on.
+$script:ProgramAudioOrphaned = $false
 
 function Get-ProgramAudioKnob([string]$name, [int]$default) {
   # -as [int] yields $null (never throws) on a blank or non-numeric override; a $null
@@ -126,6 +139,8 @@ function Get-ProgramAudioPaths {
     Log       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.log"
     Out       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.out"
     Err       = Join-Path $env:RUNNER_TEMP "program-audio-watchdog.err"
+    Owner     = Join-Path $env:RUNNER_TEMP "program-audio-job-owner"
+    Orphan    = Join-Path $env:RUNNER_TEMP "program-audio-orphan.log"
   }
 }
 
@@ -429,11 +444,18 @@ function Invoke-ProgramAudioDeliveryCut {
 
 function Write-ProgramAudioLog([string]$text) {
   $p = Get-ProgramAudioPaths
-  "$(Get-ProgramAudioStamp) $text" | Out-File -FilePath $p.Log -Encoding ascii -Append
+  $file = $p.Log
+  if ($script:ProgramAudioOrphaned) { $file = $p.Orphan }
+  "$(Get-ProgramAudioStamp) $text" | Out-File -FilePath $file -Encoding ascii -Append
 }
 
 function Add-ProgramAudioBreachLine([string]$text) {
   $p = Get-ProgramAudioPaths
+  if ($script:ProgramAudioOrphaned) {
+    # The job is gone; RUNNER_TEMP may already be the next job's (#349).
+    Write-ProgramAudioLog "breach line: $text"
+    return
+  }
   "$(Get-ProgramAudioStamp) $text" | Out-File -FilePath $p.Breach -Encoding ascii -Append
   Write-ProgramAudioLog $text
 }
@@ -486,6 +508,11 @@ function Invoke-ProgramAudioBreachStop {
   $confirmed = $false
   $cutDone = $false
   while ($true) {
+    # Job check first: once the job is gone RUNNER_TEMP may be the next job's (#349).
+    if (Test-ProgramAudioJobEnded) {
+      Invoke-ProgramAudioOrphanExit "mid-breach, OBS stop not confirmed"
+      return
+    }
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     if (-not (Test-ProgramAudioStreamOwned)) {
       Add-ProgramAudioBreachLine "our stream already ended (marker false) -- not stopping a session that is not ours"
@@ -509,6 +536,10 @@ function Invoke-ProgramAudioBreachStop {
     if ($stopped) {
       # Watch until our stream is over; back to the stop loop if OBS streams again.
       while ($true) {
+        if (Test-ProgramAudioJobEnded) {
+          Invoke-ProgramAudioOrphanExit "after the confirmed stop"
+          return
+        }
         Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
         if (-not (Test-ProgramAudioStreamOwned)) {
           if (-not $cutDone) { Invoke-ProgramAudioDeliveryCutUntilDone }
@@ -531,18 +562,44 @@ function Invoke-ProgramAudioBreachStop {
   }
 }
 
+# #349: the job that started the watchdog is gone (a force-cancel: no teardown, no job-end
+# cleanup). Nothing of that job is live any more, so nothing may be stopped as "ours".
+function Test-ProgramAudioJobEnded {
+  return (Test-JobOwnerGone $script:ProgramAudioJobOwner)
+}
+
+# The watchdog's exit once its job is gone. Never an OBS stop: a later stream is not the
+# job's. ONE bounded attempt to cut the dead job's CI-event delivery (a force-cancel
+# leaves the E2E event delivering to YouTube/FB unguarded); Invoke-ProgramAudioDeliveryCut
+# refuses any event that is not a CI-owned E2E event. One attempt, not the retry loop:
+# the runner may already be starting the next job, which re-activates that event.
+function Invoke-ProgramAudioOrphanExit([string]$why) {
+  $script:ProgramAudioOrphaned = $true
+  Write-ProgramAudioLog "job ended without its teardown (Runner.Worker pid $($script:ProgramAudioJobOwner.Id) gone): $why -- no OBS stop, a later stream is not this job's"
+  $done = Invoke-ProgramAudioDeliveryCut
+  Write-ProgramAudioLog "orphan exit: CI-event delivery cut done=$done -- watchdog exits"
+}
+
 # The detached watchdog's body (program-audio-guard.ps1 -RunWatchdog).
 function Invoke-ProgramAudioWatchdogLoop {
   $ErrorActionPreference = "Stop"
   $p = Get-ProgramAudioPaths
   $poll = Get-ProgramAudioKnob "PROGRAM_AUDIO_POLL_S" 10
-  Write-ProgramAudioLog "watchdog up (pid $PID, poll ${poll}s, $(Get-ProgramAudioUrl))"
+  $script:ProgramAudioJobOwner = Read-JobOwnerRecord $p.Owner
+  $ownerNote = "job owner unknown"
+  if ($script:ProgramAudioJobOwner) { $ownerNote = "job's Runner.Worker pid $($script:ProgramAudioJobOwner.Id)" }
+  Write-ProgramAudioLog "watchdog up (pid $PID, poll ${poll}s, $(Get-ProgramAudioUrl), $ownerNote)"
   $tolerated = $null
   # ROZHODNUTE 2026-10-07 (3rd): 3+ tolerated non-OK polls within ANY flap window
   # (60 s) are a breach even when never two in a row -- a flapping classifier fails closed.
   $flapWindow = Get-ProgramAudioKnob "PROGRAM_AUDIO_FLAP_WINDOW_S" 60
   $flaps = @()
   while ($true) {
+    # Job check first: once the job is gone RUNNER_TEMP may be the next job's (#349).
+    if (Test-ProgramAudioJobEnded) {
+      Invoke-ProgramAudioOrphanExit "no breach"
+      return
+    }
     Write-ProgramAudioFile $p.Heartbeat "$(Get-ProgramAudioNow)"
     $why = Read-ProgramAudioVerdict
     $tolerable = [bool]($why -and (Test-ProgramAudioTolerable $why))
@@ -617,6 +674,7 @@ function Start-ProgramAudioWatchdog {
     return
   }
   Remove-Item -LiteralPath $p.Heartbeat -ErrorAction SilentlyContinue
+  $bound = Write-JobOwnerRecord $p.Owner
   $hostExe = (Get-Process -Id $PID).Path
   $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$($script:ProgramAudioGuardScript)`" -RunWatchdog"
   if ($PSVersionTable.PSEdition -eq "Desktop") {
@@ -629,7 +687,7 @@ function Start-ProgramAudioWatchdog {
   Write-ProgramAudioFile $p.Pid "$($wd.Id) $($wd.StartTime.ToUniversalTime().Ticks)"
   for ($i = 0; $i -lt 30; $i++) {
     if (Test-Path -LiteralPath $p.Heartbeat) {
-      Write-Host "[program-audio] watchdog running (pid $($wd.Id), polls $(Get-ProgramAudioUrl))"
+      Write-Host "[program-audio] watchdog running (pid $($wd.Id), polls $(Get-ProgramAudioUrl), $bound)"
       return
     }
     if ($wd.HasExited) { break }

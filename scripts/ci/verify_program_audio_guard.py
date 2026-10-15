@@ -23,7 +23,8 @@ this file pins their WIRING, which no runtime test can see:
       - after the OBS stop, an `if: always()` teardown stops the watchdog and then
         asserts no breach;
       - no watchdog / check / teardown step is continue-on-error;
-  * no workflow sets a PROGRAM_AUDIO_* knob (they exist for the mock test only);
+  * no workflow sets a PROGRAM_AUDIO_* knob or CI_JOB_OWNER_PID (they exist for the mock
+    tests only; the latter would bind the detached helpers to the wrong process, #349);
   * the obs-scripts-test job runs the guard's mock test.
 
 The checks parse the YAML (job/step structure), so the step that runs this file can
@@ -170,8 +171,12 @@ def knob_errors(wf_name: str, wf: dict) -> list[str]:
     errs = []
 
     def scan(label: str, obj: object) -> None:
-        if obj and "PROGRAM_AUDIO_" in yaml.safe_dump(obj):
+        text = yaml.safe_dump(obj) if obj else ""
+        if "PROGRAM_AUDIO_" in text:
             errs.append(f"{wf_name} {label}: sets a PROGRAM_AUDIO_* knob (test-only; CI must use the real sampler)")
+        if "CI_JOB_OWNER_PID" in text:
+            errs.append(f"{wf_name} {label}: sets CI_JOB_OWNER_PID (test-only; a detached helper must end "
+                        "with its job's Runner.Worker, #349)")
 
     scan("(workflow env)", wf.get("env"))
     for jn, job in (wf.get("jobs") or {}).items():
@@ -211,6 +216,12 @@ CUT_FN = "Invoke-ProgramAudioDeliveryCut"
 CUT_CALLER = "Invoke-ProgramAudioBreachStop"
 # The bounded retry once our stream is over; itself only called from the breach path.
 CUT_RETRY = "Invoke-ProgramAudioDeliveryCutUntilDone"
+# #349: the watchdog's exit once its job is gone (a force-cancel). It may make ONE cut
+# attempt and must never stop OBS; it is called only right under `if (Test-ProgramAudioJobEnded) {`.
+ORPHAN_EXIT = "Invoke-ProgramAudioOrphanExit"
+ORPHAN_GUARDED = re.compile(r"if \(Test-ProgramAudioJobEnded\) \{\s*" + re.escape(ORPHAN_EXIT) + r"\b")
+OWNER_OVERRIDE = "CI_JOB_OWNER_PID"
+OWNER_LIB = "job-owner.ps1"
 CI_EVENTS = re.compile(r'(?m)^\$script:ProgramAudioCiEvents = @\((?P<names>[^)\n]*)\)\s*$')
 CI_GATE = re.compile(r'if \(\$script:ProgramAudioCiEvents -cnotcontains \$name\) \{[^}]*?return \$true\s*\}', re.S)
 
@@ -232,11 +243,21 @@ def check_breach_api(root: Path, event_names: set[str]) -> list[str]:
         found = [owner_at(spans, c) for c in calls if not re.match(r"function\s", code[max(0, c - 9):c + 1])]
         return [c for c in found if c != fn]
 
-    for fn, allowed in ((CUT_FN, {CUT_CALLER, CUT_RETRY}), (CUT_RETRY, {CUT_CALLER})):
+    for fn, allowed in ((CUT_FN, {CUT_CALLER, CUT_RETRY, ORPHAN_EXIT}), (CUT_RETRY, {CUT_CALLER}),
+                        (ORPHAN_EXIT, {CUT_CALLER, "Invoke-ProgramAudioWatchdogLoop"})):
         callers = callers_of(fn)
         if not callers or any(c not in allowed for c in callers):
             errs.append(f"{GUARD}: {fn} may only be called from {sorted(allowed)} (the breach path); "
                         f"callers: {callers}")
+    orphan_calls = [c for c in callers_of(ORPHAN_EXIT)]
+    if len(orphan_calls) != len(ORPHAN_GUARDED.findall(code)):
+        errs.append(f"{GUARD}: every {ORPHAN_EXIT} call must sit right under `if (Test-ProgramAudioJobEnded) {{` "
+                    "(the watchdog's exit once its job is gone, #349)")
+    orphan = next((code[a:b] for n, a, b in spans if n == ORPHAN_EXIT), "")
+    flag, cut = orphan.find("$script:ProgramAudioOrphaned = $true"), orphan.find(CUT_FN)
+    if not orphan or "Invoke-ProgramAudioStop" in orphan or CUT_RETRY in orphan or flag < 0 or cut < flag:
+        errs.append(f"{GUARD}: {ORPHAN_EXIT} must never stop OBS, makes ONE cut attempt (no retry loop), and sets "
+                    "$script:ProgramAudioOrphaned before it (its writes then stay out of the next job's RUNNER_TEMP)")
     body = next((code[a:b] for n, a, b in spans if n == CUT_FN), "")
     gate = CI_GATE.search(body)
     https = [i for i in (body.find("Invoke-RestMethod"), body.find("Invoke-WebRequest"),
@@ -255,9 +276,12 @@ def check_breach_api(root: Path, event_names: set[str]) -> list[str]:
         errs.append(f"{GUARD}: $script:ProgramAudioCiEvents {sorted(listed)} must equal the OBS-streaming jobs' "
                     f"EVENT_NAME {sorted(event_names)} (only CI-owned events may ever be cut)")
     for f in sorted((root / SCRIPTS / "ci").glob("*.ps1")):
+        text = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
+        if f.name != OWNER_LIB and OWNER_OVERRIDE in text:
+            errs.append(f"scripts/ci/{f.name}: names {OWNER_OVERRIDE} (test-only; a detached helper must end with its "
+                        "job's Runner.Worker, #349)")
         if f.name == GUARD.name:
             continue
-        text = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
         for api in BREACH_API:
             if api in text:
                 errs.append(f"scripts/ci/{f.name}: `{api}` is allowed only in {GUARD} {CUT_FN}")
@@ -350,6 +374,8 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      # Dedicated event", "PROGRAM_AUDIO_* knob"),
     ("a run block relaxes the freshness limit", "          Start-ProgramAudioWatchdog",
      "          $env:PROGRAM_AUDIO_MAX_AGE_S = '3600'\n          Start-ProgramAudioWatchdog", "PROGRAM_AUDIO_* knob"),
+    ("a job binds the detached helpers to another process", "          Start-ProgramAudioWatchdog",
+     "          $env:CI_JOB_OWNER_PID = '4'\n          Start-ProgramAudioWatchdog", "sets CI_JOB_OWNER_PID"),
     ("the FB job's event is renamed (not in the CI list)", '      EVENT_NAME: "E2E-FB-Test"',
      '      EVENT_NAME: "Nedelna bohosluzba"', "must equal the OBS-streaming"),
     ("a streaming job loses its EVENT_NAME", '      EVENT_NAME: "E2E-FB-Test"\n', "",
@@ -379,6 +405,14 @@ GUARD_MUTATIONS: list[tuple[str, str, str, str]] = [
      "has no hard time bound"),
     ("the non-CI refusal is gone", "  if ($script:ProgramAudioCiEvents -cnotcontains $name) {", "  if ($false) {",
      "must REFUSE a non-CI EVENT_NAME"),
+    ("the orphan exit stops OBS", "  $done = Invoke-ProgramAudioDeliveryCut\n",
+     "  $null = Invoke-ProgramAudioStop\n  $done = Invoke-ProgramAudioDeliveryCut\n", "must never stop OBS"),
+    ("the orphan exit retries the cut", "  $done = Invoke-ProgramAudioDeliveryCut\n",
+     "  Invoke-ProgramAudioDeliveryCutUntilDone\n  $done = $true\n", "may only be called from"),
+    ("the orphan flag is set after the cut", "  $script:ProgramAudioOrphaned = $true\n", "",
+     "sets $script:ProgramAudioOrphaned before it"),
+    ("the watchdog exits as an orphan while its job lives", '      Write-ProgramAudioLog "ok"',
+     '      Write-ProgramAudioLog "ok"\n      Invoke-ProgramAudioOrphanExit "x"', "must sit right under"),
     ("a non-CI event is added to the CI list", '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test")',
      '$script:ProgramAudioCiEvents = @("E2E-Test", "E2E-FB-Test", "Nedelna bohosluzba")', "must equal the OBS-streaming"),
 ]
@@ -431,6 +465,8 @@ def self_test(root: Path) -> int:
               GUARD: real[GUARD].replace('"E2E-FB-Test")', '"Nedelna bohosluzba")', 1)}, "must all start with `E2E-`")
     run_case("another scripts/ci file cuts a delivery", {Path(EXTRA_SCRIPT[0]): EXTRA_SCRIPT[1]},
              "is allowed only in")
+    run_case("a script binds the detached helpers to another process",
+             {Path("scripts/ci/bind-anything.ps1"): "$env:CI_JOB_OWNER_PID = '4'\n"}, "names CI_JOB_OWNER_PID")
     if failures:
         print("SELF-TEST FAILED:")
         for f in failures:
