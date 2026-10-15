@@ -353,6 +353,9 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                         wants_file.try_set(true);
                         status.try_set("stránka chce súbor".into());
                     }
+                    Some("file-chooser-closed") => {
+                        wants_file.try_set(false);
+                    }
                     Some("file-done") => {
                         let name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
                         wants_file.try_set(false);

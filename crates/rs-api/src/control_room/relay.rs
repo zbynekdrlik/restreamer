@@ -557,6 +557,17 @@ pub async fn relay_room(
                         *unacked.lock().unwrap_or_else(|p| p.into_inner()) = Some(session_id);
                     }
                     PageOut::Url(u) => {
+                        // A new document: a file chooser of the old one is gone.
+                        let had = chooser.lock().unwrap_or_else(|p| p.into_inner()).take();
+                        if had.is_some() {
+                            tracing::info!(
+                                "control rooms: tab {main_frame} navigated; its file chooser is gone"
+                            );
+                            let m = json!({ "t": "file-chooser-closed" }).to_string();
+                            if to_client.send(AxMessage::Text(m.into())).is_err() {
+                                break;
+                            }
+                        }
                         // A cross-site navigation swaps the renderer, and the
                         // screencast stops with the old one: start it again,
                         // in the viewer's viewport.
@@ -649,7 +660,20 @@ pub async fn relay_room(
                 continue;
             }
             if v["t"] == "file" {
-                let reply = put_file(&v, &uploads, &chooser, &call, &tab);
+                // Decoding and writing up to 20 MB must not hold up the relay.
+                let (uploads, chooser, call, tab) = (
+                    uploads.clone(),
+                    Arc::clone(&chooser),
+                    call.clone(),
+                    tab.clone(),
+                );
+                let reply = tokio::task::spawn_blocking(move || {
+                    put_file(&v, &uploads, &chooser, &call, &tab)
+                })
+                .await
+                .unwrap_or_else(
+                    |e| json!({ "t": "file-error", "error": format!("interná chyba ({e})") }),
+                );
                 if to_viewer
                     .send(AxMessage::Text(reply.to_string().into()))
                     .is_err()

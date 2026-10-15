@@ -78,7 +78,12 @@ paths:
     Otherwise the file is dropped at (x, y) with `Input.dispatchDragEvent`
     (dragEnter/dragOver/drop, `data.files`).
   - The relay answers `{t:file-done,name,how}` or `{t:file-error,error}`. The room
-    WebSocket allows 32 MB messages for this.
+    WebSocket allows 32 MB messages AND 32 MB frames: a browser sends each message as one
+    frame, and tungstenite's 16 MiB frame default dropped the room on a file over ~12 MB.
+  - A main-frame navigation ends a pending chooser (its input is gone with the old
+    document): the relay sends `{t:file-chooser-closed}` and the room hides the bar.
+  - Decoding and writing a file run in `spawn_blocking`, so a 20 MB upload never stalls
+    the frames.
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.
