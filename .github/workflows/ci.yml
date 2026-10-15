@@ -7135,6 +7135,10 @@ jobs:
           $statusUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health,is_master,stream_id,dash_preview_url}"
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
+          $sawDash = $false
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobe)) { throw "FAILED: ffmpeg/ffprobe not found next to $ffmpegPath" }
           $poll = 0
           while ((Get-Date) -lt $liveDeadline) {
             try {
@@ -7154,8 +7158,34 @@ jobs:
               break
             }
             Write-Host "fb_verify: poll $poll FB ingest_streams.stream_health not yet populated (status=$($info.status))"
+            # Second proof of a decode (.claude/skills/facebook-streaming): FB's DASH preview is
+            # transcoded FROM our RTMP, so a frame pulled from it shows FB decoded our H.264.
+            # From 2026-10-15 ~09:50Z FB left stream_health empty on every run although the
+            # source (encoder settings byte-identical) and the pusher were unchanged.
+            $dash = $null
+            if ($ingest -and $ingest.Count -gt 0) { $dash = $ingest[0].dash_preview_url }
+            if ($dash -and $poll -ge 4 -and ($poll % 4) -eq 0) {
+              $frame = Join-Path $env:RUNNER_TEMP "fb-dash-frame.jpg"
+              $ffErr = Join-Path $env:RUNNER_TEMP "fb-dash-ffmpeg.err"
+              Remove-Item $frame, $ffErr -ErrorAction SilentlyContinue
+              $ffArgs = "-hide_banner -loglevel error -y -rw_timeout 15000000 -i `"$dash`" -frames:v 1 -q:v 2 `"$frame`""
+              $ff = Start-Process -FilePath $ffmpegPath -ArgumentList $ffArgs -NoNewWindow -PassThru -RedirectStandardError $ffErr
+              if (-not $ff.WaitForExit(60000)) { $ff.Kill(); Write-Host "fb_verify: DASH frame pull timed out after 60 s" }
+              if ((Test-Path $frame) -and (Get-Item $frame).Length -gt 1000) {
+                $dim = (& $ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 $frame 2>&1 | Out-String).Trim()
+                Write-Host "::warning::FB left ingest_streams.stream_health empty, but its DASH preview (transcoded from our RTMP) decoded a frame ($dim, $((Get-Item $frame).Length) bytes)"
+                $sawDash = $true
+                break
+              }
+              $why = if (Test-Path $ffErr) { ((Get-Content $ffErr -Tail 2) -join " ") -replace "https?://\S+", "<url>" } else { "" }
+              Write-Host "fb_verify: no frame from the DASH preview yet (ffmpeg exit $($ff.ExitCode)) $why"
+            }
             Start-Sleep -Seconds 15
             $poll += 1
+          }
+          if ($sawDash) {
+            Write-Host "FB-side GATE: FB decoded the rust-pusher feed (proved by a frame of its DASH preview)"
+            return
           }
           if (-not $sawHealth) {
             # What FB knows about the broadcast (URLs and keys never printed).

@@ -70,6 +70,20 @@ For each CI push that runs `e2e-fb-push-stream-lan`:
 
 **Definition of done** for FB PR: CI fully green + dashboard green + 4h soak green + CI FB auto-verification green. First-preview observation is 25%, not done.
 
+### `stream_health` can stay empty while FB decodes (2026-10-15)
+
+From ~09:50Z on 2026-10-15, FB left `ingest_streams.stream_health` empty on every CI
+run. The ingest stream existed (`is_master`, `dash_preview_url` present), while the
+source encoder (byte-identical in the OBS log) and the pusher code were unchanged; at
+06:22Z the same setup reported health at poll 0. So the CI FB-side gate accepts EITHER
+proof:
+- `stream_health` with bitrate, fps and width;
+- a frame pulled with ffmpeg from the `dash_preview_url` (tried every 4th poll from
+  poll 4). It prints a `::warning::` with the frame size.
+
+The dash URL and the stream key are never printed; the key is `::add-mask::`ed at
+creation. On a final failure the gate dumps status and every ingest stream.
+
 ## Visual Verification (when operator wants to SEE the stream)
 
 UNPUBLISHED broadcasts are NOT viewable via the public producer URL. Pull a frame from FB's own DASH transcode instead:
