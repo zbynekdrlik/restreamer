@@ -948,6 +948,95 @@ def pre_start_refuses_foreign_at_once(job: Env, st: MockState, srv: MockServer) 
     return probs
 
 
+def owner_process() -> subprocess.Popen:
+    """Stands in for the job's Runner.Worker (CI_JOB_OWNER_PID): killing it is a force-cancel."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+
+
+def orphan_log(job: Env) -> str:
+    f = job.path("program-audio-orphan.log")
+    return f.read_text(encoding="ascii") if f.exists() else ""
+
+
+def wd_orphan_never_stops_a_later_stream(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # #349: a force-cancel kills Runner.Worker without the job-end cleanup. The orphaned
+    # watchdog must not live on and stop the next stream on the rig (the church's: in
+    # camera-box's EVENT mode the sampler answers UNKNOWN, which would read as a breach).
+    # On its way out it cuts the dead job's CI-event delivery ONCE, and never stops OBS.
+    owner = owner_process()
+    try:
+        job.env["CI_JOB_OWNER_PID"] = str(owner.pid)
+        p = job.run("Start-ProgramAudioWatchdog")
+        if p.returncode != 0:
+            return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+        pid = job.watchdog_pid()
+        probs = []
+        # While the job lives, the watchdog guards (a false "job gone" would exit here).
+        if not wait_for(lambda: "ok" in job.path("program-audio-watchdog.log").read_text(encoding="ascii"), 10):
+            probs.append("the watchdog never polled ok while its job was alive")
+        if not (pid and alive(pid)):
+            return probs + ["the watchdog exited while its job was alive"]
+        owner.kill()
+        owner.wait()
+        if not wait_for(lambda: not alive(pid), 10):
+            probs.append("the watchdog outlived its job")
+        st.sampler = json_reply(sample("UNKNOWN", markers_decoded=0, marker_chain=0))
+        time.sleep(3)
+        if st.stops:
+            probs.append(f"stopped OBS after its job ended ({len(st.stops)} stop calls)")
+        if set(st.delivery_stops) != {CI_EVENT["id"]} or set(st.deactivates) != {CI_EVENT["id"]}:
+            probs.append(f"the dead job's CI-event delivery was not cut (only): delivery_stops={st.delivery_stops} "
+                         f"deactivates={st.deactivates}")
+        if job.path("program-audio-breach.txt").exists():
+            probs.append("the orphan wrote a breach file (the next job's start would refuse on it)")
+        text = orphan_log(job)
+        if "job ended without its teardown" not in text or "orphan exit" not in text:
+            probs.append(f"program-audio-orphan.log does not say why the watchdog exited: {text!r}")
+        return probs
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+
+
+def wd_orphan_mid_breach_cuts_then_exits(job: Env, st: MockState, srv: MockServer) -> list[str]:
+    # The job dies while the watchdog is still asking for a stop (never confirmed): it
+    # finishes the CI event's delivery cut, then exits instead of stopping OBS forever.
+    owner = owner_process()
+    try:
+        job.env["CI_JOB_OWNER_PID"] = str(owner.pid)
+        st.stop_status = [503]
+        st.sampler = json_reply(sample("FOREIGN"))
+        p = job.run("Start-ProgramAudioWatchdog")
+        if p.returncode != 0:
+            return [f"start exit {p.returncode}: {p.stdout}{p.stderr}"]
+        pid = job.watchdog_pid()
+        if not wait_breach(job, "stop NOT confirmed yet", 20):
+            return ["no unconfirmed-stop line"]
+        owner.kill()
+        owner.wait()
+        probs = []
+        if not wait_for(lambda: not alive(pid), 15):
+            probs.append("the watchdog kept stopping OBS after its job ended")
+        stops = len(st.stops)
+        time.sleep(2.5)
+        if len(st.stops) != stops:
+            probs.append("stop calls continued after the watchdog should have exited")
+        if set(st.delivery_stops) != {CI_EVENT["id"]} or set(st.deactivates) != {CI_EVENT["id"]}:
+            probs.append(f"the CI event's delivery was not cut (only): delivery_stops={st.delivery_stops} "
+                         f"deactivates={st.deactivates}")
+        if "job ended without its teardown" not in orphan_log(job):
+            probs.append("program-audio-orphan.log does not record why the stop loop ended")
+        if "job ended" in job.path("program-audio-breach.txt").read_text(encoding="ascii"):
+            probs.append("the orphan kept writing the breach file after its job was gone")
+        a = job.run("Assert-NoProgramAudioBreach")
+        if a.returncode != 1:
+            probs.append("the breach no longer fails the job")
+        return probs
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+
+
 WATCHDOG_CASES = [
     ("watchdog: clean program -> polls, no stop, clean teardown", wd_clean_run_stays_quiet),
     ("watchdog: music starts (FOREIGN) -> marker, ONE stop call, exit, assert fails", wd_foreign_stops_stream),
@@ -983,6 +1072,9 @@ WATCHDOG_CASES = [
     ("watchdog: stale heartbeat -> assert fails (hung)", wd_hung_watchdog_fails),
     ("watchdog: never started -> teardown is a no-op", wd_never_started),
     ("watchdog: no RUNNER_TEMP -> refuses to start", wd_no_runner_temp),
+    ("orphan: the job died (force-cancel) -> exits, never stops a later stream", wd_orphan_never_stops_a_later_stream),
+    ("orphan: the job died mid-breach -> CI delivery cut, then exits (no endless OBS stops)",
+     wd_orphan_mid_breach_cuts_then_exits),
 ]
 
 
