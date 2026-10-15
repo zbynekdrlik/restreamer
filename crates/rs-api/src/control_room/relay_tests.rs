@@ -165,6 +165,11 @@ async fn relay_streams_frames_and_forwards_input() {
                 _ => {}
             }
         }
+        // The dashboard drew the frame: only now may Chrome send the next.
+        client
+            .send(TgMessage::Text(json!({"t": "drawn"}).to_string().into()))
+            .await
+            .unwrap();
         let click = json!({"t": "m", "type": "mousePressed", "x": 5, "y": 6, "button": "left", "clickCount": 1});
         client
             .send(TgMessage::Text(click.to_string().into()))
@@ -202,6 +207,7 @@ async fn relay_streams_frames_and_forwards_input() {
             "Runtime.addBinding",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.evaluate",
+            "Page.setInterceptFileChooserDialog",
             "Page.bringToFront",
             "Page.startScreencast",
             "Page.screencastFrameAck",
@@ -720,4 +726,74 @@ async fn a_copy_in_the_page_reaches_the_dashboard() {
             .any(|r| r["method"] == "Runtime.evaluate" && r["params"]["expression"] == src),
         "the hook also runs in the page already open"
     );
+}
+
+#[test]
+fn reload_reloads_the_page_in_chrome() {
+    // F5 sent as a key never reloads: Chrome handles it in the browser UI,
+    // which a CDP key event does not reach.
+    let (m, p) = client_to_cdp(&json!({"t": "reload"})).unwrap();
+    assert_eq!(m, "Page.reload");
+    assert_eq!(p, json!({"ignoreCache": false}));
+    let (m, p) = client_to_cdp(&json!({"t": "reload", "hard": true})).unwrap();
+    assert_eq!(m, "Page.reload");
+    assert_eq!(p, json!({"ignoreCache": true}));
+}
+
+/// Chrome sends the next screencast frame only after the last one was
+/// acked. The relay acks once the dashboard DREW the frame, so a slow viewer
+/// (a seek or a playing video in the room: a flood of 2560x1600 frames) gets
+/// frames at its own pace instead of an ever-growing queue (stream-pp,
+/// 2026-10-14: the room froze on a YouTube seek and on opening a tab).
+#[tokio::test]
+async fn a_frame_is_acked_only_after_the_dashboard_drew_it() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page(seen_tx, false).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let run = async {
+        loop {
+            if let TgMessage::Binary(_) = client.next().await.unwrap().unwrap() {
+                break;
+            }
+        }
+        // Not drawn yet: no ack, however long the viewer takes.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut early = Vec::new();
+        while let Ok(r) = seen.try_recv() {
+            early.push(r["method"].as_str().unwrap_or_default().to_string());
+        }
+        assert!(
+            !early.iter().any(|m| m == "Page.screencastFrameAck"),
+            "acked before the dashboard drew the frame: {early:?}"
+        );
+        // A second "drawn" with no frame pending acks nothing more.
+        for _ in 0..2 {
+            client
+                .send(TgMessage::Text(json!({"t": "drawn"}).to_string().into()))
+                .await
+                .unwrap();
+        }
+        let ack = loop {
+            let r = seen.recv().await.unwrap();
+            if r["method"] == "Page.screencastFrameAck" {
+                break r;
+            }
+        };
+        assert_eq!(ack["params"]["sessionId"], 42);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut later = Vec::new();
+        while let Ok(r) = seen.try_recv() {
+            later.push(r["method"].as_str().unwrap_or_default().to_string());
+        }
+        assert!(
+            !later.iter().any(|m| m == "Page.screencastFrameAck"),
+            "one frame, one ack: {later:?}"
+        );
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("relay hung");
 }

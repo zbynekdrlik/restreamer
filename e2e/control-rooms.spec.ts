@@ -85,6 +85,14 @@ test("active event: tabs per destination, a room shows the screencast and forwar
   });
   expect(pixel[0]).toBeGreaterThan(200); // the red test frame was drawn
   expect(pixel[2]).toBeLessThan(60);
+  // ... and reported as drawn: the relay lets Chrome send the next frame only
+  // then, so a playing video never floods a slow viewer.
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: { t: string }) => i.t === "drawn").length;
+    })
+    .toBe(1);
 
   // Mouse and keyboard go back to the box-hosted Chrome.
   await canvas.click({ position: { x: 20, y: 20 } });
@@ -232,5 +240,106 @@ test("a copy in the room reaches the operator's clipboard; Ctrl+C asks the page 
   await page.getByTestId("cr-clip-copy").click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(url);
 
+  expect(unexpected(consoleMessages)).toEqual([]);
+});
+
+// #399: thumbnails into a room. A page's file chooser shows a bar with the
+// operator's own file picker; a file dropped on the room or an image pasted
+// into it goes to the page as {t:"file"} with its bytes.
+test("files go into a room: the page's file chooser, a drop and a pasted image", async ({ page, request }) => {
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+  const files = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs
+      .filter((i: { t: string }) => i.t === "file")
+      .map((i: { name: string; b64: string; x?: number; y?: number }) => ({
+        name: i.name,
+        b64: i.b64,
+        placed: typeof i.x === "number" && typeof i.y === "number",
+      }));
+  };
+  const send = (msg: object) => request.post(`${API}/_test/control-rooms/send`, { data: { target: "T11", msg } });
+
+  // "Upload thumbnail" in Studio: the page asks for a file.
+  await expect(page.getByTestId("cr-file-bar")).toHaveCount(0);
+  await send({ t: "file-chooser", mode: "selectSingle" });
+  await expect(page.getByTestId("cr-file-bar")).toBeVisible();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  await page.getByTestId("cr-file-input").setInputFiles({ name: "thumb.png", mimeType: "image/png", buffer: png });
+  await expect.poll(files).toEqual([{ name: "thumb.png", b64: png.toString("base64"), placed: true }]);
+  await send({ t: "file-done", name: "thumb.png", how: "chooser" });
+  await expect(page.getByTestId("cr-room-status")).toHaveText("vložené: thumb.png");
+  await expect(page.getByTestId("cr-file-bar")).toHaveCount(0);
+
+  // The page navigated away with its chooser open: the bar goes.
+  await send({ t: "file-chooser", mode: "selectSingle" });
+  await expect(page.getByTestId("cr-file-bar")).toBeVisible();
+  await send({ t: "file-chooser-closed" });
+  await expect(page.getByTestId("cr-file-bar")).toHaveCount(0);
+
+  // A file dropped on the room.
+  await page.getByTestId("cr-canvas").evaluate((c) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([1, 2])], "drop.jpg", { type: "image/jpeg" }));
+    const r = c.getBoundingClientRect();
+    for (const type of ["dragover", "drop"]) {
+      c.dispatchEvent(new DragEvent(type, { dataTransfer: dt, clientX: r.left + 30, clientY: r.top + 30, bubbles: true, cancelable: true }));
+    }
+  });
+  await expect.poll(async () => (await files()).map((f: { name: string }) => f.name)).toEqual(["thumb.png", "drop.jpg"]);
+
+  // An image pasted from the operator's clipboard.
+  await page.getByTestId("cr-canvas").focus();
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([9])], "paste.png", { type: "image/png" }));
+    document.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await expect.poll(async () => (await files()).map((f: { name: string }) => f.name)).toEqual([
+    "thumb.png",
+    "drop.jpg",
+    "paste.png",
+  ]);
+  expect((await files()).every((f: { placed: boolean }) => f.placed)).toBe(true);
+
+  // The relay refused one: the operator reads why.
+  await send({ t: "file-error", error: "súbor je väčší ako 20 MB" });
+  await expect(page.getByTestId("cr-room-status")).toHaveText("súbor sa nevložil: súbor je väčší ako 20 MB");
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});
+
+test("a room's page is reloaded from its button, F5 and Ctrl+R", async ({ page, request }) => {
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+  const reloads = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t: string }) => i.t === "reload").length;
+  };
+  const keys = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t: string; key?: string }) => i.t === "k" && (i.key === "F5" || i.key === "r")).length;
+  };
+
+  await page.getByTestId("cr-reload").click();
+  await expect.poll(reloads).toBe(1);
+  await expect(page.getByTestId("cr-room-status")).toHaveText("obnovujem stránku…");
+  await page.getByTestId("cr-canvas").click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press("F5");
+  await expect.poll(reloads).toBe(2);
+  await page.keyboard.press("Control+r");
+  await expect.poll(reloads).toBe(3);
+  // They reload the room's page, not the dashboard, and are not sent as keys.
+  await expect(page.getByTestId("control-room")).toBeVisible();
+  expect(await keys()).toBe(0);
   expect(unexpected(consoleMessages)).toEqual([]);
 });

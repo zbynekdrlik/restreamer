@@ -1235,6 +1235,33 @@ jobs:
           FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
           check_job "e2e-obs-youtube-test" "$YT_BLOCK"
           check_job "e2e-fb-push-stream-lan" "$FB_BLOCK"
+          # ... and TAKE the lease between that wait and the start, and release it in
+          # an always() step after the OBS stop (camera-box contract, #349).
+          check_hold() {
+            block="$2"
+            acq_ln=$(echo "$block" | grep -nE -- 'rig-lease-hold\.ps1 -Action Acquire' | head -1 | cut -d: -f1)
+            start_ln=$(echo "$block" | grep -nE 'obs-stream\.ps1 -Action Start' | head -1 | cut -d: -f1)
+            stop_ln=$(echo "$block" | grep -nE 'obs-stream\.ps1 -Action Stop' | tail -1 | cut -d: -f1)
+            rel_ln=$(echo "$block" | grep -nE -- 'rig-lease-hold\.ps1 -Action Release' | tail -1 | cut -d: -f1)
+            if [ -z "$acq_ln" ] || [ -z "$start_ln" ] || [ "$acq_ln" -ge "$start_ln" ]; then
+              echo "ERROR: $1 does not take the rig lease (rig-lease-hold.ps1 -Action Acquire) before its OBS start (#349)."
+              exit 1
+            fi
+            if [ -z "$rel_ln" ] || [ -z "$stop_ln" ] || [ "$rel_ln" -le "$stop_ln" ]; then
+              echo "ERROR: $1 does not release the rig lease after its OBS stop (#349)."
+              exit 1
+            fi
+            if [ "$(echo "$block" | sed -n "$((rel_ln-5)),${rel_ln}p" | grep -c "if: always() && env.RIG_LEASE_HELD == 'true'")" -ne 1 ]; then
+              echo "ERROR: $1's rig lease release is not an always() step on RIG_LEASE_HELD (#349)."
+              exit 1
+            fi
+            if [ "$(echo "$block" | grep -cE 'RIG_LEASE_TOKEN: [$][{][{] secrets[.]RIG_LEASE_TOKEN [}][}]')" -lt 2 ]; then
+              echo "ERROR: $1's rig lease steps do not get the RIG_LEASE_TOKEN secret (#349)."
+              exit 1
+            fi
+          }
+          check_hold "e2e-obs-youtube-test" "$YT_BLOCK"
+          check_hold "e2e-fb-push-stream-lan" "$FB_BLOCK"
           # Both lease checks of a job share ONE wait budget (the first records the
           # deadline in GITHUB_ENV). A per-step RIG_LEASE_BUDGET_S made the second
           # check give up after 10 min while camera-box held the rig for 30 more,
@@ -1711,6 +1738,8 @@ jobs:
         run: python tests/ci/test_program_audio_guard.py
       - name: "Run the rig-lease wait against a mock camera-box lease (#349)"
         run: python tests/ci/test_rig_lease_wait.py
+      - name: "Run the rig-lease hold (acquire/heartbeat/release) against a mock lease API (#349)"
+        run: python tests/ci/test_rig_lease_hold.py
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -3617,6 +3646,17 @@ jobs:
             throw "FAILED: Event not fully activated: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
           }
           Write-Host "Stream started: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
+
+      # #349: TAKE camera-box's shared rig lease for as long as this job streams, so its
+      # rig-busy gate sees a named holder, not an anonymous OBS stream. Waits on a hold
+      # inside the job's one lease budget; a detached heartbeat keeps it until the
+      # release step after the OBS stop (scripts/ci/rig-lease-hold.ps1).
+      - name: "Rig lease: take it before StartStream (#349)"
+        shell: powershell
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
@@ -6045,6 +6085,15 @@ jobs:
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
 
+      # #349: release the rig lease after the OBS stop (also when a step failed).
+      - name: "Rig lease: release it (#349)"
+        if: always() && env.RIG_LEASE_HELD == 'true'
+        shell: powershell
+        timeout-minutes: 2
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Release
+
       # #379: always, even when the job never streamed (both calls are then no-ops).
       - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
         if: always()
@@ -6598,6 +6647,17 @@ jobs:
         timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
+      # #349: TAKE camera-box's shared rig lease for as long as this job streams, so its
+      # rig-busy gate sees a named holder, not an anonymous OBS stream. Waits on a hold
+      # inside the job's one lease budget; a detached heartbeat keeps it until the
+      # release step after the OBS stop (scripts/ci/rig-lease-hold.ps1).
+      - name: "Rig lease: take it before StartStream (#349)"
+        shell: powershell
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
+
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
       # not recording), then StartStream with its response checked. Writes
@@ -7150,6 +7210,15 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+
+      # #349: release the rig lease after the OBS stop (also when a step failed).
+      - name: "Rig lease: release it (#349)"
+        if: always() && env.RIG_LEASE_HELD == 'true'
+        shell: powershell
+        timeout-minutes: 2
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Release
 
       # #379: always, even when the job never streamed (both calls are then no-ops).
       - name: "Program-audio guard: stop the watchdog + final breach check (#379)"

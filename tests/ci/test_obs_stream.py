@@ -373,6 +373,13 @@ AUDIO_FOREIGN = dict(AUDIO_OK, verdict="FOREIGN", rms_dbfs=-14.2)
 FREE = {"schema": 1, "held": False, "stale": False}
 HELD = {"schema": 1, "held": True, "stale": False, "ttl_s": 600,
         "holder": {"job": "full-path-e2e", "run_url": "https://example.invalid/run/1"}}
+# #349: the lease this job took itself (rig-lease-hold.ps1 Acquire, before Start).
+OUR_RUN, OUR_JOB = "4242", "e2e-fb-push-stream-lan"
+HELD_BY_US = {"schema": 1, "held": True, "stale": False, "ttl_s": 600,
+              "holder": {"repo": "restreamer", "run_id": OUR_RUN, "job": OUR_JOB,
+                         "run_url": f"https://github.com/zbynekdrlik/restreamer/actions/runs/{OUR_RUN}"}}
+HELD_BY_OUR_OTHER_JOB = {"schema": 1, "held": True, "stale": False, "ttl_s": 600,
+                         "holder": dict(HELD_BY_US["holder"], job="e2e-obs-youtube-test")}
 START = ["-Action", "Start"]
 STOP = ["-Action", "Stop"]
 ASSERT = ["-Action", "AssertNotStreaming"]
@@ -401,6 +408,10 @@ CASES = [
          lease=FREE),
     Case("start: rig lease held -> no start, no marker", OS_, START, ObsState(), 1, "holds the rig lease", [],
          lease=HELD, forbid_requests={"StartStream", "GetVersion"}),
+    Case("start: the lease is this job's own -> starts", OS_, START, ObsState(), 0, "kbps", ["true"],
+         lease=HELD_BY_US, require_requests={"StartStream"}, may_change_state=True),
+    Case("start: the lease is another job's of the same run -> no start", OS_, START, ObsState(), 1,
+         "holds the rig lease", [], lease=HELD_BY_OUR_OTHER_JOB, forbid_requests={"StartStream", "GetVersion"}),
     # #349 (main run on e3272259): the job's last lease check read the rig free, camera-box took
     # it 2 s later, and Start failed the job. Start waits for the holder up to the job's deadline.
     Case("start: camera-box took the rig after the last check -> waits for it, then starts", OS_, START,
@@ -476,6 +487,9 @@ CASES = [
     Case("republish: rig lease held with job budget left -> refuses at once", OS_, REPUBLISH, ObsState(streaming=True), 1,
          "holds the rig lease", ["false"], lease=HELD, deadline_in_s=600, forbid_requests={"StartStream"}, may_stop=True,
          may_change_state=True),
+    Case("republish: under this job's own lease -> restarts", OS_, REPUBLISH, ObsState(streaming=True), 0,
+         "Measured dead air", ["false", "true"], lease=HELD_BY_US, may_stop=True, may_change_state=True,
+         require_requests={"StartStream"}),
     Case("republish: rig lease held at the restart -> marker false", OS_, REPUBLISH, ObsState(streaming=True), 1,
          "holds the rig lease", ["false"], lease=HELD, forbid_requests={"StartStream"}, may_stop=True,
          may_change_state=True),
@@ -547,6 +561,8 @@ def run_case(case: Case) -> list[str]:
             env["RIG_LEASE_DEADLINE_EPOCH"] = str(int(time.time() + case.deadline_in_s))
         env.update({
             "RIG_LEASE_POLL_S": "1",
+            "GITHUB_RUN_ID": OUR_RUN,
+            "GITHUB_JOB": OUR_JOB,
             "OBS_WS_HOST": "127.0.0.1",
             "OBS_WS_PORT": str(obs.port if obs else _closed_port()),
             "OBS_WS_PASSWORD": case.password,

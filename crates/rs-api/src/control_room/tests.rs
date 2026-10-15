@@ -829,3 +829,15 @@ mod with_fake_chrome {
         assert!(!read_map(dir.path()).tab.contains_key("T1"));
     }
 }
+
+/// #399: the box Chrome reads uploaded thumbnails from the data dir, next to its
+/// profiles (the room WebSocket handler hands this path to the relay).
+#[test]
+fn uploads_live_in_the_browser_profiles_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let rooms = ControlRooms::new(dir.path());
+    assert_eq!(
+        rooms.uploads_dir(),
+        dir.path().join("browser-profiles").join("uploads")
+    );
+}

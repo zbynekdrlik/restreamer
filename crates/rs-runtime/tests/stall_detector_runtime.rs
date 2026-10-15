@@ -544,10 +544,15 @@ fn a_block_of_700_ms_or_more_writes_a_process_stall_row() {
 #[test]
 fn a_stall_storm_writes_one_row_then_an_aggregate() {
     let dir = tempfile::tempdir().unwrap();
+    // The three ~900 ms blocks plus their recovery must all land inside the
+    // interval, however slow the runner. 5 s did not hold on a loaded Windows
+    // runner (PR #400 run 38648507762: stall 3 came after the interval).
+    let interval = Duration::from_secs(20);
     let cfg = StallDetectorConfig {
-        audit_min_interval: Duration::from_secs(5),
+        audit_min_interval: interval,
         ..production_tiers(dir.path())
     };
+    let storm = std::time::Instant::now();
     let log_path = cfg.log_path.clone();
     let (audit_tx, mut audit_rx) = mpsc::channel::<AuditRow>(16);
     let (rt, mut guard, _) =
@@ -557,12 +562,19 @@ fn a_stall_storm_writes_one_row_then_an_aggregate() {
         rt.block_on(async { std::thread::sleep(Duration::from_millis(900)) });
         drive_until_stall_ends(&rt, &log_path, n, Duration::from_millis(150));
     }
+    let took = storm.elapsed();
+    assert!(
+        took < interval,
+        "runner too slow for this test: the storm took {took:?}, the interval is {interval:?}"
+    );
     let first = audit_rx.try_recv().expect("the first stall is audited");
     assert_eq!(first.detail["tier"], "major");
     assert!(audit_rx.try_recv().is_err(), "stalls 2 and 3 are held back");
 
     let aggregate = rt
-        .block_on(async { tokio::time::timeout(Duration::from_secs(10), audit_rx.recv()).await })
+        .block_on(async {
+            tokio::time::timeout(interval + Duration::from_secs(10), audit_rx.recv()).await
+        })
         .expect("the aggregate row once the interval has passed")
         .expect("audit channel open");
     guard.stop();

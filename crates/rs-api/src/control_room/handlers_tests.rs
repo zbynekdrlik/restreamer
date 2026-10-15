@@ -250,3 +250,57 @@ async fn ws_relays_a_live_tab_and_refuses_an_unknown_one() {
         chrome.methods()
     );
 }
+
+/// #399 review: a thumbnail near the 20 MB cap travels base64 (~27 MB) in ONE
+/// WebSocket frame. The room route must accept a frame that big, or the whole
+/// room connection drops with no file-error (tungstenite's frame default is 16 MiB).
+#[tokio::test]
+async fn the_room_route_takes_a_20_mb_file_in_one_frame() {
+    use crate::control_room::fake_chrome::{FakeChrome, page};
+    use base64::Engine;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let chrome = FakeChrome::start().await;
+    chrome.set_targets(vec![page("T1", "C1", "https://studio.youtube.com/x")]);
+    let s = state(dir.path())
+        .await
+        .with_control_rooms(Arc::new(ControlRooms::with_browser(
+            dir.path(),
+            Browser::at(dir.path(), chrome.addr.clone()),
+        )));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, build_router(s)).await.unwrap() });
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/control-rooms/ws?target=T1"))
+            .await
+            .unwrap();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 20 * 1024 * 1024]);
+    let msg = serde_json::json!({"t": "file", "name": "big.png", "b64": b64, "x": 1, "y": 2});
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(Ok(m)) = ws.next().await {
+            if let Message::Text(t) = m {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["t"] == "file-done" || v["t"] == "file-error" {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .expect("no answer to the file within 30 s");
+    let done = done.expect("the room connection dropped on a 20 MB file");
+    assert_eq!(done["t"], "file-done", "{done}");
+    let stored: Vec<_> = std::fs::read_dir(dir.path().join("browser-profiles").join("uploads"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].metadata().unwrap().len(), 20 * 1024 * 1024);
+}

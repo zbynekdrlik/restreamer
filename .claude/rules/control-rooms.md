@@ -65,14 +65,43 @@ paths:
 - **Only `acct-*` profiles carry a session.** On stream-pp the spike's `dest-*`
   were never signed in. To check, count the `SID` (Google) or `c_user` (FB) rows
   in `<profile>/Cookies` with python's sqlite3 (the box has no `sqlite3` CLI).
+- **Files into a room (thumbnails, #399).** The relay turns on
+  `Page.setInterceptFileChooserDialog`. A `Page.fileChooserOpened` goes to the
+  dashboard as `{t:file-chooser}`, which shows a bar with a real `<input type=file>`:
+  an automatic picker needs a user gesture that WebKitGTK may not grant.
+  - The dashboard sends `{t:file,name,b64,x,y}` from the bar, from a drop on the canvas,
+    or from an image or file pasted with Ctrl+V.
+  - The relay caps it at 20 MB and makes the name one safe path component. It writes
+    the file to `<data_dir>/browser-profiles/uploads/<uuid>-<name>`; files older than
+    1 h are pruned on each upload.
+  - A pending chooser then gets `DOM.setFileInputFiles` on its `backendNodeId`.
+    Otherwise the file is dropped at (x, y) with `Input.dispatchDragEvent`
+    (dragEnter/dragOver/drop, `data.files`).
+  - The relay answers `{t:file-done,name,how}` or `{t:file-error,error}`. The room
+    WebSocket allows 32 MB messages AND 32 MB frames: a browser sends each message as one
+    frame, and tungstenite's 16 MiB frame default dropped the room on a file over ~12 MB.
+  - A main-frame navigation ends a pending chooser (its input is gone with the old
+    document): the relay sends `{t:file-chooser-closed}` and the room hides the bar.
+  - Decoding and writing a file run in `spawn_blocking`, so a 20 MB upload never stalls
+    the frames.
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.
+- **Frames are paced by the viewer.** Chrome sends the next screencast frame only after
+  the last one is acked. The relay acks when the dashboard reports `{t:drawn}` after
+  drawing, never on queueing: acking on queueing let a playing video (a YouTube seek, a
+  freshly opened tab) flood an unbounded queue, and the room froze (stream-pp,
+  2026-10-14).
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
-  `{t:copy}`, `history.back()`, http(s) `Page.navigate`, and `{t:size,w,h}`. Anything
-  else is dropped. Frames are JPEG binary messages.
+  `{t:copy}`, `{t:reload,hard?}` (`Page.reload`), `history.back()`, http(s)
+  `Page.navigate`, and `{t:size,w,h}`. Anything else is dropped. Frames are JPEG binary
+  messages.
+- **Reload.** F5 or Ctrl+R sent as a CDP key never reloads: Chrome handles them in the
+  browser UI, which `Input.dispatchKeyEvent` does not reach. The room catches F5, Ctrl+R
+  (Shift = skip the cache) and its "⟳ Obnoviť" button as `{t:reload}`, and keeps their
+  keyup local too. "↻" only reattaches the screencast.
 - **Copy out of a room.** A copy inside the box Chrome lands in Xvfb's clipboard, which
   the operator never sees. The relay installs `copy_hook_source()` (new documents AND the
   open one) plus the `Runtime.addBinding` `__restreamerCopy`. The hook reports a `copy`

@@ -343,6 +343,7 @@ pub struct ControlRooms {
     pub browser: Browser,
     accounts_path: PathBuf,
     tabs_path: PathBuf,
+    uploads_dir: PathBuf,
     tabs: std::sync::Mutex<TabMap>,
     /// One open at a time: two concurrent opens would each see the other's new
     /// tab as "theirs" (duplicate tabs, a tab mapped to the wrong endpoint).
@@ -359,10 +360,17 @@ impl ControlRooms {
         Self {
             browser,
             accounts_path: data_dir.join("control-rooms.json"),
+            uploads_dir: data_dir.join("browser-profiles").join("uploads"),
             tabs: std::sync::Mutex::new(read_json(&tabs_path)),
             open_lock: Mutex::new(()),
             tabs_path,
         }
+    }
+
+    /// Where files the operator puts into a room are written (#399); the
+    /// box Chrome reads them from there.
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.uploads_dir.clone()
     }
 
     pub fn accounts(&self) -> AccountsFile {
