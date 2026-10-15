@@ -5114,9 +5114,23 @@ jobs:
               if (-not $deathsByEp.ContainsKey($ep)) { $deathsByEp[$ep] = 0 }
               $deathsByEp[$ep] += 1
             }
+            # A TEST_FILE endpoint ('e2e fast') dials the VPS's in-process discard sink,
+            # whose xiu session drops a publisher idle >= 2 s; the fast keepalive starts at
+            # 2 s, so it reconnects every ~14 s by construction (.claude/rules/
+            # e2e-fast-endpoint.md). Since a peer-closed write is RemoteClosed with a 3 s
+            # floor (#368) that is ~60+ rows per window, none of them a platform cascade:
+            # logged, not gated. Every real YT/FB endpoint stays gated.
+            $testFile = @{}
+            foreach ($e in (Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 15)) {
+              if ($e.service_type -eq "TEST_FILE") { $testFile[[string]$e.alias] = $true }
+            }
             $failed = $false
             foreach ($k in $deathsByEp.Keys) {
               $cnt = $deathsByEp[$k]
+              if ($testFile.ContainsKey($k)) {
+                Write-Host "  deaths: $k -> $cnt (TEST_FILE discard sink, not gated)"
+                continue
+              }
               Write-Host "  deaths: $k -> $cnt"
               if ($cnt -gt $maxFbDeaths) {
                 Write-Host "FAILED: endpoint='$k' had $cnt rtmp_push_died audit rows in 15min window (limit $maxFbDeaths)"
@@ -5128,7 +5142,8 @@ jobs:
             }
           } catch {
             if ($_.Exception.Message -match "^FAILED:") { throw }
-            Write-Host "  audit death-rate query failed: $($_.Exception.Message)"
+            # An unreadable audit or endpoint list means the death rate was never checked.
+            throw "FAILED: death-rate check could not run: $($_.Exception.Message)"
           }
 
           Write-Host ""
