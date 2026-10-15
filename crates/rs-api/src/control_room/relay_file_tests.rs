@@ -280,3 +280,96 @@ async fn a_file_goes_into_the_chooser_then_a_second_one_is_dropped() {
         .await
         .expect("the relay never handled the files");
 }
+
+/// A fake page that opens a file chooser and then navigates away (the
+/// operator reloaded, or left the thumbnail dialog) before any file came.
+async fn fake_page_chooser_then_navigation(seen: mpsc::UnboundedSender<Value>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(TgMessage::Text(text))) = ws.next().await {
+            let req: Value = serde_json::from_str(&text).unwrap();
+            let _ = seen.send(req.clone());
+            ws.send(TgMessage::Text(
+                json!({"id": req["id"], "result": {}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            if req["method"] == "Page.setInterceptFileChooserDialog" {
+                for ev in [
+                    json!({"method": "Page.fileChooserOpened", "params": {
+                        "frameId": "T1", "mode": "selectSingle", "backendNodeId": 42}}),
+                    json!({"method": "Page.frameNavigated", "params": {"frame": {
+                        "id": "T1", "url": "https://studio.youtube.com/other"}}}),
+                ] {
+                    ws.send(TgMessage::Text(ev.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    });
+    addr
+}
+
+/// #399 review: a navigation ends the page's file chooser (its input is gone
+/// with the document). A later file is dropped, never set into the old input,
+/// and the room is told to hide its file bar.
+#[tokio::test]
+async fn a_navigation_ends_a_pending_file_chooser() {
+    let uploads = tempfile::tempdir().unwrap();
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_chooser_then_navigation(seen_tx).await;
+    let dir = uploads.path().to_path_buf();
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
+            let (cdp, dir) = (Cdp::new(page_addr.clone()), dir.clone());
+            async move {
+                ws.on_upgrade(move |s| {
+                    relay_room(
+                        s,
+                        cdp,
+                        "T1".into(),
+                        "https://start/".into(),
+                        Arc::new(|_| {}),
+                        dir,
+                    )
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let run = async {
+        next_text(&mut client, "file-chooser").await;
+        let closed = next_text(&mut client, "file-chooser-closed").await;
+        assert_eq!(closed, json!({"t": "file-chooser-closed"}));
+        let file =
+            json!({"t": "file", "name": "t.png", "b64": STANDARD.encode(b"PNG"), "x": 5, "y": 6});
+        client
+            .send(TgMessage::Text(file.to_string().into()))
+            .await
+            .unwrap();
+        let done = next_text(&mut client, "file-done").await;
+        assert_eq!(
+            done["how"], "drop",
+            "the file went into the dead chooser: {done}"
+        );
+        while let Ok(r) = seen.try_recv() {
+            assert_ne!(
+                r["method"], "DOM.setFileInputFiles",
+                "set into an input of the old page"
+            );
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the relay never handled the navigation");
+}

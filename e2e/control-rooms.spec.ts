@@ -276,6 +276,12 @@ test("files go into a room: the page's file chooser, a drop and a pasted image",
   await expect(page.getByTestId("cr-room-status")).toHaveText("vložené: thumb.png");
   await expect(page.getByTestId("cr-file-bar")).toHaveCount(0);
 
+  // The page navigated away with its chooser open: the bar goes.
+  await send({ t: "file-chooser", mode: "selectSingle" });
+  await expect(page.getByTestId("cr-file-bar")).toBeVisible();
+  await send({ t: "file-chooser-closed" });
+  await expect(page.getByTestId("cr-file-bar")).toHaveCount(0);
+
   // A file dropped on the room.
   await page.getByTestId("cr-canvas").evaluate((c) => {
     const dt = new DataTransfer();
