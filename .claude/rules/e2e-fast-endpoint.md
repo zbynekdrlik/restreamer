@@ -50,6 +50,11 @@ paths:
   with `Exists` (rescue pushers reuse the endpoint key) and its transceiver
   `receive_event_loop` spins at 100% CPU when the hub is dropped mid-publish.
   Pinned by `two_publishers_on_the_same_key_are_both_accepted`.
+- **The sustained gate's push-death limit (50 / 15 min) skips TEST_FILE endpoints.** The sink's
+  2 s idle drop makes `e2e fast` reconnect every ~14 s ("connection reset" / "Broken pipe").
+  Since #368 maps a peer-closed write to RemoteClosed with a 3 s floor, that is ~70-90 rows per
+  window (main run 38695461802: 76). The gate now logs them without counting them; real YT/FB
+  endpoints stay gated, and an unreadable audit fails the gate.
 - **xiu `ServerSession` drops a publisher idle >= 2 s** (hard-coded
   `read_timeout(2s)`). The fast keepalive bridge starts at 2 s
   (`FAST_KEEPALIVE_TRIGGER_SECS`), so a >= 2 s producer gap on a TEST_FILE

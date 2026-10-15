@@ -5114,9 +5114,23 @@ jobs:
               if (-not $deathsByEp.ContainsKey($ep)) { $deathsByEp[$ep] = 0 }
               $deathsByEp[$ep] += 1
             }
+            # A TEST_FILE endpoint ('e2e fast') dials the VPS's in-process discard sink,
+            # whose xiu session drops a publisher idle >= 2 s; the fast keepalive starts at
+            # 2 s, so it reconnects every ~14 s by construction (.claude/rules/
+            # e2e-fast-endpoint.md). Since a peer-closed write is RemoteClosed with a 3 s
+            # floor (#368) that is ~60+ rows per window, none of them a platform cascade:
+            # logged, not gated. Every real YT/FB endpoint stays gated.
+            $testFile = @{}
+            foreach ($e in (Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 15)) {
+              if ($e.service_type -eq "TEST_FILE") { $testFile[[string]$e.alias] = $true }
+            }
             $failed = $false
             foreach ($k in $deathsByEp.Keys) {
               $cnt = $deathsByEp[$k]
+              if ($testFile.ContainsKey($k)) {
+                Write-Host "  deaths: $k -> $cnt (TEST_FILE discard sink, not gated)"
+                continue
+              }
               Write-Host "  deaths: $k -> $cnt"
               if ($cnt -gt $maxFbDeaths) {
                 Write-Host "FAILED: endpoint='$k' had $cnt rtmp_push_died audit rows in 15min window (limit $maxFbDeaths)"
@@ -5128,7 +5142,8 @@ jobs:
             }
           } catch {
             if ($_.Exception.Message -match "^FAILED:") { throw }
-            Write-Host "  audit death-rate query failed: $($_.Exception.Message)"
+            # An unreadable audit or endpoint list means the death rate was never checked.
+            throw "FAILED: death-rate check could not run: $($_.Exception.Message)"
           }
 
           Write-Host ""
@@ -6560,6 +6575,23 @@ jobs:
           # rust pusher's URL builder produces the canonical
           # "rtmps://live-api-s.facebook.com:443/rtmp/<key>" URI.
           $title = "CI-restreamer-test-$($env:GITHUB_RUN_ID)"
+          # Our own leftovers: a cancelled run never reaches the always() delete, and its
+          # UNPUBLISHED live_video stays on the Page. List the Page's live videos, log the
+          # count per status, and delete CI ones older than 3 h (never anything else).
+          $listUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,title,status,creation_time&limit=100"
+          $page = Invoke-RestMethod -Uri $listUri -Method GET -TimeoutSec 30
+          $all = @($page.data)
+          $byStatus = ($all | Group-Object status | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ", "
+          Write-Host "FB Page live_videos (first 100): $($all.Count) [$byStatus]"
+          $cutoff = (Get-Date).ToUniversalTime().AddHours(-3)
+          foreach ($v in $all) {
+            if ($v.title -notlike "CI-restreamer-test-*") { continue }
+            if ($v.status -notin @("UNPUBLISHED", "LIVE_STOPPED", "SCHEDULED_UNPUBLISHED")) { continue }
+            if ([DateTime]::Parse($v.creation_time).ToUniversalTime() -gt $cutoff) { continue }
+            $delUri = "https://graph.facebook.com/v21.0/$($v.id)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)"
+            Invoke-RestMethod -Uri $delUri -Method DELETE -TimeoutSec 30 | Out-Null
+            Write-Host "deleted leftover CI live_video $($v.id) ($($v.title), $($v.status), $($v.creation_time))"
+          }
           $createUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&status=UNPUBLISHED&title=$title"
           $created = Invoke-RestMethod -Uri $createUri -Method POST -TimeoutSec 30
           if (-not $created.id) { throw "FB create_live_video failed (no id in response)" }
@@ -6575,7 +6607,15 @@ jobs:
             throw "stream_url does not match expected FB-<id>-0-<key> pattern: $streamUrl"
           }
           $streamKey = $matches[1]
-          Write-Host "FB stream_key parsed: $streamKey"
+          # The key is a credential: never in the (public) log, also not in later steps' env.
+          Write-Host "::add-mask::$streamKey"
+          # Restreamer pushes FB to rtmps://live-api-s.facebook.com:443/rtmp/<key>
+          # (rs-delivery endpoint_rtmp_url.rs). Log the host FB handed out, to see if it differs.
+          $ingest = ([uri]$streamUrl).GetLeftPart([UriPartial]::Authority)
+          Write-Host "FB stream_key parsed (len=$($streamKey.Length)); FB ingest host for it: $ingest"
+          if ($ingest -ne "rtmps://live-api-s.facebook.com:443") {
+            Write-Host "::warning::FB handed out ingest host $ingest, but restreamer pushes to rtmps://live-api-s.facebook.com:443"
+          }
 
           # Persist for later steps (cleanup / verification).
           "FB_LIVE_VIDEO_ID=$liveVideoId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -7092,9 +7132,13 @@ jobs:
           # 28.9, 1920x1080 within ~2 min of delivery_start.
           # Graph API ref: https://developers.facebook.com/docs/graph-api/reference/live-video/
           if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing -- fb_create step failed?" }
-          $statusUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health}"
+          $statusUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health,is_master,stream_id,dash_preview_url}"
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
+          $sawDash = $false
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobe)) { throw "FAILED: ffmpeg/ffprobe not found next to $ffmpegPath" }
           $poll = 0
           while ((Get-Date) -lt $liveDeadline) {
             try {
@@ -7114,10 +7158,50 @@ jobs:
               break
             }
             Write-Host "fb_verify: poll $poll FB ingest_streams.stream_health not yet populated (status=$($info.status))"
+            # Second proof of a decode (.claude/skills/facebook-streaming): FB's DASH preview is
+            # transcoded FROM our RTMP, so a frame pulled from it shows FB decoded our H.264.
+            # From 2026-10-15 ~09:50Z FB left stream_health empty on every run although the
+            # source (encoder settings byte-identical) and the pusher were unchanged.
+            $dash = $null
+            if ($ingest -and $ingest.Count -gt 0) { $dash = $ingest[0].dash_preview_url }
+            if ($dash -and $poll -ge 4 -and ($poll % 4) -eq 0) {
+              $frame = Join-Path $env:RUNNER_TEMP "fb-dash-frame.jpg"
+              $ffErr = Join-Path $env:RUNNER_TEMP "fb-dash-ffmpeg.err"
+              Remove-Item $frame, $ffErr -ErrorAction SilentlyContinue
+              $ffArgs = "-hide_banner -loglevel error -y -rw_timeout 15000000 -i `"$dash`" -frames:v 1 -q:v 2 `"$frame`""
+              $ff = Start-Process -FilePath $ffmpegPath -ArgumentList $ffArgs -NoNewWindow -PassThru -RedirectStandardError $ffErr
+              if (-not $ff.WaitForExit(60000)) { $ff.Kill(); Write-Host "fb_verify: DASH frame pull timed out after 60 s" }
+              if ((Test-Path $frame) -and (Get-Item $frame).Length -gt 1000) {
+                $dim = (& $ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 $frame 2>&1 | Out-String).Trim()
+                Write-Host "::warning::FB left ingest_streams.stream_health empty, but its DASH preview (transcoded from our RTMP) decoded a frame ($dim, $((Get-Item $frame).Length) bytes)"
+                $sawDash = $true
+                break
+              }
+              $why = if (Test-Path $ffErr) { ((Get-Content $ffErr -Tail 2) -join " ") -replace "https?://\S+", "<url>" } else { "" }
+              Write-Host "fb_verify: no frame from the DASH preview yet (ffmpeg exit $($ff.ExitCode)) $why"
+            }
             Start-Sleep -Seconds 15
             $poll += 1
           }
-          if (-not $sawHealth) { throw "FB-side GATE FAIL: ingest_streams.stream_health never populated within 15 min (FB never decoded our H.264)" }
+          if ($sawDash) {
+            Write-Host "FB-side GATE: FB decoded the rust-pusher feed (proved by a frame of its DASH preview)"
+            return
+          }
+          if (-not $sawHealth) {
+            # What FB knows about the broadcast (URLs and keys never printed).
+            try {
+              $last = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 15
+              $n = @($last.ingest_streams).Count
+              Write-Host "fb_verify: final: status=$($last.status), ingest_streams=$n"
+              foreach ($st in @($last.ingest_streams)) {
+                $h = if ($st.stream_health) { ($st.stream_health | ConvertTo-Json -Compress) } else { "(none)" }
+                Write-Host "fb_verify:   stream_id=$($st.stream_id) is_master=$($st.is_master) dash_preview=$([bool]$st.dash_preview_url) health=$h"
+              }
+            } catch {
+              Write-Host "fb_verify: final Graph read failed: $($_.Exception.Message)"
+            }
+            throw "FB-side GATE FAIL: ingest_streams.stream_health never populated within 15 min (FB never decoded our H.264)"
+          }
           Write-Host "FB-side GATE: FB confirmed real-time decode of rust-pusher feed"
 
       - name: "Program-audio breach check (#379)"
