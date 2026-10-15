@@ -1,6 +1,8 @@
 //! Error types surfaced by `RtmpPusher`. See spec §4.1 + §5.3.
 
+use bytesio::bytes_errors::{BytesWriteError, BytesWriteErrorValue};
 use bytesio::bytesio_errors::{BytesIOError, BytesIOErrorValue};
+use rtmp::chunk::errors::{PackError, PackErrorValue};
 use std::io;
 use thiserror::Error;
 
@@ -107,6 +109,14 @@ pub fn map_read_err(err: BytesIOError) -> PushError {
     }
 }
 
+/// Map an error from writing a chunk (xiu's `ChunkPacketizer::write_chunk`)
+/// onto a `PushError`. A write the upstream ended (reset, broken pipe, EOF:
+/// YouTube rotates its ingest connection every ~15 min) is `RemoteClosed`, as on
+/// the read side; any other write failure stays `IoError`.
+pub fn map_write_err(err: PackError) -> PushError {
+    PushError::IoError(io::Error::other(err.to_string()))
+}
+
 /// Whether to escalate the floor exponentially on consecutive same-class
 /// errors. `BadName` is fixed (operator must rotate the key); the rest follow
 /// today's exponential ×2 cap-at-300s policy.
@@ -139,6 +149,72 @@ pub fn is_exponential(err: &PushError) -> bool {
 mod tests {
     use super::*;
     use std::io;
+
+    // --- map_write_err (#368: a YouTube rotation seen on the WRITE side) ---
+
+    fn write_io(kind: io::ErrorKind) -> PackError {
+        PackError {
+            value: PackErrorValue::BytesWriteError(BytesWriteError {
+                value: BytesWriteErrorValue::BytesIOError(BytesIOError {
+                    value: BytesIOErrorValue::IOError(io::Error::from(kind)),
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_write_the_upstream_ended_is_remote_closed_with_the_short_floor() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::NotConnected,
+        ] {
+            let e = map_write_err(write_io(kind));
+            assert!(matches!(e, PushError::RemoteClosed(_)), "{kind:?} -> {e:?}");
+            assert_eq!(backoff_floor_ms(&e), Some(3_000), "{kind:?}");
+        }
+        let direct = PackError {
+            value: PackErrorValue::BytesWriteError(BytesWriteError {
+                value: BytesWriteErrorValue::IO(io::Error::from(io::ErrorKind::ConnectionReset)),
+            }),
+        };
+        assert!(matches!(map_write_err(direct), PushError::RemoteClosed(_)));
+        let none = PackError {
+            value: PackErrorValue::BytesWriteError(BytesWriteError {
+                value: BytesWriteErrorValue::BytesIOError(BytesIOError {
+                    value: BytesIOErrorValue::NoneReturn,
+                }),
+            }),
+        };
+        assert!(matches!(map_write_err(none), PushError::RemoteClosed(_)));
+    }
+
+    #[test]
+    fn any_other_write_failure_stays_an_io_error() {
+        for kind in [
+            io::ErrorKind::Other,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::OutOfMemory,
+        ] {
+            let e = map_write_err(write_io(kind));
+            assert!(
+                matches!(&e, PushError::IoError(io) if io.kind() == kind),
+                "{kind:?} -> {e:?}"
+            );
+        }
+        let header = PackError {
+            value: PackErrorValue::NotExistHeader,
+        };
+        assert!(matches!(map_write_err(header), PushError::IoError(_)));
+        let timeout = PackError {
+            value: PackErrorValue::BytesWriteError(BytesWriteError {
+                value: BytesWriteErrorValue::Timeout,
+            }),
+        };
+        assert!(matches!(map_write_err(timeout), PushError::IoError(_)));
+    }
 
     // --- backoff_floor_ms ---
 
