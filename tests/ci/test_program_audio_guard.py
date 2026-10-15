@@ -253,6 +253,11 @@ class Env:
         pid = self.watchdog_pid()
         if pid and alive(pid):
             os.kill(pid, signal.SIGTERM)
+            # On Windows the kill is TerminateProcess, which returns before the process
+            # has gone and let go of its files: the temp dir cleanup then hit
+            # program-audio-breach.txt "in use" (PR #400 run 38671328540).
+            if not wait_for(lambda: not alive(pid), 15):
+                raise RuntimeError(f"watchdog pid {pid} still alive 15 s after the kill")
 
 
 def alive(pid: int) -> bool:
