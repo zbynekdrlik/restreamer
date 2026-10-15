@@ -114,7 +114,36 @@ pub fn map_read_err(err: BytesIOError) -> PushError {
 /// YouTube rotates its ingest connection every ~15 min) is `RemoteClosed`, as on
 /// the read side; any other write failure stays `IoError`.
 pub fn map_write_err(err: PackError) -> PushError {
-    PushError::IoError(io::Error::other(err.to_string()))
+    let io_err = match err.value {
+        PackErrorValue::BytesWriteError(BytesWriteError {
+            value: BytesWriteErrorValue::IO(e),
+        }) => e,
+        PackErrorValue::BytesWriteError(BytesWriteError {
+            value: BytesWriteErrorValue::BytesIOError(BytesIOError { value }),
+        }) => match value {
+            BytesIOErrorValue::IOError(e) => e,
+            BytesIOErrorValue::NoneReturn => io::Error::from(io::ErrorKind::UnexpectedEof),
+            other => return PushError::IoError(io::Error::other(format!("write: {other}"))),
+        },
+        other => return PushError::IoError(io::Error::other(format!("write: {other}"))),
+    };
+    if peer_gone(io_err.kind()) {
+        PushError::RemoteClosed(io_err)
+    } else {
+        PushError::IoError(io_err)
+    }
+}
+
+/// The upstream ended the connection (as opposed to a local or unknown fault).
+fn peer_gone(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::NotConnected
+    )
 }
 
 /// Whether to escalate the floor exponentially on consecutive same-class

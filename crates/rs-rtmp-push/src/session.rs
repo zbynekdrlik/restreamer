@@ -285,7 +285,7 @@ impl Session {
             .packetizer
             .write_chunk(&mut chunk_info)
             .await
-            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())));
+            .map_err(crate::error::map_write_err);
         let elapsed_ms = write_start.elapsed().as_millis() as u64;
         if elapsed_ms >= 250 {
             tracing::warn!(
