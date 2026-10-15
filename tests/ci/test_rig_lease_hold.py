@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import os
 import subprocess
 import sys
@@ -32,6 +33,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci" / "rig-lease-hold.ps1"
 TOKEN = "test-token-349"
+LEASE_ID = "ab" * 16  # 32 hex chars, the shape the server issues
+FIELD_RULES = {
+    "repo": r"[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,100}",
+    "run_id": r"[A-Za-z0-9._-]{1,64}",
+    "run_url": r"https://[!-~]{1,300}",
+    "job": r"[A-Za-z0-9 ._:/()-]{1,100}",
+}
 CAMBOX = {"repo": "camera-box", "run_id": "1", "run_url": "https://github.com/zbynekdrlik/camera-box/actions/runs/1",
           "job": "full-path", "acquired_at": "x", "expected_release_at": "y"}
 
@@ -75,11 +83,20 @@ class MockLeaseApi:
         if auth != f"Bearer {TOKEN}":
             return 401, {"error": "unauthorized"}
         if path == "/rig-lease/acquire":
+            # The field rules of camera-box's scripts/rig_lease_write.py (ae584b2d0).
+            for name, pattern in FIELD_RULES.items():
+                if not isinstance(body.get(name), str) or not re.fullmatch(pattern, body[name], re.ASCII):
+                    return 400, {"error": "bad_field", "field": name}
+            if not isinstance(body.get("expected_secs"), int) or not 60 <= body["expected_secs"] <= 5400:
+                return 400, {"error": "bad_field", "field": "expected_secs"}
             held = self.held_for_s is None or time.monotonic() - self.start < self.held_for_s
             if held:
                 return 409, {"acquired": False, "holder": CAMBOX, "heartbeat_age_s": 3}
-            return 200, {"acquired": True, "lease_id": "L-1", "holder": body, "expected_release_at": "Z",
+            return 200, {"acquired": True, "lease_id": LEASE_ID, "holder": body, "expected_release_at": "Z",
                          "reclaimed": False}
+        if path in ("/rig-lease/heartbeat", "/rig-lease/release") and (
+                not isinstance(body.get("lease_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", body["lease_id"])):
+            return 400, {"error": "bad_field", "field": "lease_id"}
         if path == "/rig-lease/heartbeat":
             self.beats += 1
             if self.lose_after_beats is not None and self.beats >= self.lose_after_beats:
@@ -168,7 +185,7 @@ def case_free_acquire_beat_release(tmp: Path) -> list[str]:
         acq = [b for path, b, _ in api.requests if path == "/rig-lease/acquire"]
         r.check(len(acq) == 1, f"{len(acq)} acquire requests, want 1")
         if acq:
-            want = {"repo": "restreamer", "run_id": "4242", "job": "e2e-fb-push-stream-lan",
+            want = {"repo": "zbynekdrlik/restreamer", "run_id": "4242", "job": "e2e-fb-push-stream-lan",
                     "run_url": "https://github.com/zbynekdrlik/restreamer/actions/runs/4242", "expected_secs": 5400}
             r.check(acq[0] == want, f"acquire body {acq[0]}, want {want}")
         r.check(all(a == f"Bearer {TOKEN}" for _, _, a in api.requests), "a request without the bearer token")
@@ -178,11 +195,11 @@ def case_free_acquire_beat_release(tmp: Path) -> list[str]:
             time.sleep(0.2)
         r.check(api.beats >= 2, f"{api.beats} heartbeats after the acquire, want >= 2")
         beat_body = [b for path, b, _ in api.requests if path == "/rig-lease/heartbeat"]
-        r.check(bool(beat_body) and beat_body[0] == {"lease_id": "L-1"}, f"heartbeat body {beat_body[:1]}")
+        r.check(bool(beat_body) and beat_body[0] == {"lease_id": LEASE_ID}, f"heartbeat body {beat_body[:1]}")
         p = run("Release", env)
         r.check(p.returncode == 0, f"release exit {p.returncode}, want 0", p)
         rel = [b for path, b, _ in api.requests if path == "/rig-lease/release"]
-        r.check(rel == [{"lease_id": "L-1"}], f"release requests {rel}, want one with lease L-1")
+        r.check(rel == [{"lease_id": LEASE_ID}], f"release requests {rel}, want one with the acquired lease")
         beats_at_release = api.beats
         time.sleep(2.5)
         r.check(api.beats == beats_at_release, "the heartbeat kept beating after the release")

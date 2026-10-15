@@ -77,7 +77,8 @@ function Invoke-Acquire {
   $hold = if ($env:RIG_LEASE_HOLD_S) { [int]$env:RIG_LEASE_HOLD_S } else { 5400 }
   $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
   $body = @{
-    repo = "restreamer"
+    # owner/name: the server checks the holder's run state on GitHub with it.
+    repo = "$($env:GITHUB_REPOSITORY)"
     run_id = "$($env:GITHUB_RUN_ID)"
     run_url = $runUrl
     job = "$($env:GITHUB_JOB)"
