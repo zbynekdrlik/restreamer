@@ -1525,8 +1525,12 @@ jobs:
           # runs against real YouTube: 'e2e rtmp' backup connected and pushing
           # (>= 80 % of the primary's chunks) and no primary/backup *Mismatch*
           # configuration issue. The step is sed-extracted from the job (which
-          # lies after test-integrity), so this check cannot match itself.
-          STEP=$(sed -n '/^      - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"$/,/^      - name: "Program-audio breach check (#379)"$/p' "$WORKFLOW_FILE")
+          # lies after test-integrity), so this check cannot match itself. The
+          # start anchor is `^ *- name:` on purpose: the FULL indented step-name
+          # line must not appear in this file a second time, because
+          # verify_program_audio_guard.py's self-test splices its bad steps in
+          # front of the first occurrence of that line.
+          STEP=$(sed -n '/^ *- name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"$/,/^      - name: "Program-audio breach check (#379)"$/p' "$WORKFLOW_FILE")
           if [ -z "$STEP" ]; then
             echo "ERROR: the sustained YT gate step was not found (#368 anchor moved)."
             exit 1
