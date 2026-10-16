@@ -30,3 +30,13 @@ pub fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
         ServiceType::TestFile => format!("rtmp://{TEST_FILE_SINK_ADDR}/live/{stream_key}"),
     }
 }
+
+/// #368: the YouTube BACKUP ingest URL for `stream_key`, or `None` when the
+/// service has no backup ingest. YouTube documents a second ingest
+/// (`backupIngestionAddress`, the same key) that is fed IN PARALLEL with the
+/// primary: when the primary session drops, YouTube rolls viewers over to the
+/// backup instead of showing a gap.
+pub fn build_backup_rtmp_url(service_type: ServiceType, stream_key: &str) -> Option<String> {
+    let _ = (service_type, stream_key);
+    None
+}

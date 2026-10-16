@@ -179,6 +179,24 @@ mod tests {
         assert_eq!(stream, "test");
     }
 
+    /// #368: the YouTube BACKUP ingest carries `?backup=1` in the app path.
+    /// The app (and so the tcUrl) must keep the query, and the key stays the
+    /// stream name, exactly as OBS splits server + key.
+    #[test]
+    fn parse_youtube_backup_ingest_url_keeps_the_backup_query_in_the_app() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmp://b.rtmp.youtube.com/live2?backup=1/abcd-efgh").unwrap();
+        assert_eq!(scheme, Scheme::Rtmp);
+        assert_eq!(host, "b.rtmp.youtube.com");
+        assert_eq!(port, 1935);
+        assert_eq!(app, "live2?backup=1");
+        assert_eq!(stream, "abcd-efgh");
+        assert_eq!(
+            build_tc_url(scheme, &host, port, &app),
+            "rtmp://b.rtmp.youtube.com/live2?backup=1"
+        );
+    }
+
     #[test]
     fn rejects_non_rtmp_scheme() {
         assert!(parse_rtmp_url("http://host/live/test").is_err());

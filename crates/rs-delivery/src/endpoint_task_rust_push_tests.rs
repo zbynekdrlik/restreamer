@@ -242,6 +242,35 @@ fn build_rtmp_url_test_file_contains_key() {
 }
 
 // ---------------------------------------------------------------------------
+// #368: build_backup_rtmp_url -- YouTube's documented backup ingest (same
+// key, `b.rtmp.youtube.com/live2?backup=1`); every other service has none.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backup_rtmp_url_for_youtube_is_the_documented_backup_ingest() {
+    assert_eq!(
+        crate::endpoint_rtmp_url::build_backup_rtmp_url(ServiceType::YtRtmp, "abcd-efgh-ijkl"),
+        Some("rtmp://b.rtmp.youtube.com/live2?backup=1/abcd-efgh-ijkl".to_string())
+    );
+}
+
+#[test]
+fn backup_rtmp_url_is_none_for_every_other_service() {
+    for svc in [
+        ServiceType::Facebook,
+        ServiceType::Vimeo,
+        ServiceType::Instagram,
+        ServiceType::TestFile,
+    ] {
+        assert_eq!(
+            crate::endpoint_rtmp_url::build_backup_rtmp_url(svc, "k"),
+            None,
+            "{svc:?} has no backup ingest"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // emit_rtmp_push_died: verify the function actually pushes a row into the
 // AuditRing.  Kills the "replace function body with ()" mutant.
 // ---------------------------------------------------------------------------
