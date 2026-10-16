@@ -142,8 +142,7 @@ impl DiskCache {
         existing: Option<&Arc<DiskCache>>,
         event_id: &str,
     ) -> Option<Arc<DiskCache>> {
-        let _ = (existing, event_id);
-        None
+        existing.filter(|c| c.event_id == event_id).cloned()
     }
 }
 
