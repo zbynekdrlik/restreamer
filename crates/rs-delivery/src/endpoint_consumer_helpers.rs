@@ -516,7 +516,7 @@ pub(super) fn reset_after_rescue(
 ) {
     *flv_normalizer = FlvStreamNormalizer::new();
     *last_chunk_bytes = None;
-    let _ = telemetry; // RED skeleton
+    *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 }
 
 /// #368 review: how many re-sends one chunk may get. The first re-send runs
@@ -524,8 +524,7 @@ pub(super) fn reset_after_rescue(
 /// old session for a moment and reject it, so a re-send that ran on such a
 /// FAST reconnect gets one more try, after the short retry. Otherwise one.
 pub(super) fn resend_budget(first_resend_on_fast_reconnect: bool) -> u32 {
-    let _ = first_resend_on_fast_reconnect; // RED skeleton
-    1
+    if first_resend_on_fast_reconnect { 2 } else { 1 }
 }
 
 /// #368: push ONE chunk through `handle_rust_push`, and when that push failed
