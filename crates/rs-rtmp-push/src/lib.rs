@@ -19,7 +19,10 @@ mod url;
 pub use av_invariant::{
     AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantGuard, AvInvariantViolation,
 };
-pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err, may_lose_chunk};
+pub use error::{
+    FAST_RECONNECT_MIN_HEALTHY_MS, PushError, SHORT_RETRY_AFTER_FAST_MS, backoff_floor_ms,
+    is_exponential, map_read_err, may_lose_chunk, reconnect_delay_ms,
+};
 pub use pusher::RtmpPusher;
 pub use skew::{GuardMode, MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};

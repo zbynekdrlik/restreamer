@@ -389,6 +389,7 @@ pub(super) async fn handle_rust_push(
             }
             *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(
                 rs_rtmp_push::may_lose_chunk(&push_err),
+                false,
             );
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
@@ -460,7 +461,7 @@ pub(super) async fn handle_rust_push(
                 0,
             );
             // A hung write may have lost the chunk too: re-send it (#368).
-            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(true);
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(true, false);
             let timestamp_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

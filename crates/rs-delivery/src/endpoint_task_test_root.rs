@@ -10,6 +10,8 @@ mod disk_cache_stall_tests;
 mod fast_self_healing_tests;
 #[path = "endpoint_task_flv_tests.rs"]
 mod flv_tests;
+#[path = "endpoint_task_reconnect_tests.rs"]
+mod reconnect_tests;
 #[path = "rescue_behavioral_tests.rs"]
 mod rescue_behavioral_tests;
 #[path = "rescue_endpoint_loop_tests.rs"]

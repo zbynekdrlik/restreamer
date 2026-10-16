@@ -36,12 +36,27 @@ impl RtmpPushTelemetry {
     }
 
     /// Telemetry for the connect that follows a failed push. `resend_pending`
-    /// = the failed chunk must be pushed again on it (#368).
-    pub fn after_failure(resend_pending: bool) -> Self {
+    /// = the failed chunk must be pushed again on it (#368);
+    /// `follows_fast_retry` = this connect was made without any delay.
+    /// Skeleton: the fast-retry flag is not kept yet.
+    pub fn after_failure(resend_pending: bool, follows_fast_retry: bool) -> Self {
+        let _ = follows_fast_retry;
         Self {
             resend_pending,
             ..Self::new()
         }
+    }
+
+    /// #368: whether this connect was made immediately (0 ms) after a
+    /// healthy session closed. Skeleton: never.
+    pub fn follows_fast_retry(&self) -> bool {
+        false
+    }
+
+    /// #368: how long this connect has been HEALTHY (pushing media): ms since
+    /// its first successful chunk, 0 before any. Skeleton: always 0.
+    pub fn healthy_session_ms(&self) -> u64 {
+        0
     }
 
     /// Whether the failed chunk still has to be re-sent on this connect.
@@ -224,23 +239,49 @@ mod tests {
     // #368: the re-send flag of the connect after a failure.
     #[test]
     fn after_failure_carries_the_resend_flag_and_take_consumes_it_once() {
-        let mut t = RtmpPushTelemetry::after_failure(true);
+        let mut t = RtmpPushTelemetry::after_failure(true, false);
         assert!(t.resend_pending());
         assert!(t.take_resend_pending());
         assert!(!t.resend_pending(), "take must consume the flag");
         assert!(!t.take_resend_pending());
-        assert!(!RtmpPushTelemetry::after_failure(false).resend_pending());
+        assert!(!RtmpPushTelemetry::after_failure(false, false).resend_pending());
         assert!(!RtmpPushTelemetry::new().resend_pending());
         assert_eq!(
-            RtmpPushTelemetry::after_failure(true).bytes_sent(),
+            RtmpPushTelemetry::after_failure(true, false).bytes_sent(),
             0,
             "a failure starts a fresh connect"
         );
     }
 
     #[test]
+    fn after_failure_carries_the_fast_retry_flag() {
+        assert!(RtmpPushTelemetry::after_failure(false, true).follows_fast_retry());
+        assert!(!RtmpPushTelemetry::after_failure(true, false).follows_fast_retry());
+        assert!(!RtmpPushTelemetry::new().follows_fast_retry());
+        let v = RtmpPushTelemetry::after_failure(false, true).snapshot(&[]);
+        assert_eq!(
+            v["follows_fast_retry"], true,
+            "the death row says whether that connect followed a fast retry"
+        );
+        let v = RtmpPushTelemetry::new().snapshot(&[]);
+        assert_eq!(v["follows_fast_retry"], false);
+    }
+
+    #[test]
+    fn healthy_session_ms_counts_from_the_first_pushed_chunk() {
+        let mut t = RtmpPushTelemetry::new_for_test_at(0);
+        t.advance_clock_for_test(Duration::from_millis(5_000));
+        assert_eq!(t.healthy_session_ms(), 0, "nothing pushed yet");
+        t.note_send("flv_bytes", 100);
+        t.advance_clock_for_test(Duration::from_millis(61_000));
+        t.note_send("flv_bytes", 100);
+        t.advance_clock_for_test(Duration::from_millis(500));
+        assert_eq!(t.healthy_session_ms(), 61_500);
+    }
+
+    #[test]
     fn clear_resend_pending_drops_the_flag() {
-        let mut t = RtmpPushTelemetry::after_failure(true);
+        let mut t = RtmpPushTelemetry::after_failure(true, false);
         t.clear_resend_pending();
         assert!(!t.resend_pending());
     }
