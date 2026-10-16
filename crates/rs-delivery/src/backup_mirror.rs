@@ -411,8 +411,18 @@ pub(crate) fn feed_backup_ahead<P>(
     rx: &mut mpsc::Receiver<PrefetchedChunk>,
     lookahead: &mut Option<PrefetchedChunk>,
 ) {
-    // RED skeleton: no look-ahead yet.
-    let _ = (tee, current, current_offered, rx, lookahead);
+    if !tee.mirrors() {
+        return;
+    }
+    if !current_offered {
+        tee.offer_ahead(current);
+    }
+    if lookahead.is_none()
+        && let Ok(next) = rx.try_recv()
+    {
+        tee.offer_ahead(&next.data);
+        *lookahead = Some(next);
+    }
 }
 
 impl<P: Pushable> TeePusher<P> {

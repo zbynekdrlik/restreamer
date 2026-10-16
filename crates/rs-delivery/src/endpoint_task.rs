@@ -151,6 +151,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_zero_byte_deaths: u32 = 0;
     // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
     let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+    // #368 review: the next chunk, already offered to the YouTube backup
+    // ahead of its primary push (`feed_backup_ahead`).
+    let mut lookahead: Option<PrefetchedChunk> = None;
     // Phase 1 (#176): per-consumer rate limiter + clocks for DiskCachePushSample.
     let push_audit_rl = rs_core::audit::RateLimiter::new();
     let push_ctx = PushSampleCtx::new(&audit_ring, &push_audit_rl, &alias, delivery_delay_ms);
@@ -304,7 +307,19 @@ async fn consumer_task<P: OutputProcessFactory>(
         // fresh-reconnect rescue clip stays anchored to the last real chunk
         // (`keepalive_escalate_after`), so rescue never engages slower than
         // before #124.
-        let chunk = if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
+        let from_lookahead = lookahead.is_some();
+        let chunk = if let Some(c) = lookahead.take() {
+            // SAME buffer bookkeeping as a received chunk, now that it is due.
+            let dur = c.duration_ms.max(0) as u64;
+            let current = buffer_state
+                .buffer_duration_ms
+                .load(AtomicOrdering::Relaxed);
+            buffer_state
+                .buffer_duration_ms
+                .store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+            last_delivered_chunk_id = c.chunk_id;
+            c
+        } else if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
             tokio::select! {
                 maybe_chunk = rx.recv() => {
                     match maybe_chunk {
@@ -546,6 +561,15 @@ async fn consumer_task<P: OutputProcessFactory>(
             // leaving the pusher with raw tag bytes that fail the FLV
             // signature check at offset 0.
             if let Some(ref mut pusher) = rust_pusher {
+                // #368 review: the backup holds the next chunk BEFORE the
+                // primary pushes (and maybe reconnects and re-sends) this one.
+                crate::backup_mirror::feed_backup_ahead(
+                    pusher,
+                    &chunk.data,
+                    from_lookahead,
+                    &mut rx,
+                    &mut lookahead,
+                );
                 // #368: `push_chunk` re-sends a chunk whose push failed, once.
                 let action = push_chunk(
                     pusher,
