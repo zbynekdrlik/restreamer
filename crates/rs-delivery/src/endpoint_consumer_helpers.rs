@@ -503,6 +503,31 @@ pub(super) async fn handle_rust_push(
     }
 }
 
+/// #368 review: after an outage rescue recovered, the live pusher is a NEW
+/// one (`run_outage_rescue` rebuilt it). Forget what the consumer knew about
+/// the old session: the normalizer state, the freeze frame from before the
+/// gap, and the push telemetry. Its session health decides the next
+/// reconnect delay, so a stale first send would turn a quick close of the
+/// new session into a 0 ms reconnect (past the one-minute anti-hammer rule).
+pub(super) fn reset_after_rescue(
+    flv_normalizer: &mut FlvStreamNormalizer,
+    last_chunk_bytes: &mut Option<Arc<Vec<u8>>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
+) {
+    *flv_normalizer = FlvStreamNormalizer::new();
+    *last_chunk_bytes = None;
+    let _ = telemetry; // RED skeleton
+}
+
+/// #368 review: how many re-sends one chunk may get. The first re-send runs
+/// on a 0 ms reconnect after a healthy session; YouTube may still hold the
+/// old session for a moment and reject it, so a re-send that ran on such a
+/// FAST reconnect gets one more try, after the short retry. Otherwise one.
+pub(super) fn resend_budget(first_resend_on_fast_reconnect: bool) -> u32 {
+    let _ = first_resend_on_fast_reconnect; // RED skeleton
+    1
+}
+
 /// #368: push ONE chunk through `handle_rust_push`, and when that push failed
 /// in a way that may have lost the chunk upstream (`may_lose_chunk`, or a
 /// write timeout), push the SAME chunk once more on the fresh session.
@@ -512,8 +537,9 @@ pub(super) async fn handle_rust_push(
 /// hole on top of the reconnect gap. A chunk starts on a keyframe and the
 /// pusher's new mapping keeps the wire timestamps monotonic (base = last
 /// output + 1), so the re-send is a clean continuation of the new session.
-/// At most one re-send per chunk: a second failure moves on, so a dead
-/// target still progresses through its queue.
+/// At most `resend_budget` re-sends per chunk (one, or two when the first ran
+/// on a fast reconnect): then it moves on, so a dead target still
+/// progresses through its queue.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn push_chunk(
     pusher: &mut impl Pushable,
@@ -531,7 +557,7 @@ pub(super) async fn push_chunk(
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
-    let action = handle_rust_push(
+    let mut action = handle_rust_push(
         pusher,
         data,
         chunk_id,
@@ -548,34 +574,37 @@ pub(super) async fn push_chunk(
         flv_normalizer,
     )
     .await;
-    if !(matches!(action, RustPushAction::Continue) && telemetry.resend_pending()) {
-        return action;
+    for resend in 1..=resend_budget(telemetry.follows_fast_retry()) {
+        if !(matches!(action, RustPushAction::Continue) && telemetry.resend_pending()) {
+            break;
+        }
+        tracing::info!(
+            alias = %alias,
+            chunk_id,
+            bytes = data.len(),
+            resend,
+            "rtmp_push: re-sending the failed chunk on the fresh session (#368)"
+        );
+        action = handle_rust_push(
+            pusher,
+            data,
+            chunk_id,
+            chunk_duration_ms,
+            alias,
+            service_type,
+            consecutive_push_errors,
+            consecutive_write_failures,
+            consecutive_zero_byte_deaths,
+            stats,
+            audit_ring,
+            telemetry,
+            stop_rx,
+            flv_normalizer,
+        )
+        .await;
     }
-    tracing::info!(
-        alias = %alias,
-        chunk_id,
-        bytes = data.len(),
-        "rtmp_push: re-sending the failed chunk on the fresh session (#368)"
-    );
-    let action = handle_rust_push(
-        pusher,
-        data,
-        chunk_id,
-        chunk_duration_ms,
-        alias,
-        service_type,
-        consecutive_push_errors,
-        consecutive_write_failures,
-        consecutive_zero_byte_deaths,
-        stats,
-        audit_ring,
-        telemetry,
-        stop_rx,
-        flv_normalizer,
-    )
-    .await;
-    // At most ONE re-send per chunk: if it failed again, the next chunk is
-    // an ordinary first push.
+    // The re-sends are used up: if the last one failed too, the next chunk
+    // is an ordinary first push.
     telemetry.clear_resend_pending();
     action
 }

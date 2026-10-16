@@ -56,6 +56,7 @@ mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{
     FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, maybe_refill_throttle, push_chunk,
+    reset_after_rescue,
 };
 
 // Fast-endpoint keepalive + outage escalation (C1 #251) extracted to keep this
@@ -421,12 +422,15 @@ async fn consumer_task<P: OutputProcessFactory>(
                             match outcome {
                                 crate::rescue::OutageRescueOutcome::Stop => return,
                                 crate::rescue::OutageRescueOutcome::Recovered => {
-                                    flv_normalizer = FlvStreamNormalizer::new();
                                     // The last-delivered chunk is from BEFORE the
-                                    // rescue gap; clear it so the post-rescue
-                                    // session never re-pushes a stale freeze on
-                                    // top of the fresh session.
-                                    last_chunk_bytes = None;
+                                    // rescue gap: the post-rescue session never
+                                    // re-pushes a stale freeze, and its push
+                                    // telemetry starts fresh (#368 review).
+                                    reset_after_rescue(
+                                        &mut flv_normalizer,
+                                        &mut last_chunk_bytes,
+                                        &mut rust_telemetry,
+                                    );
                                 }
                             }
                             continue;

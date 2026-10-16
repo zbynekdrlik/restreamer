@@ -197,3 +197,52 @@ async fn the_death_row_carries_the_age_of_the_last_upstream_ack() {
         "age of the last ack: {age} ms"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn after_an_outage_rescue_a_quick_close_of_the_new_session_is_not_a_fast_reconnect() {
+    use super::super::consumer_helpers::reset_after_rescue;
+    // An hour-long healthy session; then an outage rescue rebuilt the pusher
+    // and its new session is closed right away.
+    let mut pusher = Canned(VecDeque::from([Ok(()), Err(broken_pipe())]));
+    let stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let mut norm = FlvStreamNormalizer::new();
+    let (mut consec_err, mut consec_write, mut consec_zero) = (0u32, 0u32, 0u32);
+    let mut tel = RtmpPushTelemetry::new_for_test_at(0);
+    let mut last_chunk_bytes = Some(Arc::new(b"freeze".to_vec()));
+    for i in 0..2 {
+        if i == 1 {
+            tel.advance_clock_for_test(Duration::from_secs(3_600));
+            reset_after_rescue(&mut norm, &mut last_chunk_bytes, &mut tel);
+        }
+        handle_rust_push(
+            &mut pusher,
+            b"chunk",
+            i,
+            2000,
+            "YT NLCH 4K",
+            "YT_RTMP",
+            &mut consec_err,
+            &mut consec_write,
+            &mut consec_zero,
+            &stats,
+            &None,
+            &mut tel,
+            &mut stop_rx,
+            &mut norm,
+        )
+        .await;
+    }
+
+    assert!(
+        last_chunk_bytes.is_none(),
+        "no stale freeze frame after a rescue"
+    );
+    let s = stats.lock().await;
+    let backoffs: Vec<u64> = s.rtmp_push_history.iter().map(|r| r.backoff_ms).collect();
+    assert_eq!(
+        backoffs,
+        vec![3_000],
+        "the new session was never healthy: the 3 s floor, not a 0 ms reconnect"
+    );
+}

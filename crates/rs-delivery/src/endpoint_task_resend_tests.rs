@@ -285,3 +285,54 @@ async fn a_stop_during_the_backoff_skips_the_resend() {
         "a stopping endpoint must not re-send"
     );
 }
+
+/// #368 review: YouTube may still hold the old session for a moment.
+fn still_held() -> PushError {
+    PushError::PublishRejected {
+        code: "NetStream.Publish.BadName".into(),
+        description: "busy".into(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resend_rejected_right_after_a_fast_reconnect_gets_one_more_try() {
+    let _wd = watchdog();
+    // An hour into a healthy session YouTube closes it mid chunk 42: the
+    // 0 ms reconnect's re-send is rejected because YouTube still holds the
+    // old session. One more re-send after the short retry delivers chunk 42
+    // instead of dropping it.
+    let mut pusher =
+        ResendMock::with_results(vec![Ok(()), Err(broken_pipe()), Err(still_held()), Ok(())]);
+    let mut c = Consumer::new();
+    c.tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new_for_test_at(0);
+    assert!(matches!(
+        c.push(&mut pusher, b"chunk-41", 41).await,
+        RustPushAction::Continue
+    ));
+    c.tel
+        .advance_clock_for_test(std::time::Duration::from_secs(3_600));
+
+    let action = c.push(&mut pusher, b"chunk-42", 42).await;
+
+    assert!(matches!(action, RustPushAction::Continue));
+    assert_eq!(
+        pusher.calls,
+        vec![
+            Call::Push(b"chunk-41".to_vec()),
+            Call::Push(b"chunk-42".to_vec()),
+            Call::Close,
+            Call::Repush(b"chunk-42".to_vec()),
+            Call::Close,
+            Call::Repush(b"chunk-42".to_vec()),
+        ],
+        "a re-send rejected on the fast reconnect gets one more try"
+    );
+    let s = c.stats.lock().await;
+    let backoffs: Vec<u64> = s.rtmp_push_history.iter().map(|r| r.backoff_ms).collect();
+    assert_eq!(
+        backoffs,
+        vec![0, 3_000],
+        "the fast retry, then the short one"
+    );
+    assert_eq!(s.chunks_processed, 2, "chunk 42 was delivered after all");
+}
