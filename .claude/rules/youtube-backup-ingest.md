@@ -4,6 +4,7 @@ paths:
   - "crates/rs-delivery/src/backup_mirror_tests.rs"
   - "crates/rs-delivery/src/pushable.rs"
   - "crates/rs-delivery/src/endpoint_consumer_helpers.rs"
+  - "crates/rs-delivery/src/endpoint_task.rs"
   - "crates/rs-delivery/src/endpoint_rtmp_url.rs"
   - "crates/rs-delivery/src/rust_rescue_push.rs"
   - "crates/rs-delivery/src/rescue.rs"
@@ -41,6 +42,16 @@ a ~2 s content hole. Three layers fix it; keep all three.
   the tee aborts the backup task.
 - `repush_flv_bytes` (the re-send below) goes to the primary only: the backup
   already has that chunk.
+- **The live consumer keeps the backup ONE chunk ahead** (`feed_backup_ahead`,
+  review finding on #368). The tee alone offered a chunk only when the primary
+  started it, so while the primary reconnected and re-sent chunk N the backup
+  had nothing queued: up to ~2 s of silence on the backup, exactly while
+  YouTube rolls viewers over to it. The consumer now offers N (unless it was
+  the previous look-ahead) and N+1 (when the producer already queued it), and
+  takes the held N+1 BEFORE the channel on its next turn (same buffer
+  bookkeeping). `TeePusher::offer_ahead` counts pre-offered chunks, so
+  `push_flv_bytes` skips their offer: each chunk reaches the backup once, in
+  order. A non-mirroring endpoint is never touched (`mirrors()` false).
 - A backup death writes `EndpointBackupPushDied` (`detail.ingest =
   "youtube_backup"`), never `EndpointRtmpPushDied`: the outage notifier
   ignores it and the CI death gates query `endpoint_rtmp_push_died` only.
@@ -55,8 +66,8 @@ a ~2 s content hole. Three layers fix it; keep all three.
   per endpoint as `youtube_backup_ingest` (`build_vps_endpoint_entry`, init
   AND add); a VPS payload without it keeps the backup ON.
 - Limit: one VPS feeds both ingests (no protection against a VPS loss), and
-  the backup is fed at the primary's push cadence, so a primary stuck in a
-  30 s write timeout starves the backup too.
+  the backup is fed at the primary's cadence plus one chunk, so a primary
+  stuck in a 30 s write timeout starves the backup after that chunk.
 - CI: the sustained YT gate asserts `e2e rtmp` backup connected, >= 80 % of
   the primary's chunks pushed in the window, and no `*Mismatch`
   configuration issue (pinned by a test-integrity step).
@@ -65,7 +76,9 @@ a ~2 s content hole. Three layers fix it; keep all three.
 
 A push that failed in a way that may have lost its chunk (`may_lose_chunk`:
 transport + connect failures, and the write-timeout arm) is pushed AGAIN on
-the fresh session, at most once. Never after `AvSkewExceeded` (raised after
+the fresh session: once, or twice when the first re-send ran on a 0 ms
+reconnect (`resend_budget`: YouTube may still hold the old session and
+reject it; the second try follows the 3 s short retry). Never after `AvSkewExceeded` (raised after
 the whole chunk went out), `MalformedInput` or a stop. The flag rides the
 telemetry of the next connect (`RtmpPushTelemetry::after_failure`). The
 pusher's new mapping (base = last output + 1) keeps the wire monotonic.
@@ -77,6 +90,12 @@ healthy push (time since the connect's first pushed chunk); a publish/connect
 rejection right after such a fast retry gets one 3 s retry, not the 30 s
 floor. Everything else keeps the old ladder; the #236 dead-target 30 s
 override still applies.
+
+The health clock lives in the consumer's `RtmpPushTelemetry`. An outage
+rescue rebuilds the pusher, so its `Recovered` arm calls
+`reset_after_rescue`, which replaces the telemetry too. Without that, the
+old session's hour of health made a quick close of the NEW session a 0 ms
+reconnect, past the one-minute anti-hammer rule.
 
 ## RTMP ping + ack (`session_read_loop.rs`)
 
