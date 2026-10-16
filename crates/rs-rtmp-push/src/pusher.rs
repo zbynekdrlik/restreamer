@@ -199,6 +199,19 @@ impl RtmpPusher {
         &self.url
     }
 
+    /// #368: when the upstream last acknowledged our bytes (RTMP
+    /// Acknowledgement) on the CURRENT session, `None` before the first one
+    /// or without a session. Skeleton: never.
+    pub fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// #368: UserControl PingRequests the current session answered.
+    /// Skeleton: none.
+    pub fn pings_answered(&self) -> u64 {
+        0
+    }
+
     /// Drain the A/V invariant guard edges recorded since the last call
     /// (#367). The consumer audits each one.
     pub fn take_av_invariant_events(&mut self) -> Vec<AvInvariantEvent> {

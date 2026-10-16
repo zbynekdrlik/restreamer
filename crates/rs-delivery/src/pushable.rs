@@ -43,6 +43,12 @@ pub(crate) trait Pushable {
     ) -> impl std::future::Future<Output = Result<(), PushError>> + Send {
         self.push_flv_bytes(data)
     }
+    /// #368: when the upstream last acknowledged our bytes on the current
+    /// session (RTMP Acknowledgement), so the death row's
+    /// `time_since_last_upstream_ack_ms` is measured. `None` = no ack seen.
+    fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
 
 impl Pushable for RtmpPusher {

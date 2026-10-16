@@ -130,3 +130,105 @@ pub(super) async fn read_loop(
         }
     }
 }
+
+/// #368: incoming upstream control the read loop records, shared with the
+/// `Session` so the pusher can report it (`RtmpPusher::last_upstream_ack_at`).
+#[derive(Debug, Default)]
+pub(crate) struct UpstreamSignals {
+    last_ack_at: std::sync::Mutex<Option<std::time::Instant>>,
+    pings_answered: std::sync::atomic::AtomicU64,
+}
+
+impl UpstreamSignals {
+    /// The upstream acknowledged our bytes (RTMP Acknowledgement, type 3).
+    pub(crate) fn note_ack(&self) {
+        *self.last_ack_at.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now());
+    }
+
+    pub(crate) fn last_ack_at(&self) -> Option<std::time::Instant> {
+        *self.last_ack_at.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// We answered one UserControl PingRequest.
+    pub(crate) fn note_ping_answered(&self) {
+        self.pings_answered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pings_answered(&self) -> u64 {
+        self.pings_answered.load(Ordering::Relaxed)
+    }
+}
+
+/// #368: the timestamp of a UserControl PingRequest (event 6), or `None`
+/// for any other message. Skeleton: never a ping.
+pub(crate) fn ping_request_timestamp(msg_type_id: u8, payload: &[u8]) -> Option<u32> {
+    let _ = (msg_type_id, payload);
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A UserControl payload: 2-byte event type + 4-byte event data.
+    fn event(kind: u16, data: u32) -> Vec<u8> {
+        let mut p = kind.to_be_bytes().to_vec();
+        p.extend_from_slice(&data.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn a_ping_request_yields_its_timestamp() {
+        assert_eq!(
+            ping_request_timestamp(4, &event(6, 0xDEAD_BEEF)),
+            Some(0xDEAD_BEEF)
+        );
+        assert_eq!(ping_request_timestamp(4, &event(6, 0)), Some(0));
+    }
+
+    #[test]
+    fn other_events_and_messages_are_not_pings() {
+        // StreamBegin, a PingResponse, SetBufferLength.
+        for kind in [0u16, 7, 3] {
+            assert_eq!(
+                ping_request_timestamp(4, &event(kind, 9)),
+                None,
+                "event {kind}"
+            );
+        }
+        // The same bytes in an Acknowledgement / SetChunkSize are not a ping.
+        for type_id in [3u8, 1, 5] {
+            assert_eq!(
+                ping_request_timestamp(type_id, &event(6, 9)),
+                None,
+                "type {type_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_payload_is_not_a_ping() {
+        let full = event(6, 0x0102_0304);
+        assert_eq!(ping_request_timestamp(4, &full[..5]), None);
+        assert_eq!(ping_request_timestamp(4, &full[..2]), None);
+        assert_eq!(ping_request_timestamp(4, &[]), None);
+        // A trailing byte does not hide the ping.
+        let mut long = full.clone();
+        long.push(0xFF);
+        assert_eq!(ping_request_timestamp(4, &long), Some(0x0102_0304));
+    }
+
+    #[test]
+    fn upstream_signals_record_acks_and_answered_pings() {
+        let s = UpstreamSignals::default();
+        assert_eq!(s.last_ack_at(), None);
+        assert_eq!(s.pings_answered(), 0);
+        let before = std::time::Instant::now();
+        s.note_ack();
+        assert!(s.last_ack_at().is_some_and(|t| t >= before));
+        s.note_ping_answered();
+        s.note_ping_answered();
+        assert_eq!(s.pings_answered(), 2);
+    }
+}

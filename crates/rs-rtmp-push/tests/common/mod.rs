@@ -673,3 +673,7 @@ pub async fn spawn_recording_xiu_server_tls() -> (
 // Callers reach it as `common::rejecting_server::run_rejecting_server` (no
 // re-export, which a binary that never calls it would flag as unused).
 pub mod rejecting_server;
+
+// #368: a server that accepts the publish, then sends a PingRequest and an
+// Acknowledgement. Reached as `common::control_server::run_control_server`.
+pub mod control_server;
