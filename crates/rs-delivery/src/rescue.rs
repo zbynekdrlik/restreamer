@@ -400,19 +400,14 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
             .producer_active
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
-        let alias_owned = alias.to_string();
-        let stream_key_owned = ep_cfg.stream_key.clone();
+        // #368: the warmup clip reaches the YouTube backup ingest too.
+        let target =
+            crate::backup_mirror::PushTarget::for_endpoint(ep_cfg, svc_type, audit_ring_owned);
         let stats_clone = stats.clone();
         let mut warmup_stop = stop_rx.clone();
         Some(tokio::spawn(async move {
             crate::rust_rescue_push::rust_rescue_push(
-                crate::backup_mirror::PushTarget {
-                    alias: alias_owned,
-                    service_type: svc_type,
-                    stream_key: stream_key_owned,
-                    backup_ingest: true,
-                    audit_ring: audit_ring_owned,
-                },
+                target,
                 source,
                 dummy_buffer_state,
                 stats_clone,

@@ -32,15 +32,17 @@ pub(crate) fn build_endpoint_init_entry(
 /// #368: the per-endpoint VPS entry the host sends (`/api/init`,
 /// `/api/endpoints/add`): `build_endpoint_init_entry` plus
 /// `youtube_backup_ingest` (the `delivery.youtube_backup_ingest` switch).
-/// RED skeleton: the flag is not carried.
+/// The VPS applies it to YouTube endpoints only (the others have no backup
+/// ingest).
 pub(crate) fn build_vps_endpoint_entry(
     ep: &EndpointConfig,
     chunk_format: &str,
     start_chunk_id: i64,
     youtube_backup_ingest: bool,
 ) -> serde_json::Value {
-    let _ = youtube_backup_ingest;
-    build_endpoint_init_entry(ep, chunk_format, start_chunk_id)
+    let mut entry = build_endpoint_init_entry(ep, chunk_format, start_chunk_id);
+    entry["youtube_backup_ingest"] = serde_json::json!(youtube_backup_ingest);
+    entry
 }
 
 /// Returns the wire string a `PusherKind` serializes to. Used by audit and

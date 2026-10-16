@@ -67,7 +67,7 @@ pub struct PushTarget {
 
 impl PushTarget {
     /// The target of endpoint `ep_cfg` (whose service type the caller parsed
-    /// once). RED skeleton: the backup is always on.
+    /// once); its `youtube_backup_ingest` switch decides the backup.
     pub fn for_endpoint(
         ep_cfg: &crate::api::EndpointConfig,
         service_type: ServiceType,
@@ -77,7 +77,7 @@ impl PushTarget {
             alias: ep_cfg.alias.clone(),
             service_type,
             stream_key: ep_cfg.stream_key.clone(),
-            backup_ingest: true,
+            backup_ingest: ep_cfg.youtube_backup_ingest,
             audit_ring,
         }
     }

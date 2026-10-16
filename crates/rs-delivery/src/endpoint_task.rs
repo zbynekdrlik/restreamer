@@ -158,13 +158,8 @@ async fn consumer_task<P: OutputProcessFactory>(
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
     // #368: ONE factory builds every live and rescue pusher: the primary plus,
     // for YouTube, the backup ingest mirror.
-    let push_target = crate::backup_mirror::PushTarget {
-        alias: alias.clone(),
-        service_type,
-        stream_key: ep_cfg.stream_key.clone(),
-        backup_ingest: true,
-        audit_ring: audit_ring.clone(),
-    };
+    let push_target =
+        crate::backup_mirror::PushTarget::for_endpoint(&ep_cfg, service_type, audit_ring.clone());
 
     if use_rust_pusher {
         // Rust pusher: lazy-connect on first write. Construct now so the

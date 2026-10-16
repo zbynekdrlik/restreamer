@@ -601,9 +601,8 @@ fn default_long_stream_warn_secs() -> u64 {
     9000
 }
 
-/// RED skeleton: off.
 fn default_youtube_backup_ingest() -> bool {
-    false
+    true
 }
 
 impl Default for DeliveryConfig {

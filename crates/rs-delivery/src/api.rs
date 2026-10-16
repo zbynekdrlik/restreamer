@@ -120,9 +120,8 @@ fn default_chunk_format() -> String {
     "flv".to_string()
 }
 
-/// RED skeleton: off.
 fn default_youtube_backup_ingest() -> bool {
-    false
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
