@@ -66,6 +66,11 @@ pub struct EndpointStats {
     /// which has no per-push success signal).
     #[serde(default)]
     pub last_push_ok_unix_ms: Option<i64>,
+    /// #368: live state of this endpoint's YouTube backup ingest mirror, set
+    /// by `backup_mirror::build_endpoint_pusher` (`None` = no backup).
+    /// Shared with the mirror, read by `/api/status` as `backup_ingest`.
+    #[serde(skip)]
+    pub backup_ingest: Option<Arc<crate::backup_mirror::BackupMirrorState>>,
 }
 
 /// Snapshot of a per-endpoint prefetch-queue fill. Currently unpopulated —
@@ -106,6 +111,7 @@ impl Default for EndpointStats {
             prefetch_fill: None,
             last_lifecycle_worst_stage: None,
             last_push_ok_unix_ms: None,
+            backup_ingest: None,
         }
     }
 }

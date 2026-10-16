@@ -13,7 +13,7 @@ use rs_core::config::Config;
 use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
-    build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
+    build_vps_endpoint_entry, is_delivery_active, is_delivery_or_spawning,
     is_permanent_hetzner_error,
 };
 
@@ -672,7 +672,12 @@ impl DeliveryOrchestrator {
                 let ep_start = resume_pos.as_ref()
                     .and_then(|rp| rp.get(&ep.alias).copied())
                     .unwrap_or(start_chunk_id);
-                build_endpoint_init_entry(ep, chunk_format, ep_start)
+                build_vps_endpoint_entry(
+                    ep,
+                    chunk_format,
+                    ep_start,
+                    self.config.delivery.youtube_backup_ingest,
+                )
             }).collect::<Vec<_>>(),
             "s3_config": {
                 "bucket": self.config.s3.bucket,

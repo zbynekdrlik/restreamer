@@ -76,6 +76,9 @@ pub struct Session {
     poisoned: Arc<AtomicBool>,
     /// Background task handle; aborted on `Drop` or `close`.
     read_loop_handle: Option<tokio::task::JoinHandle<()>>,
+    /// #368: upstream Acknowledgements + answered PingRequests, recorded by
+    /// the read loop.
+    signals: Arc<UpstreamSignals>,
 }
 
 impl Session {
@@ -159,7 +162,7 @@ impl Session {
         let io = Arc::new(Mutex::new(net_io));
 
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
-        let msg_stream_id = tokio::time::timeout(
+        let (msg_stream_id, unpacketizer) = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
             negotiate(Arc::clone(&io), scheme, &host, port, &app, &stream_name),
         )
@@ -169,7 +172,13 @@ impl Session {
         // --- 6. Build packetizer + spawn background read-loop ----------------
         let packetizer = ChunkPacketizer::new(Arc::clone(&io));
         let poisoned = Arc::new(AtomicBool::new(false));
-        let read_loop_handle = tokio::spawn(read_loop(Arc::clone(&io), Arc::clone(&poisoned)));
+        let signals = Arc::new(UpstreamSignals::default());
+        let read_loop_handle = tokio::spawn(read_loop(
+            Arc::clone(&io),
+            Arc::clone(&poisoned),
+            unpacketizer,
+            Arc::clone(&signals),
+        ));
 
         let mut session = Self {
             io,
@@ -177,6 +186,7 @@ impl Session {
             msg_stream_id,
             poisoned,
             read_loop_handle: Some(read_loop_handle),
+            signals,
         };
 
         // --- 7. Announce the stream via @setDataFrame onMetaData -------------
@@ -300,6 +310,16 @@ impl Session {
         result
     }
 
+    /// #368: when the upstream last acknowledged our bytes on this session.
+    pub(crate) fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
+        self.signals.last_ack_at()
+    }
+
+    /// #368: UserControl PingRequests this session answered.
+    pub(crate) fn pings_answered(&self) -> u64 {
+        self.signals.pings_answered()
+    }
+
     /// Gracefully shut down the session.
     pub async fn close(mut self) {
         if let Some(h) = self.read_loop_handle.take() {
@@ -327,7 +347,9 @@ impl Drop for Session {
 ///
 /// Returns the RTMP message stream id assigned by the server in the
 /// `createStream` response (typically 1) once the server sends
-/// `NetStream.Publish.Start`, or errors on any rejection or unexpected close.
+/// `NetStream.Publish.Start`, plus the chunk unpacketizer (it carries the
+/// server's chunk size into the read loop, #368), or errors on any rejection
+/// or unexpected close.
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     scheme: Scheme,
@@ -335,7 +357,7 @@ async fn negotiate(
     port: u16,
     app: &str,
     stream_name: &str,
-) -> Result<u32, PushError> {
+) -> Result<(u32, ChunkUnpacketizer), PushError> {
     // --- Handshake ----------------------------------------------------------
     {
         let mut handshaker = SimpleHandshakeClient::new(Arc::clone(&io));
@@ -448,7 +470,7 @@ async fn negotiate(
     // Wait for onStatus(NetStream.Publish.Start).
     wait_for_publish_start(Arc::clone(&io), &mut unpacketizer).await?;
 
-    Ok(msg_stream_id)
+    Ok((msg_stream_id, unpacketizer))
 }
 
 // -------------------------------------------------------------------------
@@ -812,7 +834,7 @@ const READ_LOOP_IDLE_MS: u64 = 50;
 // Extracted to a sibling file to keep this file under the 1000-line cap.
 #[path = "session_read_loop.rs"]
 mod read_loop_mod;
-use read_loop_mod::read_loop;
+use read_loop_mod::{UpstreamSignals, read_loop};
 
 // -------------------------------------------------------------------------
 // AMF value helpers

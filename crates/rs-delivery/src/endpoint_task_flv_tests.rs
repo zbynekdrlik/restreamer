@@ -110,6 +110,7 @@ fn flv_test_ep_cfg() -> crate::api::EndpointConfig {
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
         pusher: PusherKind::Ffmpeg,
+        youtube_backup_ingest: false,
     }
 }
 

@@ -14,6 +14,16 @@ pub struct RtmpPushTelemetry {
     last_upstream_ack_at: Option<Instant>,
     last_message_type_sent: Option<&'static str>,
     chunks_pushed: u32,
+    /// #368: the push that ended the PREVIOUS connect failed in a way that
+    /// may have lost its chunk upstream, so the first push of THIS connect
+    /// re-sends that same chunk (`endpoint_consumer_helpers::push_chunk`).
+    resend_pending: bool,
+    /// #368: this connect was made without any delay after a healthy
+    /// session closed (`rs_rtmp_push::reconnect_delay_ms` returned 0).
+    follows_fast_retry: bool,
+    /// #368: when the first chunk of this connect was pushed; the session
+    /// counts as healthy from then on.
+    first_send_at: Option<Instant>,
     /// Test-only override: when Some, overrides Instant::now() for snapshot math.
     test_clock: Option<Instant>,
 }
@@ -26,8 +36,52 @@ impl RtmpPushTelemetry {
             last_upstream_ack_at: None,
             last_message_type_sent: None,
             chunks_pushed: 0,
+            resend_pending: false,
+            follows_fast_retry: false,
+            first_send_at: None,
             test_clock: None,
         }
+    }
+
+    /// Telemetry for the connect that follows a failed push. `resend_pending`
+    /// = the failed chunk must be pushed again on it (#368);
+    /// `follows_fast_retry` = this connect was made without any delay.
+    pub fn after_failure(resend_pending: bool, follows_fast_retry: bool) -> Self {
+        Self {
+            resend_pending,
+            follows_fast_retry,
+            ..Self::new()
+        }
+    }
+
+    /// #368: whether this connect was made immediately (0 ms) after a
+    /// healthy session closed.
+    pub fn follows_fast_retry(&self) -> bool {
+        self.follows_fast_retry
+    }
+
+    /// #368: how long this connect has been HEALTHY (pushing media): ms since
+    /// its first successful chunk, 0 before any.
+    pub fn healthy_session_ms(&self) -> u64 {
+        self.first_send_at
+            .map(|t| self.now().saturating_duration_since(t).as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Whether the failed chunk still has to be re-sent on this connect.
+    pub fn resend_pending(&self) -> bool {
+        self.resend_pending
+    }
+
+    /// Consume the pending re-send: `true` exactly once after a failure that
+    /// may have lost the chunk.
+    pub fn take_resend_pending(&mut self) -> bool {
+        std::mem::take(&mut self.resend_pending)
+    }
+
+    /// Drop a pending re-send: a chunk is re-sent at most once (#368).
+    pub fn clear_resend_pending(&mut self) {
+        self.resend_pending = false;
     }
 
     #[cfg(test)]
@@ -39,6 +93,9 @@ impl RtmpPushTelemetry {
             last_upstream_ack_at: None,
             last_message_type_sent: None,
             chunks_pushed: 0,
+            resend_pending: false,
+            follows_fast_retry: false,
+            first_send_at: None,
             test_clock: Some(now),
         }
     }
@@ -54,15 +111,23 @@ impl RtmpPushTelemetry {
     }
 
     pub fn note_send(&mut self, msg_type: &'static str, n_bytes: u64) {
+        let now = self.now();
+        self.first_send_at.get_or_insert(now);
         self.last_message_type_sent = Some(msg_type);
         self.bytes_sent = self.bytes_sent.saturating_add(n_bytes);
     }
 
-    /// Wired by the rs-rtmp-push read loop on incoming RTMP Acknowledgement
-    /// messages. Phase 2 (#177) will plumb the call site into the ClientSession
-    /// receive path; today this method is unreachable from production.
+    /// An upstream RTMP Acknowledgement arrived now.
     pub fn note_upstream_ack(&mut self) {
-        self.last_upstream_ack_at = Some(self.now());
+        self.note_upstream_ack_at(self.now());
+    }
+
+    /// #368: the pusher's read loop saw the latest upstream Acknowledgement
+    /// at `at` (`Pushable::last_upstream_ack_at`); the consumer copies it in
+    /// after every push, so the death row's `time_since_last_upstream_ack_ms`
+    /// is measured instead of always null.
+    pub fn note_upstream_ack_at(&mut self, at: Instant) {
+        self.last_upstream_ack_at = Some(at);
     }
 
     pub fn note_chunk_pushed(&mut self) {
@@ -113,6 +178,10 @@ impl RtmpPushTelemetry {
         map.insert(
             "chunks_pushed".into(),
             serde_json::json!(self.chunks_pushed),
+        );
+        map.insert(
+            "follows_fast_retry".into(),
+            serde_json::json!(self.follows_fast_retry),
         );
         // Omit upstream_close_first_bytes_hex when the close buffer is empty --
         // an empty string would look like "no bytes received" which is ambiguous
@@ -188,6 +257,56 @@ mod tests {
         let v = t.snapshot(&buf);
         let hex = v["upstream_close_first_bytes_hex"].as_str().unwrap();
         assert_eq!(hex.len(), 128); // 64 bytes * 2 hex chars
+    }
+
+    // #368: the re-send flag of the connect after a failure.
+    #[test]
+    fn after_failure_carries_the_resend_flag_and_take_consumes_it_once() {
+        let mut t = RtmpPushTelemetry::after_failure(true, false);
+        assert!(t.resend_pending());
+        assert!(t.take_resend_pending());
+        assert!(!t.resend_pending(), "take must consume the flag");
+        assert!(!t.take_resend_pending());
+        assert!(!RtmpPushTelemetry::after_failure(false, false).resend_pending());
+        assert!(!RtmpPushTelemetry::new().resend_pending());
+        assert_eq!(
+            RtmpPushTelemetry::after_failure(true, false).bytes_sent(),
+            0,
+            "a failure starts a fresh connect"
+        );
+    }
+
+    #[test]
+    fn after_failure_carries_the_fast_retry_flag() {
+        assert!(RtmpPushTelemetry::after_failure(false, true).follows_fast_retry());
+        assert!(!RtmpPushTelemetry::after_failure(true, false).follows_fast_retry());
+        assert!(!RtmpPushTelemetry::new().follows_fast_retry());
+        let v = RtmpPushTelemetry::after_failure(false, true).snapshot(&[]);
+        assert_eq!(
+            v["follows_fast_retry"], true,
+            "the death row says whether that connect followed a fast retry"
+        );
+        let v = RtmpPushTelemetry::new().snapshot(&[]);
+        assert_eq!(v["follows_fast_retry"], false);
+    }
+
+    #[test]
+    fn healthy_session_ms_counts_from_the_first_pushed_chunk() {
+        let mut t = RtmpPushTelemetry::new_for_test_at(0);
+        t.advance_clock_for_test(Duration::from_millis(5_000));
+        assert_eq!(t.healthy_session_ms(), 0, "nothing pushed yet");
+        t.note_send("flv_bytes", 100);
+        t.advance_clock_for_test(Duration::from_millis(61_000));
+        t.note_send("flv_bytes", 100);
+        t.advance_clock_for_test(Duration::from_millis(500));
+        assert_eq!(t.healthy_session_ms(), 61_500);
+    }
+
+    #[test]
+    fn clear_resend_pending_drops_the_flag() {
+        let mut t = RtmpPushTelemetry::after_failure(true, false);
+        t.clear_resend_pending();
+        assert!(!t.resend_pending());
     }
 
     // #236: bytes_sent() accessor -- the dead-target classifier in

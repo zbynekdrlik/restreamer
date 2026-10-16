@@ -62,12 +62,14 @@ pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
         PushError::TlsHandshakeFailed(_) => Some(5_000),
         PushError::ConnectRejected { .. } => Some(30_000),
         PushError::PublishRejected { .. } => Some(30_000),
-        // RemoteClosed = upstream (YT/FB) rotated the connection. Common
-        // periodic event (~12-15 min on YT) NOT caused by us. 30 s backoff
-        // was punishing the operator: every reset added 30 s of cache
-        // overshoot before the pusher even reconnected. 3 s lets the
-        // pusher reconnect almost immediately while still avoiding a
-        // tight reconnect loop if upstream keeps rejecting.
+        // RemoteClosed = the upstream (YT/FB) ended the connection, not us.
+        // There is no fixed period: production YouTube closes came after
+        // 27 min to 500 min of session (#368); only the CI `e2e rtmp`
+        // endpoint sees one every ~15 min. 30 s backoff was punishing the
+        // operator: every reset added 30 s of cache overshoot before the
+        // pusher even reconnected. 3 s avoids a tight reconnect loop if
+        // upstream keeps rejecting; the FIRST close after a healthy minute
+        // reconnects at once (`reconnect_delay_ms`, #368).
         PushError::RemoteClosed(_) => Some(3_000),
         PushError::Timeout => Some(10_000),
         PushError::IoError(_) => Some(15_000),
@@ -110,9 +112,10 @@ pub fn map_read_err(err: BytesIOError) -> PushError {
 }
 
 /// Map an error from writing a chunk (xiu's `ChunkPacketizer::write_chunk`)
-/// onto a `PushError`. A write the upstream ended (reset, broken pipe, EOF:
-/// YouTube rotates its ingest connection every ~15 min) is `RemoteClosed`, as on
-/// the read side; any other write failure stays `IoError`.
+/// onto a `PushError`. A write the upstream ended (reset, broken pipe, EOF: a
+/// YouTube ingest session close, e.g. the 2026-10-15 "Broken pipe" after 44
+/// min) is `RemoteClosed`, as on the read side; any other write failure stays
+/// `IoError`.
 pub fn map_write_err(err: PackError) -> PushError {
     let io_err = match err.value {
         PackErrorValue::BytesWriteError(BytesWriteError {
@@ -146,6 +149,85 @@ fn peer_gone(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// #368: whether a push that failed with `err` may have left (part of) its
+/// chunk undelivered upstream, so the consumer must push that SAME chunk
+/// once more on the fresh session.
+///
+/// A transport fault (`RemoteClosed`, `IoError`, `Timeout`) can strike mid
+/// chunk, and the bytes still in the 4 MB socket send buffer are lost with
+/// the connection. A connect-time failure sent nothing of it at all. An
+/// `AvSkewExceeded` trip is raised only AFTER the whole chunk went out, a
+/// `MalformedInput` chunk would fail identically again, and `LocalCancel`
+/// stops the endpoint.
+pub fn may_lose_chunk(err: &PushError) -> bool {
+    match err {
+        PushError::RemoteClosed(_)
+        | PushError::IoError(_)
+        | PushError::Timeout
+        | PushError::HandshakeFailed(_)
+        | PushError::TlsHandshakeFailed(_)
+        | PushError::ConnectRejected { .. }
+        | PushError::PublishRejected { .. } => true,
+        PushError::AvSkewExceeded { .. }
+        | PushError::MalformedInput { .. }
+        | PushError::LocalCancel => false,
+    }
+}
+
+/// #368: a session that pushed media at least this long before the upstream
+/// closed it earns an IMMEDIATE reconnect. One minute keeps a target that
+/// accepts a connect and then drops it again from turning the zero delay
+/// into a reconnect hammer.
+pub const FAST_RECONNECT_MIN_HEALTHY_MS: u64 = 60_000;
+
+/// #368: the short retry after a rejection that directly follows a fast
+/// reconnect (the platform may still hold the old session for a moment).
+/// Same as the `RemoteClosed` floor.
+pub const SHORT_RETRY_AFTER_FAST_MS: u64 = 3_000;
+
+/// #368: the delay before the next connect after `err`, or `None` for
+/// `LocalCancel` (no retry).
+///
+/// - The FIRST upstream close (`RemoteClosed`, `consecutive_errors == 1`)
+///   of a session that pushed media for at least
+///   `FAST_RECONNECT_MIN_HEALTHY_MS` reconnects at once (0 ms). Such a close
+///   is the platform ending one ingest session (YouTube, 2026-10-15), and
+///   the old fixed 3 s floor was the bulk of the viewer-visible gap.
+/// - A publish/connect rejection that directly follows such a fast retry
+///   gets one short retry (`SHORT_RETRY_AFTER_FAST_MS`) instead of the 30 s
+///   rejection floor: the platform may still hold the session that just
+///   closed.
+/// - Everything else keeps the pre-#368 ladder: the error's floor, doubled
+///   per consecutive error for the exponential classes, capped at 5 min.
+pub fn reconnect_delay_ms(
+    err: &PushError,
+    consecutive_errors: u32,
+    healthy_session_ms: u64,
+    follows_fast_retry: bool,
+) -> Option<u64> {
+    let floor_ms = backoff_floor_ms(err)?;
+    if consecutive_errors == 1
+        && healthy_session_ms >= FAST_RECONNECT_MIN_HEALTHY_MS
+        && matches!(err, PushError::RemoteClosed(_))
+    {
+        return Some(0);
+    }
+    if follows_fast_retry
+        && matches!(
+            err,
+            PushError::PublishRejected { .. } | PushError::ConnectRejected { .. }
+        )
+    {
+        return Some(SHORT_RETRY_AFTER_FAST_MS);
+    }
+    if is_exponential(err) {
+        let factor = 1u64 << (consecutive_errors.saturating_sub(1).min(5));
+        Some(floor_ms.saturating_mul(factor).min(300_000))
+    } else {
+        Some(floor_ms)
+    }
+}
+
 /// Whether to escalate the floor exponentially on consecutive same-class
 /// errors. `BadName` is fixed (operator must rotate the key); the rest follow
 /// today's exponential ×2 cap-at-300s policy.
@@ -159,10 +241,9 @@ pub fn is_exponential(err: &PushError) -> bool {
             | PushError::IoError(_)
             | PushError::HandshakeFailed(_)
             | PushError::TlsHandshakeFailed(_)
-            // RemoteClosed = upstream-initiated rotation (e.g. YT load
-            // balancer churn every ~12-15 min). Never exponential — each
-            // event is independent of our behaviour, escalating wastes
-            // cache time we just got.
+            // RemoteClosed = an upstream-initiated session close (no fixed
+            // period, #368). Never exponential — each event is independent
+            // of our behaviour, escalating wastes cache time we just got.
             | PushError::RemoteClosed(_)
             | PushError::MalformedInput { .. }
             // AvSkewExceeded (#257) = deliberate recovery reconnect. The
@@ -440,6 +521,146 @@ mod tests {
             !is_exponential(&e),
             "TlsHandshakeFailed uses fixed floor, not exponential"
         );
+    }
+
+    // --- reconnect_delay_ms (#368: fast first reconnect) ---
+
+    fn broken_pipe() -> PushError {
+        PushError::RemoteClosed(io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+
+    fn bad_name() -> PushError {
+        PushError::PublishRejected {
+            code: "NetStream.Publish.BadName".into(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_close_after_a_healthy_minute_reconnects_at_once() {
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 1, 60_000, false),
+            Some(0)
+        );
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 1, 2_629_000, false),
+            Some(0)
+        );
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 1, 59_999, false),
+            Some(3_000),
+            "a session under a minute keeps the 3 s floor"
+        );
+    }
+
+    #[test]
+    fn only_the_first_consecutive_close_is_fast() {
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 2, 60_000, false),
+            Some(3_000)
+        );
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 2, 60_000, true),
+            Some(3_000)
+        );
+        assert_eq!(
+            reconnect_delay_ms(&broken_pipe(), 0, 60_000, false),
+            Some(3_000)
+        );
+    }
+
+    #[test]
+    fn only_an_upstream_close_is_fast() {
+        let io = PushError::IoError(io::Error::other("x"));
+        assert_eq!(reconnect_delay_ms(&io, 1, 600_000, false), Some(15_000));
+        let skew = PushError::AvSkewExceeded { skew_ms: 4_500 };
+        assert_eq!(reconnect_delay_ms(&skew, 1, 600_000, false), Some(3_000));
+        assert_eq!(
+            reconnect_delay_ms(&PushError::Timeout, 1, 600_000, false),
+            Some(10_000)
+        );
+    }
+
+    #[test]
+    fn a_rejection_right_after_a_fast_retry_gets_a_short_retry() {
+        // The platform may still hold the session that just closed; one
+        // short retry instead of the 30 s rejection floor.
+        assert_eq!(
+            reconnect_delay_ms(&bad_name(), 2, 0, true),
+            Some(SHORT_RETRY_AFTER_FAST_MS)
+        );
+        let other = PushError::PublishRejected {
+            code: "NetStream.Publish.Busy".into(),
+            description: String::new(),
+        };
+        assert_eq!(reconnect_delay_ms(&other, 2, 0, true), Some(3_000));
+        let connect = PushError::ConnectRejected {
+            code: "NetConnection.Connect.Rejected".into(),
+            description: String::new(),
+        };
+        assert_eq!(reconnect_delay_ms(&connect, 2, 0, true), Some(3_000));
+        // Not after a fast retry: the rejection floors are unchanged.
+        assert_eq!(reconnect_delay_ms(&bad_name(), 2, 0, false), Some(30_000));
+        assert_eq!(reconnect_delay_ms(&other, 2, 0, false), Some(60_000));
+        assert_eq!(reconnect_delay_ms(&connect, 1, 0, false), Some(30_000));
+        // A handshake failure after a fast retry keeps its own short floor.
+        let hs = PushError::HandshakeFailed(io::Error::other("x"));
+        assert_eq!(reconnect_delay_ms(&hs, 2, 0, true), Some(5_000));
+    }
+
+    #[test]
+    fn reconnect_delay_keeps_the_exponential_ladder_and_its_cap() {
+        let connect = PushError::ConnectRejected {
+            code: "NetConnection.Connect.Rejected".into(),
+            description: String::new(),
+        };
+        assert_eq!(reconnect_delay_ms(&connect, 2, 0, false), Some(60_000));
+        assert_eq!(reconnect_delay_ms(&connect, 4, 0, false), Some(240_000));
+        assert_eq!(reconnect_delay_ms(&connect, 10, 0, false), Some(300_000));
+        assert_eq!(
+            reconnect_delay_ms(&PushError::LocalCancel, 1, 600_000, true),
+            None
+        );
+    }
+
+    // --- may_lose_chunk (#368: re-send the failed chunk once) ---
+
+    #[test]
+    fn a_transport_or_connect_failure_may_lose_the_chunk() {
+        let lost = [
+            PushError::RemoteClosed(io::Error::from(io::ErrorKind::BrokenPipe)),
+            PushError::IoError(io::Error::other("x")),
+            PushError::Timeout,
+            PushError::HandshakeFailed(io::Error::other("x")),
+            PushError::TlsHandshakeFailed("x".into()),
+            PushError::ConnectRejected {
+                code: "NetConnection.Connect.Rejected".into(),
+                description: String::new(),
+            },
+            PushError::PublishRejected {
+                code: "NetStream.Publish.BadName".into(),
+                description: String::new(),
+            },
+        ];
+        for e in lost {
+            assert!(may_lose_chunk(&e), "{e:?} must re-send the chunk");
+        }
+    }
+
+    #[test]
+    fn a_skew_trip_bad_input_or_cancel_never_resends() {
+        // AvSkewExceeded is returned AFTER the whole chunk went out; a
+        // malformed chunk would fail identically again; a cancel stops.
+        for e in [
+            PushError::AvSkewExceeded { skew_ms: 4_500 },
+            PushError::MalformedInput {
+                offset: 0,
+                reason: "x".into(),
+            },
+            PushError::LocalCancel,
+        ] {
+            assert!(!may_lose_chunk(&e), "{e:?} must not re-send");
+        }
     }
 
     // --- map_read_err ---

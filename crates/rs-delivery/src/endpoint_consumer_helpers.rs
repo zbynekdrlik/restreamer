@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rs_rtmp_push::{PushError, backoff_floor_ms, is_exponential};
+use rs_rtmp_push::PushError;
 use tokio::sync::watch;
 
 use super::{
@@ -199,11 +199,19 @@ pub(super) async fn handle_rust_push(
         bytes = data.len(),
         "rtmp_push: ENTER push_flv_bytes"
     );
-    let push_result = tokio::time::timeout(
-        std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
-        pusher.push_flv_bytes(data),
-    )
-    .await;
+    // #368: the first push on the connect after a failure re-sends that
+    // failed chunk (`push_chunk`); a mirroring pusher sends it to the
+    // primary only, because its mirror already has it.
+    let resend = telemetry.take_resend_pending();
+    let push_result =
+        tokio::time::timeout(std::time::Duration::from_secs(WRITE_TIMEOUT_SECS), async {
+            if resend {
+                pusher.repush_flv_bytes(data).await
+            } else {
+                pusher.push_flv_bytes(data).await
+            }
+        })
+        .await;
     let push_elapsed_ms = push_start.elapsed().as_millis() as u64;
     if push_elapsed_ms >= 2500 {
         tracing::warn!(
@@ -218,6 +226,12 @@ pub(super) async fn handle_rust_push(
     // violation before the skew guard may fail the same chunk.
     for event in pusher.take_av_invariant_events() {
         endpoint_audit::emit_av_invariant_event(audit_ring, alias, &event);
+    }
+    // #368: carry the session's latest upstream Acknowledgement into the
+    // telemetry BEFORE an error arm snapshots it (and before close() drops
+    // the session that holds it).
+    if let Some(at) = pusher.last_upstream_ack_at() {
+        telemetry.note_upstream_ack_at(at);
     }
 
     match push_result {
@@ -291,8 +305,16 @@ pub(super) async fn handle_rust_push(
             let is_dead_target = *consecutive_zero_byte_deaths >= DEAD_TARGET_ZERO_BYTE_THRESHOLD;
             let just_became_dead_target =
                 *consecutive_zero_byte_deaths == DEAD_TARGET_ZERO_BYTE_THRESHOLD;
-            let floor = backoff_floor_ms(&push_err);
-            let Some(floor_ms) = floor else {
+            // #368: the first upstream close after a healthy minute reconnects
+            // at once; a rejection right after that fast retry gets a short
+            // retry. Read the session's health BEFORE the telemetry reset.
+            let delay = rs_rtmp_push::reconnect_delay_ms(
+                &push_err,
+                *consecutive_push_errors,
+                telemetry.healthy_session_ms(),
+                telemetry.follows_fast_retry(),
+            );
+            let Some(backoff_ms) = delay else {
                 // LocalCancel is the only None-floor variant. Returning
                 // Break lets the consumer task exit; we do NOT call
                 // pusher.close() here because close happens via Drop on
@@ -311,12 +333,6 @@ pub(super) async fn handle_rust_push(
             // and chunks_processed froze. Close drops the connection so the
             // next call lazily reconnects.
             pusher.close().await;
-            let backoff_ms = if is_exponential(&push_err) {
-                let factor = 1u64 << (consecutive_push_errors.saturating_sub(1).min(5));
-                floor_ms.saturating_mul(factor).min(300_000)
-            } else {
-                floor_ms
-            };
             // #236: once classified dead-target, stop the fast (down to 3s)
             // reconnect hammer regardless of the underlying error's own
             // floor -- the remote session is gone, not merely rotating.
@@ -379,7 +395,10 @@ pub(super) async fn handle_rust_push(
                     );
                 }
             }
-            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(
+                rs_rtmp_push::may_lose_chunk(&push_err),
+                backoff_ms == 0,
+            );
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
                 chunk_id,
@@ -449,7 +468,8 @@ pub(super) async fn handle_rust_push(
                 &[],
                 0,
             );
-            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+            // A hung write may have lost the chunk too: re-send it (#368).
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(true, false);
             let timestamp_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -481,6 +501,111 @@ pub(super) async fn handle_rust_push(
             RustPushAction::Continue
         }
     }
+}
+
+/// #368 review: after an outage rescue recovered, the live pusher is a NEW
+/// one (`run_outage_rescue` rebuilt it). Forget what the consumer knew about
+/// the old session: the normalizer state, the freeze frame from before the
+/// gap, and the push telemetry. Its session health decides the next
+/// reconnect delay, so a stale first send would turn a quick close of the
+/// new session into a 0 ms reconnect (past the one-minute anti-hammer rule).
+pub(super) fn reset_after_rescue(
+    flv_normalizer: &mut FlvStreamNormalizer,
+    last_chunk_bytes: &mut Option<Arc<Vec<u8>>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
+) {
+    *flv_normalizer = FlvStreamNormalizer::new();
+    *last_chunk_bytes = None;
+    *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+}
+
+/// #368 review: how many re-sends one chunk may get. The first re-send runs
+/// on a 0 ms reconnect after a healthy session; YouTube may still hold the
+/// old session for a moment and reject it, so a re-send that ran on such a
+/// FAST reconnect gets one more try, after the short retry. Otherwise one.
+pub(super) fn resend_budget(first_resend_on_fast_reconnect: bool) -> u32 {
+    if first_resend_on_fast_reconnect { 2 } else { 1 }
+}
+
+/// #368: push ONE chunk through `handle_rust_push`, and when that push failed
+/// in a way that may have lost the chunk upstream (`may_lose_chunk`, or a
+/// write timeout), push the SAME chunk once more on the fresh session.
+///
+/// Before #368 the failed chunk (~2 s) was dropped: the consumer slept the
+/// backoff and went on with the NEXT chunk, so the platform got a content
+/// hole on top of the reconnect gap. A chunk starts on a keyframe and the
+/// pusher's new mapping keeps the wire timestamps monotonic (base = last
+/// output + 1), so the re-send is a clean continuation of the new session.
+/// At most `resend_budget` re-sends per chunk (one, or two when the first ran
+/// on a fast reconnect): then it moves on, so a dead target still
+/// progresses through its queue.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn push_chunk(
+    pusher: &mut impl Pushable,
+    data: &[u8],
+    chunk_id: i64,
+    chunk_duration_ms: i64,
+    alias: &str,
+    service_type: &str,
+    consecutive_push_errors: &mut u32,
+    consecutive_write_failures: &mut u32,
+    consecutive_zero_byte_deaths: &mut u32,
+    stats: &Stats,
+    audit_ring: &Option<Arc<AuditRing>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
+    stop_rx: &mut watch::Receiver<bool>,
+    flv_normalizer: &mut FlvStreamNormalizer,
+) -> RustPushAction {
+    let mut action = handle_rust_push(
+        pusher,
+        data,
+        chunk_id,
+        chunk_duration_ms,
+        alias,
+        service_type,
+        consecutive_push_errors,
+        consecutive_write_failures,
+        consecutive_zero_byte_deaths,
+        stats,
+        audit_ring,
+        telemetry,
+        stop_rx,
+        flv_normalizer,
+    )
+    .await;
+    for resend in 1..=resend_budget(telemetry.follows_fast_retry()) {
+        if !(matches!(action, RustPushAction::Continue) && telemetry.resend_pending()) {
+            break;
+        }
+        tracing::info!(
+            alias = %alias,
+            chunk_id,
+            bytes = data.len(),
+            resend,
+            "rtmp_push: re-sending the failed chunk on the fresh session (#368)"
+        );
+        action = handle_rust_push(
+            pusher,
+            data,
+            chunk_id,
+            chunk_duration_ms,
+            alias,
+            service_type,
+            consecutive_push_errors,
+            consecutive_write_failures,
+            consecutive_zero_byte_deaths,
+            stats,
+            audit_ring,
+            telemetry,
+            stop_rx,
+            flv_normalizer,
+        )
+        .await;
+    }
+    // The re-sends are used up: if the last one failed too, the next chunk
+    // is an ordinary first push.
+    telemetry.clear_resend_pending();
+    action
 }
 
 /// Return from `handle_ffmpeg_death`: what the consumer loop should do next.

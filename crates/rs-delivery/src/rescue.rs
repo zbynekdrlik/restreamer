@@ -103,6 +103,7 @@ pub async fn run_rescue_loop(
     stats: &crate::endpoint_task::Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    backup_ingest: bool,
 ) -> bool {
     // Resolve the rescue clip source. Falls back to the Slovak countdown
     // segment set when URL is None / empty / non-FLV / fetch-failed (audit
@@ -120,10 +121,15 @@ pub async fn run_rescue_loop(
         "Rescue: entering outage rescue"
     );
 
+    // #368: the rescue clip reaches the YouTube backup ingest too.
     crate::rust_rescue_push::rust_rescue_push(
-        alias,
-        service_type,
-        stream_key,
+        crate::backup_mirror::PushTarget {
+            alias: alias.to_string(),
+            service_type,
+            stream_key: stream_key.to_string(),
+            backup_ingest,
+            audit_ring: audit_ring.clone(),
+        },
         source,
         buffer_state.clone(),
         stats.clone(),
@@ -161,7 +167,7 @@ pub enum OutageRescueOutcome {
 /// `run_defensive_rescue`), because the cache-drain branch CAN recover —
 /// the producer may revive and the consumer continues normal delivery.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_outage_rescue(
+pub(crate) async fn run_outage_rescue(
     alias: &str,
     rescue_video_url: Option<&str>,
     service_type: rs_ffmpeg::ServiceType,
@@ -172,8 +178,9 @@ pub async fn run_outage_rescue(
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     last_delivered_chunk_id: i64,
     proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
-    rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
+    rust_pusher: &mut Option<crate::backup_mirror::EndpointPusher>,
     use_rust_pusher: bool,
+    backup_ingest: bool,
 ) -> OutageRescueOutcome {
     let rescue_started = std::time::Instant::now();
     crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
@@ -187,8 +194,10 @@ pub async fn run_outage_rescue(
     if let Some(mut p) = proc.take() {
         p.kill().await;
     }
-    if let Some(p) = rust_pusher.take() {
-        drop(p);
+    if let Some(mut p) = rust_pusher.take() {
+        // #368: returns once the backup mirror's session is gone too, so the
+        // rescue mirror never overlaps it on the same key.
+        p.shutdown().await;
     }
 
     {
@@ -206,6 +215,7 @@ pub async fn run_outage_rescue(
         stats,
         stop_rx,
         audit_ring,
+        backup_ingest,
     )
     .await;
     if should_stop {
@@ -217,11 +227,14 @@ pub async fn run_outage_rescue(
     // (lazy-connects on next push). Timestamps reset from zero — that's
     // expected after a rescue gap.
     if use_rust_pusher {
-        let url = crate::endpoint_rtmp_url::build_rtmp_url(service_type, stream_key);
-        *rust_pusher = Some(rs_rtmp_push::RtmpPusher::new(
-            url,
-            rs_rtmp_push::PusherConfig::default(),
-        ));
+        let target = crate::backup_mirror::PushTarget {
+            alias: alias.to_string(),
+            service_type,
+            stream_key: stream_key.to_string(),
+            backup_ingest,
+            audit_ring: audit_ring.clone(),
+        };
+        *rust_pusher = Some(crate::backup_mirror::build_endpoint_pusher(&target, stats).await);
     }
     {
         let mut s = stats.lock().await;
@@ -257,7 +270,7 @@ pub async fn run_outage_rescue(
 ///   `endpoint_task.rs::consumer_task` so the consumer fn drops well
 ///   below the 1000-line CI cap.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_defensive_rescue(
+pub(crate) async fn run_defensive_rescue(
     alias: &str,
     rescue_video_url: Option<&str>,
     service_type: rs_ffmpeg::ServiceType,
@@ -268,7 +281,8 @@ pub async fn run_defensive_rescue(
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     last_delivered_chunk_id: i64,
     proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
-    rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
+    rust_pusher: &mut Option<crate::backup_mirror::EndpointPusher>,
+    backup_ingest: bool,
 ) {
     crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
 
@@ -280,8 +294,10 @@ pub async fn run_defensive_rescue(
     if let Some(mut p) = proc.take() {
         p.kill().await;
     }
-    if let Some(p) = rust_pusher.take() {
-        drop(p);
+    if let Some(mut p) = rust_pusher.take() {
+        // #368: returns once the backup mirror's session is gone too, so the
+        // rescue mirror never overlaps it on the same key.
+        p.shutdown().await;
     }
 
     {
@@ -302,6 +318,7 @@ pub async fn run_defensive_rescue(
         stats,
         stop_rx,
         audit_ring,
+        backup_ingest,
     )
     .await;
 
@@ -383,15 +400,14 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
             .producer_active
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
-        let alias_owned = alias.to_string();
-        let stream_key_owned = ep_cfg.stream_key.clone();
+        // #368: the warmup clip reaches the YouTube backup ingest too.
+        let target =
+            crate::backup_mirror::PushTarget::for_endpoint(ep_cfg, svc_type, audit_ring_owned);
         let stats_clone = stats.clone();
         let mut warmup_stop = stop_rx.clone();
         Some(tokio::spawn(async move {
             crate::rust_rescue_push::rust_rescue_push(
-                &alias_owned,
-                svc_type,
-                &stream_key_owned,
+                target,
                 source,
                 dummy_buffer_state,
                 stats_clone,

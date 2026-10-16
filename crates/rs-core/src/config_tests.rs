@@ -436,3 +436,14 @@ fn av_gate_defaults_point_into_the_av_gate_dir_beside_the_config() {
         }
     );
 }
+
+/// #368: the YouTube backup ingest is ON unless the config switches it off,
+/// including for a config.json written before the field existed.
+#[test]
+fn youtube_backup_ingest_is_on_by_default_and_can_be_switched_off() {
+    assert!(DeliveryConfig::default().youtube_backup_ingest);
+    let old: DeliveryConfig = serde_json::from_str("{}").unwrap();
+    assert!(old.youtube_backup_ingest, "a config without the field");
+    let off: DeliveryConfig = serde_json::from_str(r#"{"youtube_backup_ingest": false}"#).unwrap();
+    assert!(!off.youtube_backup_ingest);
+}

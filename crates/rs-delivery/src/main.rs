@@ -11,6 +11,7 @@ use tracing_subscriber::prelude::*;
 
 mod api;
 mod audit_ring;
+pub mod backup_mirror;
 pub mod buffer_state;
 mod clock_endpoint;
 pub mod db;
@@ -50,6 +51,8 @@ mod test_file_sink;
 
 #[cfg(test)]
 mod api_update_start_tests;
+#[cfg(test)]
+mod backup_status_tests;
 #[cfg(test)]
 mod test_file_sink_lifecycle_tests;
 

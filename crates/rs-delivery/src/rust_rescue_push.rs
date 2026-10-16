@@ -51,11 +51,7 @@ use std::time::Duration;
 // and the loop never exits. Production behaviour is unchanged.
 use tokio::time::Instant;
 
-use rs_ffmpeg::ServiceType;
-use rs_rtmp_push::{PusherConfig, RtmpPusher};
-
 use crate::buffer_state::BufferState;
-use crate::endpoint_rtmp_url::build_rtmp_url;
 use crate::endpoint_stats::Stats;
 // Canonical home for the refill-target constant is `rescue.rs` — that's
 // the legacy public name referenced across the crate. Task 6 (the
@@ -144,9 +140,7 @@ pub enum RescuePushMode {
 /// the warmup probe loop owns those fields.
 #[allow(clippy::too_many_arguments)]
 pub async fn rust_rescue_push(
-    alias: &str,
-    service_type: ServiceType,
-    stream_key: &str,
+    target: crate::backup_mirror::PushTarget,
     source: crate::rescue_segments::RescueClipSource,
     buffer_state: Arc<BufferState>,
     stats: Stats,
@@ -157,17 +151,26 @@ pub async fn rust_rescue_push(
     // factored into `rust_rescue_push_with_pusher` so tests can inject a
     // recording `Pushable` and prove the rescue clip bytes are actually
     // pushed without standing up a real RTMP server (#239). This wrapper is
-    // the ONLY place that constructs the concrete `RtmpPusher`, so the
-    // production behaviour is byte-identical to before the extraction.
-    let url = build_rtmp_url(service_type, stream_key);
+    // the ONLY place that builds the rescue pusher, through the one factory
+    // (#368: the rescue clip reaches the YouTube backup ingest too).
+    // The URL carries the stream key: log the service, never the URL.
     tracing::info!(
-        alias,
-        url = %url,
+        alias = %target.alias,
+        service = ?target.service_type,
         source = %source.describe(mode, false, RESCUE_REFILL_TARGET_SECS),
         "rust_rescue_push: starting rust rescue loop"
     );
-    let pusher = RtmpPusher::new(url, PusherConfig::default());
-    rust_rescue_push_with_pusher(pusher, alias, source, buffer_state, stats, stop_rx, mode).await
+    let pusher = crate::backup_mirror::build_endpoint_pusher(&target, &stats).await;
+    rust_rescue_push_with_pusher(
+        pusher,
+        &target.alias,
+        source,
+        buffer_state,
+        stats,
+        stop_rx,
+        mode,
+    )
+    .await
 }
 
 /// Inner rescue push loop, generic over the `Pushable` so tests can inject a
@@ -386,9 +389,13 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             rust_rescue_push(
-                "test-alias",
-                ServiceType::TestFile,
-                "test-key",
+                crate::backup_mirror::PushTarget {
+                    alias: "test-alias".to_string(),
+                    service_type: rs_ffmpeg::ServiceType::TestFile,
+                    stream_key: "test-key".to_string(),
+                    backup_ingest: true,
+                    audit_ring: None,
+                },
                 source,
                 buffer_state,
                 stats,

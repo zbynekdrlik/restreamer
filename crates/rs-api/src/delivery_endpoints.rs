@@ -11,7 +11,7 @@ use rs_core::config::Config;
 use rs_core::db;
 
 use crate::delivery::{DeliveryOrchestrator, is_delivery_active};
-use crate::delivery_helpers::build_endpoint_init_entry;
+use crate::delivery_helpers::build_vps_endpoint_entry;
 
 /// Start position strategy for an endpoint joining a delivery session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -141,7 +141,12 @@ pub async fn add_endpoint_to_delivery(
     // shape — including `pusher`. Without this, mid-stream adds silently
     // fell back to ffmpeg even when the DB row was pusher='rust' (#160 follow-up).
     let body = serde_json::json!({
-        "endpoint": build_endpoint_init_entry(&ep, chunk_format, start_chunk_id),
+        "endpoint": build_vps_endpoint_entry(
+            &ep,
+            chunk_format,
+            start_chunk_id,
+            config.delivery.youtube_backup_ingest,
+        ),
     });
 
     let delivery_url = format!("http://{}:8000", instance.ipv4);

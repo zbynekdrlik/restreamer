@@ -543,6 +543,7 @@ mod tests {
         ("delivery.orphan_delete_grace_secs", false),
         ("delivery.orphan_detect_grace_secs", false),
         ("delivery.orphan_sweep_interval_secs", false),
+        ("delivery.youtube_backup_ingest", false),
         ("facebook.api_version", false),
         ("facebook.enabled", false),
         ("facebook.page_access_token", true),

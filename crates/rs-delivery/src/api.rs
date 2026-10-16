@@ -108,10 +108,20 @@ pub struct EndpointConfig {
     /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
     #[serde(default)]
     pub pusher: PusherKind,
+    /// #368: also push this endpoint to its YouTube BACKUP ingest (only a
+    /// YT_RTMP endpoint has one). The host sends its
+    /// `delivery.youtube_backup_ingest` switch; a payload without the field
+    /// (an older host) keeps the backup ON.
+    #[serde(default = "default_youtube_backup_ingest")]
+    pub youtube_backup_ingest: bool,
 }
 
 fn default_chunk_format() -> String {
     "flv".to_string()
+}
+
+fn default_youtube_backup_ingest() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -366,6 +376,10 @@ struct EndpointStatusEntry {
     /// ETA in seconds until rescue mode ends (warmup or buffer refill).
     #[serde(skip_serializing_if = "Option::is_none")]
     rescue_eta_secs: Option<u64>,
+    /// #368: the YouTube backup ingest mirror (connected, reconnects, pushed
+    /// and dropped chunks, last error); omitted for an endpoint without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_ingest: Option<crate::backup_mirror::BackupIngestStatus>,
 }
 
 async fn endpoint_status(
@@ -398,6 +412,7 @@ async fn endpoint_status(
             restart_history: stats.restart_history.into_iter().collect(),
             delivery_mode: stats.delivery_mode.clone(),
             rescue_eta_secs: stats.rescue_eta_secs,
+            backup_ingest: stats.backup_ingest.as_ref().map(|b| b.snapshot()),
         });
     }
     // Release the endpoint map BEFORE touching the sink slot: the reconcile

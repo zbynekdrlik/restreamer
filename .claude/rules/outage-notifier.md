@@ -43,6 +43,11 @@ emitter of one.
 - **#311 first:** rows of a CI `E2E-*` event return before ANY state change,
   lifecycle rows included, so a CI delivery never closes a real one's
   episodes.
+- **A YouTube BACKUP ingest death is not an onset (#368):**
+  `EndpointBackupPushDied` stays unclassified (the primary still delivers),
+  pinned by `a_backup_ingest_death_never_alerts`. Never route it into the
+  `Rescue`/push families or rename it to `endpoint_rtmp_push_died` (CI death
+  gates count that string).
 - **Override rows are not onsets:** `IngestSkewDetected` with
   `state: "override"` (operator force-start) is an audit record of a bypass;
   `onset_suppressed_by_detail` drops it (the latched guard already alerted).

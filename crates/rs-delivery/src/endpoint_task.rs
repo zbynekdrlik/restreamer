@@ -2,7 +2,6 @@
 /// Producer -> bounded channel (~20s) -> Consumer (ffmpeg writer).
 use rs_core::models::PusherKind;
 use rs_ffmpeg::ServiceType;
-use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{mpsc, watch};
 
@@ -56,7 +55,8 @@ pub use crate::endpoint_audit::{
 mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{
-    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push, maybe_refill_throttle,
+    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, maybe_refill_throttle, push_chunk,
+    reset_after_rescue,
 };
 
 // Fast-endpoint keepalive + outage escalation (C1 #251) extracted to keep this
@@ -86,7 +86,6 @@ pub use crate::endpoint_stats::{
 mod endpoint_handle;
 pub use endpoint_handle::EndpointHandle;
 
-use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
 pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url as build_rtmp_url_pub;
 
@@ -128,7 +127,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     // `proc` is the ffmpeg-path output handle (None when using Rust pusher).
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     // `rust_pusher` is the Rust-path output handle (None when using ffmpeg).
-    let mut rust_pusher: Option<RtmpPusher> = None;
+    let mut rust_pusher: Option<crate::backup_mirror::EndpointPusher> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     // Class-aware backoff: tracks the ReasonClass of the most recent death
     // and how many deaths in a row shared that class. See `ffmpeg_reason`.
@@ -152,18 +151,25 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_zero_byte_deaths: u32 = 0;
     // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
     let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+    // #368 review: the next chunk, already offered to the YouTube backup
+    // ahead of its primary push (`feed_backup_ahead`).
+    let mut lookahead: Option<PrefetchedChunk> = None;
     // Phase 1 (#176): per-consumer rate limiter + clocks for DiskCachePushSample.
     let push_audit_rl = rs_core::audit::RateLimiter::new();
     let push_ctx = PushSampleCtx::new(&audit_ring, &push_audit_rl, &alias, delivery_delay_ms);
 
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
+    // #368: ONE factory builds every live and rescue pusher: the primary plus,
+    // for YouTube, the backup ingest mirror.
+    let push_target =
+        crate::backup_mirror::PushTarget::for_endpoint(&ep_cfg, service_type, audit_ring.clone());
 
     if use_rust_pusher {
         // Rust pusher: lazy-connect on first write. Construct now so the
         // handle is available for the whole consumer lifetime.
-        let url = build_rtmp_url(service_type, &ep_cfg.stream_key);
-        tracing::info!(alias = %alias, url = %url, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
-        rust_pusher = Some(RtmpPusher::new(url, PusherConfig::default()));
+        // The URL carries the stream key: log the service, never the URL.
+        tracing::info!(alias = %alias, service = ?service_type, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
+        rust_pusher = Some(crate::backup_mirror::build_endpoint_pusher(&push_target, &stats).await);
     } else {
         // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
         // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
@@ -301,7 +307,19 @@ async fn consumer_task<P: OutputProcessFactory>(
         // fresh-reconnect rescue clip stays anchored to the last real chunk
         // (`keepalive_escalate_after`), so rescue never engages slower than
         // before #124.
-        let chunk = if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
+        let from_lookahead = lookahead.is_some();
+        let chunk = if let Some(c) = lookahead.take() {
+            // SAME buffer bookkeeping as a received chunk, now that it is due.
+            let dur = c.duration_ms.max(0) as u64;
+            let current = buffer_state
+                .buffer_duration_ms
+                .load(AtomicOrdering::Relaxed);
+            buffer_state
+                .buffer_duration_ms
+                .store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+            last_delivered_chunk_id = c.chunk_id;
+            c
+        } else if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
             tokio::select! {
                 maybe_chunk = rx.recv() => {
                     match maybe_chunk {
@@ -332,6 +350,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 last_delivered_chunk_id,
                                 &mut proc,
                                 &mut rust_pusher,
+                                push_target.backup_ingest,
                             )
                             .await;
                             break;
@@ -397,17 +416,21 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 &mut proc,
                                 &mut rust_pusher,
                                 use_rust_pusher,
+                                push_target.backup_ingest,
                             )
                             .await;
                             match outcome {
                                 crate::rescue::OutageRescueOutcome::Stop => return,
                                 crate::rescue::OutageRescueOutcome::Recovered => {
-                                    flv_normalizer = FlvStreamNormalizer::new();
                                     // The last-delivered chunk is from BEFORE the
-                                    // rescue gap; clear it so the post-rescue
-                                    // session never re-pushes a stale freeze on
-                                    // top of the fresh session.
-                                    last_chunk_bytes = None;
+                                    // rescue gap: the post-rescue session never
+                                    // re-pushes a stale freeze, and its push
+                                    // telemetry starts fresh (#368 review).
+                                    reset_after_rescue(
+                                        &mut flv_normalizer,
+                                        &mut last_chunk_bytes,
+                                        &mut rust_telemetry,
+                                    );
                                 }
                             }
                             continue;
@@ -467,6 +490,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             last_delivered_chunk_id,
                             &mut proc,
                             &mut rust_pusher,
+                            push_target.backup_ingest,
                         )
                         .await;
                         break;
@@ -504,6 +528,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                         &mut proc,
                         &mut rust_pusher,
                         use_rust_pusher,
+                        push_target.backup_ingest,
                     )
                     .await;
                     match outcome {
@@ -539,7 +564,17 @@ async fn consumer_task<P: OutputProcessFactory>(
             // leaving the pusher with raw tag bytes that fail the FLV
             // signature check at offset 0.
             if let Some(ref mut pusher) = rust_pusher {
-                let action = handle_rust_push(
+                // #368 review: the backup holds the next chunk BEFORE the
+                // primary pushes (and maybe reconnects and re-sends) this one.
+                crate::backup_mirror::feed_backup_ahead(
+                    pusher,
+                    &chunk.data,
+                    from_lookahead,
+                    &mut rx,
+                    &mut lookahead,
+                );
+                // #368: `push_chunk` re-sends a chunk whose push failed, once.
+                let action = push_chunk(
                     pusher,
                     &chunk.data,
                     chunk_id,
@@ -700,7 +735,8 @@ async fn consumer_task<P: OutputProcessFactory>(
         p.kill().await;
     }
     if let Some(mut pusher) = rust_pusher {
-        pusher.close().await;
+        // #368: closes the primary AND stops the backup mirror.
+        pusher.shutdown().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
 }

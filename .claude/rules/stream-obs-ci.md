@@ -193,6 +193,11 @@ UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
     - Any non-OK verdict refuses the start.
     - A tolerable verdict is re-read every 2 s for up to 15 s (a startup UNKNOWN).
     - FOREIGN refuses at once, and so do an earlier breach and a dead watchdog in this job.
+    - **A FOREIGN refusal at "Start OBS stream" is rig state, not a code defect.** Someone
+      played sound into the program mix (main run 38869238704 attempt 1: loud audio at the
+      mbc mic, 08:14-08:31Z, not ours). Read `:8891/program-audio.json`. Once it shows
+      `MEASUREMENT` for a few polls with no recent FOREIGN, rerun the failed job. Never
+      loosen the guard, and never play anything into the mix yourself.
   - `Set-StartedMarker` mirrors the marker into `program-audio-stream-owned`. The watchdog
     stops only OUR stream (#374). Music while the marker is false is logged and is not a
     breach: nothing of ours is live, and the next start re-checks.

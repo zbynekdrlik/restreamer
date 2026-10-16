@@ -1517,6 +1517,41 @@ jobs:
           echo "OK: every endpoint alias e2e-obs-youtube-test looks up is attached and seeded by CI:"
           echo "$looked_up"
 
+      - name: "Verify the sustained YT gate asserts the YouTube backup ingest (#368)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # #368: every YouTube endpoint also streams to YouTube's backup
+          # ingest. The sustained gate is the only place CI proves the mirror
+          # runs against real YouTube: 'e2e rtmp' backup connected and pushing
+          # (>= 80 % of the primary's chunks) and no primary/backup *Mismatch*
+          # configuration issue. The step is sed-extracted from the job (which
+          # lies after test-integrity), so this check cannot match itself. The
+          # start anchor is `^ *- name:` on purpose: the FULL indented step-name
+          # line must not appear in this file a second time, because
+          # verify_program_audio_guard.py's self-test splices its bad steps in
+          # front of the first occurrence of that line.
+          STEP=$(sed -n '/^ *- name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"$/,/^      - name: "Program-audio breach check (#379)"$/p' "$WORKFLOW_FILE")
+          if [ -z "$STEP" ]; then
+            echo "ERROR: the sustained YT gate step was not found (#368 anchor moved)."
+            exit 1
+          fi
+          fail=0
+          for needle in \
+            "Where-Object { \$_.alias -eq 'e2e rtmp' }" \
+            'if (-not $ep.backup_ingest)' \
+            'if (-not $bk1.backup_ingest.connected)' \
+            'if ($bkPushed * 10 -lt $primaryPushed * 8)' \
+            "[string]\$_.type -like '*Mismatch'"; do
+            if ! grep -qF "$needle" <<<"$STEP"; then
+              echo "ERROR: the sustained YT gate lost its #368 backup-ingest assertion: $needle"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK: the sustained YT gate asserts the YouTube backup ingest (#368)."
+
       - name: "Verify the zero-ignored step prints cargo test output on failure (#367)"
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -4973,6 +5008,26 @@ jobs:
           if (-not $eventId) { throw "FAILED: no active streaming_event.id; cannot run sustained gate" }
           Write-Host "Sustained gate observing event_id=$eventId"
 
+          # #368: 'e2e rtmp' (YT_RTMP, rust pusher) also streams to YouTube's
+          # BACKUP ingest. Its mirror must be connected and keep pushing through
+          # this window. Read the VPS /api/status directly (bearer token from
+          # the host DB, as the #192 sink check does).
+          $bkInstances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+          if (-not $bkInstances -or @($bkInstances).Count -lt 1) { throw "FAILED (#368): no delivery instance for the backup-ingest check" }
+          $bkVpsBase = "http://$($bkInstances[0].ipv4):8000"
+          $bkToken = (& "C:\ProgramData\Restreamer\sqlite3.exe" -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $bkToken) { throw "FAILED (#368): could not read the VPS auth_token from the host DB" }
+          $bkHeaders = @{ Authorization = "Bearer $bkToken" }
+          function Get-RtmpBackupStatus {
+            $st = Invoke-RestMethod -Uri "$bkVpsBase/api/status" -Headers $bkHeaders -TimeoutSec 10
+            $ep = @($st.endpoints | Where-Object { $_.alias -eq 'e2e rtmp' }) | Select-Object -First 1
+            if (-not $ep) { throw "FAILED (#368): VPS /api/status has no 'e2e rtmp' endpoint" }
+            if (-not $ep.backup_ingest) { throw "FAILED (#368): 'e2e rtmp' has no backup_ingest on the VPS -- the YouTube backup ingest mirror is not running" }
+            return $ep
+          }
+          $bk0 = Get-RtmpBackupStatus
+          Write-Host "#368 backup ingest at start: connected=$($bk0.backup_ingest.connected) pushed=$($bk0.backup_ingest.chunks_pushed) dropped=$($bk0.backup_ingest.dropped_chunks) reconnects=$($bk0.backup_ingest.reconnect_count) | primary chunks=$($bk0.chunks_processed)"
+
           # Consecutive transient-YT-blip counter (#216 / #226 tolerance).
           $consecutiveYtBlip = 0
 
@@ -5054,6 +5109,14 @@ jobs:
             $consecutiveYtBlip = 0
             foreach ($s in $activeStreams) {
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                # #368: the backup ingest gets the SAME bytes as the primary, so
+                # YouTube must never report a primary/backup *Mismatch* issue
+                # (any severity: info-level ones are not advisory here).
+                $mismatch = @($s.configuration_issues | Where-Object { [string]$_.type -like '*Mismatch' })
+                if ($mismatch.Count -gt 0) {
+                  $mismatchList = ($mismatch | ForEach-Object { "$($_.type): $($_.reason) ($($_.severity))" }) -join ', '
+                  throw "FAILED (#368): sample $i/$samples - YT stream '$($s.title)' reports a primary/backup ingest mismatch: $mismatchList"
+                }
                 # /api/v1/youtube/status returns configuration_issues as
                 # structured {type, severity, reason, description?} objects
                 # (#209 - crates/rs-api/src/youtube.rs ConfigurationIssueOut).
@@ -5146,12 +5209,35 @@ jobs:
             throw "FAILED: death-rate check could not run: $($_.Exception.Message)"
           }
 
+          # #368: the backup kept pushing through the window (>= 80 % of the
+          # primary's chunks: a backup reconnect costs a few) and is connected
+          # at the end (re-read up to 3x, 5 s apart, to ride out a reconnect).
+          $bk1 = Get-RtmpBackupStatus
+          for ($r = 1; $r -le 3 -and -not $bk1.backup_ingest.connected; $r++) {
+            Start-Sleep -Seconds 5
+            $bk1 = Get-RtmpBackupStatus
+          }
+          $bkPushed = [int64]$bk1.backup_ingest.chunks_pushed - [int64]$bk0.backup_ingest.chunks_pushed
+          $primaryPushed = [int64]$bk1.chunks_processed - [int64]$bk0.chunks_processed
+          $bkDropped = [int64]$bk1.backup_ingest.dropped_chunks - [int64]$bk0.backup_ingest.dropped_chunks
+          Write-Host "#368 backup ingest over the window: pushed=$bkPushed (primary $primaryPushed) dropped=$bkDropped reconnects=$($bk1.backup_ingest.reconnect_count) last_error='$($bk1.backup_ingest.last_error)'"
+          if (-not $bk1.backup_ingest.connected) {
+            throw "FAILED (#368): the YouTube backup ingest of 'e2e rtmp' is not connected (last_error='$($bk1.backup_ingest.last_error)')"
+          }
+          if ($primaryPushed -le 0) {
+            throw "FAILED (#368): 'e2e rtmp' pushed no chunks during the window, the backup comparison is meaningless"
+          }
+          if ($bkPushed * 10 -lt $primaryPushed * 8) {
+            throw "FAILED (#368): the YouTube backup ingest pushed $bkPushed chunks vs the primary's $primaryPushed (< 80 %) -- the mirror is not keeping up"
+          }
+
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "  SUSTAINED 15-MIN GATE: PASS"
           Write-Host "  YT health stayed 'good' across all $samples samples"
           Write-Host "  No endpoint exceeded chunk_delay threshold"
           Write-Host "  No endpoint accumulated >$maxFbDeaths rtmp_push_died rows"
+          Write-Host "  YouTube backup ingest connected, pushed $bkPushed of $primaryPushed chunks, no Mismatch"
           Write-Host "=========================================="
 
       - name: "Program-audio breach check (#379)"
