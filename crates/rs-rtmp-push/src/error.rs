@@ -183,16 +183,40 @@ pub const FAST_RECONNECT_MIN_HEALTHY_MS: u64 = 60_000;
 pub const SHORT_RETRY_AFTER_FAST_MS: u64 = 3_000;
 
 /// #368: the delay before the next connect after `err`, or `None` for
-/// `LocalCancel` (no retry). Skeleton: the pre-#368 ladder, which ignores
-/// `healthy_session_ms` and `follows_fast_retry`.
+/// `LocalCancel` (no retry).
+///
+/// - The FIRST upstream close (`RemoteClosed`, `consecutive_errors == 1`)
+///   of a session that pushed media for at least
+///   `FAST_RECONNECT_MIN_HEALTHY_MS` reconnects at once (0 ms). Such a close
+///   is the platform ending one ingest session (YouTube, 2026-10-15), and
+///   the old fixed 3 s floor was the bulk of the viewer-visible gap.
+/// - A publish/connect rejection that directly follows such a fast retry
+///   gets one short retry (`SHORT_RETRY_AFTER_FAST_MS`) instead of the 30 s
+///   rejection floor: the platform may still hold the session that just
+///   closed.
+/// - Everything else keeps the pre-#368 ladder: the error's floor, doubled
+///   per consecutive error for the exponential classes, capped at 5 min.
 pub fn reconnect_delay_ms(
     err: &PushError,
     consecutive_errors: u32,
     healthy_session_ms: u64,
     follows_fast_retry: bool,
 ) -> Option<u64> {
-    let _ = (healthy_session_ms, follows_fast_retry);
     let floor_ms = backoff_floor_ms(err)?;
+    if consecutive_errors == 1
+        && healthy_session_ms >= FAST_RECONNECT_MIN_HEALTHY_MS
+        && matches!(err, PushError::RemoteClosed(_))
+    {
+        return Some(0);
+    }
+    if follows_fast_retry
+        && matches!(
+            err,
+            PushError::PublishRejected { .. } | PushError::ConnectRejected { .. }
+        )
+    {
+        return Some(SHORT_RETRY_AFTER_FAST_MS);
+    }
     if is_exponential(err) {
         let factor = 1u64 << (consecutive_errors.saturating_sub(1).min(5));
         Some(floor_ms.saturating_mul(factor).min(300_000))

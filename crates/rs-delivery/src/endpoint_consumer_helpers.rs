@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rs_rtmp_push::{PushError, backoff_floor_ms, is_exponential};
+use rs_rtmp_push::PushError;
 use tokio::sync::watch;
 
 use super::{
@@ -299,8 +299,16 @@ pub(super) async fn handle_rust_push(
             let is_dead_target = *consecutive_zero_byte_deaths >= DEAD_TARGET_ZERO_BYTE_THRESHOLD;
             let just_became_dead_target =
                 *consecutive_zero_byte_deaths == DEAD_TARGET_ZERO_BYTE_THRESHOLD;
-            let floor = backoff_floor_ms(&push_err);
-            let Some(floor_ms) = floor else {
+            // #368: the first upstream close after a healthy minute reconnects
+            // at once; a rejection right after that fast retry gets a short
+            // retry. Read the session's health BEFORE the telemetry reset.
+            let delay = rs_rtmp_push::reconnect_delay_ms(
+                &push_err,
+                *consecutive_push_errors,
+                telemetry.healthy_session_ms(),
+                telemetry.follows_fast_retry(),
+            );
+            let Some(backoff_ms) = delay else {
                 // LocalCancel is the only None-floor variant. Returning
                 // Break lets the consumer task exit; we do NOT call
                 // pusher.close() here because close happens via Drop on
@@ -319,12 +327,6 @@ pub(super) async fn handle_rust_push(
             // and chunks_processed froze. Close drops the connection so the
             // next call lazily reconnects.
             pusher.close().await;
-            let backoff_ms = if is_exponential(&push_err) {
-                let factor = 1u64 << (consecutive_push_errors.saturating_sub(1).min(5));
-                floor_ms.saturating_mul(factor).min(300_000)
-            } else {
-                floor_ms
-            };
             // #236: once classified dead-target, stop the fast (down to 3s)
             // reconnect hammer regardless of the underlying error's own
             // floor -- the remote session is gone, not merely rotating.
@@ -389,7 +391,7 @@ pub(super) async fn handle_rust_push(
             }
             *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::after_failure(
                 rs_rtmp_push::may_lose_chunk(&push_err),
-                false,
+                backoff_ms == 0,
             );
             let record = RtmpPushAuditRecord {
                 timestamp_ms,

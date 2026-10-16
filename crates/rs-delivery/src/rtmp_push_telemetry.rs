@@ -18,6 +18,12 @@ pub struct RtmpPushTelemetry {
     /// may have lost its chunk upstream, so the first push of THIS connect
     /// re-sends that same chunk (`endpoint_consumer_helpers::push_chunk`).
     resend_pending: bool,
+    /// #368: this connect was made without any delay after a healthy
+    /// session closed (`rs_rtmp_push::reconnect_delay_ms` returned 0).
+    follows_fast_retry: bool,
+    /// #368: when the first chunk of this connect was pushed; the session
+    /// counts as healthy from then on.
+    first_send_at: Option<Instant>,
     /// Test-only override: when Some, overrides Instant::now() for snapshot math.
     test_clock: Option<Instant>,
 }
@@ -31,6 +37,8 @@ impl RtmpPushTelemetry {
             last_message_type_sent: None,
             chunks_pushed: 0,
             resend_pending: false,
+            follows_fast_retry: false,
+            first_send_at: None,
             test_clock: None,
         }
     }
@@ -38,25 +46,26 @@ impl RtmpPushTelemetry {
     /// Telemetry for the connect that follows a failed push. `resend_pending`
     /// = the failed chunk must be pushed again on it (#368);
     /// `follows_fast_retry` = this connect was made without any delay.
-    /// Skeleton: the fast-retry flag is not kept yet.
     pub fn after_failure(resend_pending: bool, follows_fast_retry: bool) -> Self {
-        let _ = follows_fast_retry;
         Self {
             resend_pending,
+            follows_fast_retry,
             ..Self::new()
         }
     }
 
     /// #368: whether this connect was made immediately (0 ms) after a
-    /// healthy session closed. Skeleton: never.
+    /// healthy session closed.
     pub fn follows_fast_retry(&self) -> bool {
-        false
+        self.follows_fast_retry
     }
 
     /// #368: how long this connect has been HEALTHY (pushing media): ms since
-    /// its first successful chunk, 0 before any. Skeleton: always 0.
+    /// its first successful chunk, 0 before any.
     pub fn healthy_session_ms(&self) -> u64 {
-        0
+        self.first_send_at
+            .map(|t| self.now().saturating_duration_since(t).as_millis() as u64)
+            .unwrap_or(0)
     }
 
     /// Whether the failed chunk still has to be re-sent on this connect.
@@ -85,6 +94,8 @@ impl RtmpPushTelemetry {
             last_message_type_sent: None,
             chunks_pushed: 0,
             resend_pending: false,
+            follows_fast_retry: false,
+            first_send_at: None,
             test_clock: Some(now),
         }
     }
@@ -100,6 +111,8 @@ impl RtmpPushTelemetry {
     }
 
     pub fn note_send(&mut self, msg_type: &'static str, n_bytes: u64) {
+        let now = self.now();
+        self.first_send_at.get_or_insert(now);
         self.last_message_type_sent = Some(msg_type);
         self.bytes_sent = self.bytes_sent.saturating_add(n_bytes);
     }
@@ -159,6 +172,10 @@ impl RtmpPushTelemetry {
         map.insert(
             "chunks_pushed".into(),
             serde_json::json!(self.chunks_pushed),
+        );
+        map.insert(
+            "follows_fast_retry".into(),
+            serde_json::json!(self.follows_fast_retry),
         );
         // Omit upstream_close_first_bytes_hex when the close buffer is empty --
         // an empty string would look like "no bytes received" which is ambiguous
