@@ -171,6 +171,7 @@ fn test_endpoint_config(alias: &str, is_fast: bool) -> EndpointConfig {
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
         pusher: PusherKind::Ffmpeg,
+        youtube_backup_ingest: false,
     }
 }
 

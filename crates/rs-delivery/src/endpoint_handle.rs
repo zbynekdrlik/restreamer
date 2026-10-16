@@ -160,6 +160,7 @@ impl EndpointHandle {
             chunk_format: "flv".to_string(),
             start_chunk_id: None,
             pusher: Default::default(),
+            youtube_backup_ingest: false,
         };
         Self::stub_with_config_for_test(cfg, start_chunk_id)
     }

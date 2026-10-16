@@ -65,6 +65,24 @@ pub struct PushTarget {
     pub audit_ring: Option<Arc<AuditRing>>,
 }
 
+impl PushTarget {
+    /// The target of endpoint `ep_cfg` (whose service type the caller parsed
+    /// once). RED skeleton: the backup is always on.
+    pub fn for_endpoint(
+        ep_cfg: &crate::api::EndpointConfig,
+        service_type: ServiceType,
+        audit_ring: Option<Arc<AuditRing>>,
+    ) -> Self {
+        Self {
+            alias: ep_cfg.alias.clone(),
+            service_type,
+            stream_key: ep_cfg.stream_key.clone(),
+            backup_ingest: true,
+            audit_ring,
+        }
+    }
+}
+
 /// The backup URL this target streams to, if any: only with
 /// `backup_ingest` and only for a service that has a backup ingest.
 pub fn backup_url_for(target: &PushTarget) -> Option<String> {

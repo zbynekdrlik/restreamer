@@ -108,10 +108,21 @@ pub struct EndpointConfig {
     /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
     #[serde(default)]
     pub pusher: PusherKind,
+    /// #368: also push this endpoint to its YouTube BACKUP ingest (only a
+    /// YT_RTMP endpoint has one). The host sends its
+    /// `delivery.youtube_backup_ingest` switch; a payload without the field
+    /// (an older host) keeps the backup ON.
+    #[serde(default = "default_youtube_backup_ingest")]
+    pub youtube_backup_ingest: bool,
 }
 
 fn default_chunk_format() -> String {
     "flv".to_string()
+}
+
+/// RED skeleton: off.
+fn default_youtube_backup_ingest() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Deserialize)]

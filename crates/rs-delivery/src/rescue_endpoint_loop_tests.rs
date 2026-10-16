@@ -97,6 +97,7 @@ fn ep_cfg(alias: &str, is_fast: bool, pusher: PusherKind) -> EndpointConfig {
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
         pusher,
+        youtube_backup_ingest: false,
     }
 }
 

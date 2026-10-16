@@ -29,6 +29,20 @@ pub(crate) fn build_endpoint_init_entry(
     })
 }
 
+/// #368: the per-endpoint VPS entry the host sends (`/api/init`,
+/// `/api/endpoints/add`): `build_endpoint_init_entry` plus
+/// `youtube_backup_ingest` (the `delivery.youtube_backup_ingest` switch).
+/// RED skeleton: the flag is not carried.
+pub(crate) fn build_vps_endpoint_entry(
+    ep: &EndpointConfig,
+    chunk_format: &str,
+    start_chunk_id: i64,
+    youtube_backup_ingest: bool,
+) -> serde_json::Value {
+    let _ = youtube_backup_ingest;
+    build_endpoint_init_entry(ep, chunk_format, start_chunk_id)
+}
+
 /// Returns the wire string a `PusherKind` serializes to. Used by audit and
 /// dashboard payloads that want a stable lowercase tag.
 #[allow(dead_code)]
@@ -329,6 +343,20 @@ mod tests {
                 obj.contains_key("pusher"),
                 "init entry missing 'pusher' field for {p:?}"
             );
+        }
+    }
+
+    /// #368: the VPS learns the backup-ingest switch per endpoint, on both
+    /// paths that send an endpoint (init and mid-stream add).
+    #[test]
+    fn vps_endpoint_entry_carries_the_youtube_backup_switch() {
+        let ep = make_endpoint("e2e rtmp", PusherKind::Rust);
+        for on in [true, false] {
+            let v = build_vps_endpoint_entry(&ep, "flv", 42, on);
+            assert_eq!(v["youtube_backup_ingest"], on);
+            assert_eq!(v["pusher"], "rust", "the init entry is kept whole");
+            assert_eq!(v["start_chunk_id"], 42);
+            assert_eq!(v["alias"], "e2e rtmp");
         }
     }
 

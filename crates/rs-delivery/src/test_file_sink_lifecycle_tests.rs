@@ -40,6 +40,7 @@ fn endpoint_cfg(alias: &str, service_type: &str) -> EndpointConfig {
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
         pusher: Default::default(),
+        youtube_backup_ingest: false,
     }
 }
 

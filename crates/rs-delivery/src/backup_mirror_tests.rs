@@ -507,3 +507,42 @@ fn every_rust_pusher_is_built_by_the_one_factory() {
         "build the pusher with backup_mirror::build_endpoint_pusher: {offenders:?}"
     );
 }
+
+// --- the kill switch (#368: delivery.youtube_backup_ingest) ------------------
+
+fn vps_endpoint(json: serde_json::Value) -> crate::api::EndpointConfig {
+    serde_json::from_value(json).expect("a VPS endpoint entry")
+}
+
+#[test]
+fn an_endpoint_entry_without_the_switch_keeps_the_backup_on() {
+    let ep = vps_endpoint(serde_json::json!({
+        "alias": "YT NLCH 4K", "service_type": "YT_RTMP", "stream_key": "k"
+    }));
+    assert!(ep.youtube_backup_ingest, "an older host sends no switch");
+    let off = vps_endpoint(serde_json::json!({
+        "alias": "YT NLCH 4K", "service_type": "YT_RTMP", "stream_key": "k",
+        "youtube_backup_ingest": false
+    }));
+    assert!(!off.youtube_backup_ingest);
+}
+
+#[test]
+fn the_endpoint_push_target_follows_the_switch() {
+    for on in [true, false] {
+        let ep = vps_endpoint(serde_json::json!({
+            "alias": "YT NLW 4k", "service_type": "YT_RTMP", "stream_key": "key-9",
+            "youtube_backup_ingest": on
+        }));
+        let t = PushTarget::for_endpoint(&ep, ServiceType::YtRtmp, None);
+        assert_eq!(t.backup_ingest, on);
+        assert_eq!(t.alias, "YT NLW 4k");
+        assert_eq!(t.stream_key, "key-9");
+        assert_eq!(t.service_type, ServiceType::YtRtmp);
+        assert_eq!(
+            backup_url_for(&t).is_some(),
+            on,
+            "the switch decides whether a YouTube endpoint is mirrored"
+        );
+    }
+}

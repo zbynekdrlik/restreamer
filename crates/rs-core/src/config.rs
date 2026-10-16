@@ -571,6 +571,14 @@ pub struct DeliveryConfig {
     /// (a plain duration), so it is classified `readable` in CONFIG_INVENTORY.
     #[serde(default = "default_long_stream_warn_secs")]
     pub long_stream_warn_secs: u64,
+    /// #368: also stream every YouTube (YT_RTMP) endpoint to YouTube's BACKUP
+    /// ingest (`b.rtmp.youtube.com/live2?backup=1`, same key), which YouTube
+    /// rolls viewers over to when the primary ingest session drops. On by
+    /// default; `false` is the kill switch (primary only). Carried to the VPS
+    /// per endpoint. Not a credential (a flag): `readable` in
+    /// CONFIG_INVENTORY.
+    #[serde(default = "default_youtube_backup_ingest")]
+    pub youtube_backup_ingest: bool,
 }
 
 fn default_delivery_delay_secs() -> u64 {
@@ -593,6 +601,11 @@ fn default_long_stream_warn_secs() -> u64 {
     9000
 }
 
+/// RED skeleton: off.
+fn default_youtube_backup_ingest() -> bool {
+    false
+}
+
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
@@ -601,6 +614,7 @@ impl Default for DeliveryConfig {
             orphan_detect_grace_secs: default_orphan_detect_grace_secs(),
             orphan_delete_grace_secs: default_orphan_delete_grace_secs(),
             long_stream_warn_secs: default_long_stream_warn_secs(),
+            youtube_backup_ingest: default_youtube_backup_ingest(),
         }
     }
 }
