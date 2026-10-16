@@ -62,12 +62,14 @@ pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
         PushError::TlsHandshakeFailed(_) => Some(5_000),
         PushError::ConnectRejected { .. } => Some(30_000),
         PushError::PublishRejected { .. } => Some(30_000),
-        // RemoteClosed = upstream (YT/FB) rotated the connection. Common
-        // periodic event (~12-15 min on YT) NOT caused by us. 30 s backoff
-        // was punishing the operator: every reset added 30 s of cache
-        // overshoot before the pusher even reconnected. 3 s lets the
-        // pusher reconnect almost immediately while still avoiding a
-        // tight reconnect loop if upstream keeps rejecting.
+        // RemoteClosed = the upstream (YT/FB) ended the connection, not us.
+        // There is no fixed period: production YouTube closes came after
+        // 27 min to 500 min of session (#368); only the CI `e2e rtmp`
+        // endpoint sees one every ~15 min. 30 s backoff was punishing the
+        // operator: every reset added 30 s of cache overshoot before the
+        // pusher even reconnected. 3 s avoids a tight reconnect loop if
+        // upstream keeps rejecting; the FIRST close after a healthy minute
+        // reconnects at once (`reconnect_delay_ms`, #368).
         PushError::RemoteClosed(_) => Some(3_000),
         PushError::Timeout => Some(10_000),
         PushError::IoError(_) => Some(15_000),
@@ -110,9 +112,10 @@ pub fn map_read_err(err: BytesIOError) -> PushError {
 }
 
 /// Map an error from writing a chunk (xiu's `ChunkPacketizer::write_chunk`)
-/// onto a `PushError`. A write the upstream ended (reset, broken pipe, EOF:
-/// YouTube rotates its ingest connection every ~15 min) is `RemoteClosed`, as on
-/// the read side; any other write failure stays `IoError`.
+/// onto a `PushError`. A write the upstream ended (reset, broken pipe, EOF: a
+/// YouTube ingest session close, e.g. the 2026-10-15 "Broken pipe" after 44
+/// min) is `RemoteClosed`, as on the read side; any other write failure stays
+/// `IoError`.
 pub fn map_write_err(err: PackError) -> PushError {
     let io_err = match err.value {
         PackErrorValue::BytesWriteError(BytesWriteError {
@@ -238,10 +241,9 @@ pub fn is_exponential(err: &PushError) -> bool {
             | PushError::IoError(_)
             | PushError::HandshakeFailed(_)
             | PushError::TlsHandshakeFailed(_)
-            // RemoteClosed = upstream-initiated rotation (e.g. YT load
-            // balancer churn every ~12-15 min). Never exponential — each
-            // event is independent of our behaviour, escalating wastes
-            // cache time we just got.
+            // RemoteClosed = an upstream-initiated session close (no fixed
+            // period, #368). Never exponential — each event is independent
+            // of our behaviour, escalating wastes cache time we just got.
             | PushError::RemoteClosed(_)
             | PushError::MalformedInput { .. }
             // AvSkewExceeded (#257) = deliberate recovery reconnect. The

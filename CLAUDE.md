@@ -22,6 +22,7 @@ auto-load on their `paths:` — you do not invoke those.
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
 - installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
 - rs-rtmp-push in-process RTMP test servers / rejection-path harness → `.claude/rules/rtmp-test-harness.md` (auto)
+- YouTube backup ingest mirror (one pusher factory, close vs shutdown), failed-chunk re-send, fast first reconnect, RTMP ping/ack (#368) → `.claude/rules/youtube-backup-ingest.md` (auto)
 - Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
