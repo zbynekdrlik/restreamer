@@ -19,7 +19,7 @@ mod url;
 pub use av_invariant::{
     AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantGuard, AvInvariantViolation,
 };
-pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err};
+pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err, may_lose_chunk};
 pub use pusher::RtmpPusher;
 pub use skew::{GuardMode, MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};

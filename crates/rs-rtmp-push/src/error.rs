@@ -146,6 +146,14 @@ fn peer_gone(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// #368: whether a push that failed with `err` may have left (part of) its
+/// chunk undelivered upstream, so the consumer must push that SAME chunk
+/// once more on the fresh session. Skeleton: never.
+pub fn may_lose_chunk(err: &PushError) -> bool {
+    let _ = err;
+    false
+}
+
 /// Whether to escalate the floor exponentially on consecutive same-class
 /// errors. `BadName` is fixed (operator must rotate the key); the rest follow
 /// today's exponential ×2 cap-at-300s policy.
@@ -440,6 +448,46 @@ mod tests {
             !is_exponential(&e),
             "TlsHandshakeFailed uses fixed floor, not exponential"
         );
+    }
+
+    // --- may_lose_chunk (#368: re-send the failed chunk once) ---
+
+    #[test]
+    fn a_transport_or_connect_failure_may_lose_the_chunk() {
+        let lost = [
+            PushError::RemoteClosed(io::Error::from(io::ErrorKind::BrokenPipe)),
+            PushError::IoError(io::Error::other("x")),
+            PushError::Timeout,
+            PushError::HandshakeFailed(io::Error::other("x")),
+            PushError::TlsHandshakeFailed("x".into()),
+            PushError::ConnectRejected {
+                code: "NetConnection.Connect.Rejected".into(),
+                description: String::new(),
+            },
+            PushError::PublishRejected {
+                code: "NetStream.Publish.BadName".into(),
+                description: String::new(),
+            },
+        ];
+        for e in lost {
+            assert!(may_lose_chunk(&e), "{e:?} must re-send the chunk");
+        }
+    }
+
+    #[test]
+    fn a_skew_trip_bad_input_or_cancel_never_resends() {
+        // AvSkewExceeded is returned AFTER the whole chunk went out; a
+        // malformed chunk would fail identically again; a cancel stops.
+        for e in [
+            PushError::AvSkewExceeded { skew_ms: 4_500 },
+            PushError::MalformedInput {
+                offset: 0,
+                reason: "x".into(),
+            },
+            PushError::LocalCancel,
+        ] {
+            assert!(!may_lose_chunk(&e), "{e:?} must not re-send");
+        }
     }
 
     // --- map_read_err ---

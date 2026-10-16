@@ -16,6 +16,8 @@ mod rescue_behavioral_tests;
 mod rescue_endpoint_loop_tests;
 #[path = "endpoint_task_rescue_tests.rs"]
 mod rescue_tests;
+#[path = "endpoint_task_resend_tests.rs"]
+mod resend_tests;
 #[path = "endpoint_task_rust_push_tests.rs"]
 mod rust_push_tests;
 #[path = "endpoint_task_service_type_tests.rs"]

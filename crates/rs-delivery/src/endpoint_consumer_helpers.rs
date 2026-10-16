@@ -483,6 +483,44 @@ pub(super) async fn handle_rust_push(
     }
 }
 
+/// #368: push ONE chunk through `handle_rust_push`. Skeleton: a single
+/// attempt, exactly as before.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn push_chunk(
+    pusher: &mut impl Pushable,
+    data: &[u8],
+    chunk_id: i64,
+    chunk_duration_ms: i64,
+    alias: &str,
+    service_type: &str,
+    consecutive_push_errors: &mut u32,
+    consecutive_write_failures: &mut u32,
+    consecutive_zero_byte_deaths: &mut u32,
+    stats: &Stats,
+    audit_ring: &Option<Arc<AuditRing>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
+    stop_rx: &mut watch::Receiver<bool>,
+    flv_normalizer: &mut FlvStreamNormalizer,
+) -> RustPushAction {
+    handle_rust_push(
+        pusher,
+        data,
+        chunk_id,
+        chunk_duration_ms,
+        alias,
+        service_type,
+        consecutive_push_errors,
+        consecutive_write_failures,
+        consecutive_zero_byte_deaths,
+        stats,
+        audit_ring,
+        telemetry,
+        stop_rx,
+        flv_normalizer,
+    )
+    .await
+}
+
 /// Return from `handle_ffmpeg_death`: what the consumer loop should do next.
 pub(super) enum FfmpegDeathAction {
     /// Continue to the spawn-new-process step.

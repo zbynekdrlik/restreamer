@@ -33,6 +33,16 @@ pub(crate) trait Pushable {
     /// (no default): a pusher that silently returned nothing would make
     /// its violations invisible.
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent>;
+    /// #368: push a chunk AGAIN after its first push failed (the consumer's
+    /// one re-send on the fresh session). A plain pusher pushes it like any
+    /// chunk; a pusher that mirrors its chunks elsewhere (the YouTube backup
+    /// tee) already mirrored this one and must send it to the primary only.
+    fn repush_flv_bytes(
+        &mut self,
+        data: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), PushError>> + Send {
+        self.push_flv_bytes(data)
+    }
 }
 
 impl Pushable for RtmpPusher {
