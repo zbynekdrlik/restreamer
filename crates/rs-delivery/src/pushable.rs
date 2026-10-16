@@ -71,4 +71,8 @@ impl Pushable for RtmpPusher {
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
         RtmpPusher::take_av_invariant_events(self)
     }
+
+    fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
+        RtmpPusher::last_upstream_ack_at(self)
+    }
 }

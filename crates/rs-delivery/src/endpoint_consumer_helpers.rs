@@ -227,6 +227,12 @@ pub(super) async fn handle_rust_push(
     for event in pusher.take_av_invariant_events() {
         endpoint_audit::emit_av_invariant_event(audit_ring, alias, &event);
     }
+    // #368: carry the session's latest upstream Acknowledgement into the
+    // telemetry BEFORE an error arm snapshots it (and before close() drops
+    // the session that holds it).
+    if let Some(at) = pusher.last_upstream_ack_at() {
+        telemetry.note_upstream_ack_at(at);
+    }
 
     match push_result {
         Ok(Ok(())) => {

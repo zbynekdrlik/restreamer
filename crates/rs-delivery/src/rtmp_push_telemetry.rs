@@ -117,11 +117,17 @@ impl RtmpPushTelemetry {
         self.bytes_sent = self.bytes_sent.saturating_add(n_bytes);
     }
 
-    /// Wired by the rs-rtmp-push read loop on incoming RTMP Acknowledgement
-    /// messages. Phase 2 (#177) will plumb the call site into the ClientSession
-    /// receive path; today this method is unreachable from production.
+    /// An upstream RTMP Acknowledgement arrived now.
     pub fn note_upstream_ack(&mut self) {
-        self.last_upstream_ack_at = Some(self.now());
+        self.note_upstream_ack_at(self.now());
+    }
+
+    /// #368: the pusher's read loop saw the latest upstream Acknowledgement
+    /// at `at` (`Pushable::last_upstream_ack_at`); the consumer copies it in
+    /// after every push, so the death row's `time_since_last_upstream_ack_ms`
+    /// is measured instead of always null.
+    pub fn note_upstream_ack_at(&mut self, at: Instant) {
+        self.last_upstream_ack_at = Some(at);
     }
 
     pub fn note_chunk_pushed(&mut self) {
