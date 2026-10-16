@@ -32,8 +32,9 @@
 //!
 //! Returns `true` when a stop signal arrives (caller should exit the
 //! whole endpoint task), or `false` when `producer_active` has stayed
-//! `true` AND `highest_sent_chunk_id` has advanced (genuinely fresh chunks
-//! queued) for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds — proving
+//! `true` for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds AND at least
+//! `RESCUE_EXIT_MIN_FRESH_CHUNKS` chunks were queued since rescue began
+//! (`BufferState::chunks_sent_total`) — proving
 //! OBS is back and the cache window is really refilling, not merely that the
 //! producer_active flag flapped true over a stalled producer (#289).
 
@@ -83,14 +84,11 @@ const ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// expires and the exit never fires. `highest_sent_chunk_id` is cumulative
 /// BY DESIGN precisely because of this backpressure plateau.
 ///
-/// The correct discriminator is the COUNT of fresh chunks queued since
-/// rescue BEGAN: a stray tail is 1-2 chunks; genuine recovery fills the
-/// channel to `PREFETCH_BUFFER_SIZE` (10) and plateaus there. Half the
-/// channel is comfortably above any realistic stray tail and comfortably
-/// below the plateau, so recovery always reaches it and strays never do.
-/// Worst case if a long stray tail ever meets the threshold: rescue exits,
-/// drains those few stale chunks, the producer stalls again, and rescue
-/// re-latches within ~18s -- bounded and self-healing, unlike a deadlock.
+/// The correct discriminator is the COUNT of chunks queued in the prefetch
+/// channel since rescue BEGAN (`BufferState::chunks_sent_total`): a stray
+/// tail is 1-2 chunks; genuine recovery fills the channel to
+/// `PREFETCH_BUFFER_SIZE` (10) and plateaus there. Half the channel is well
+/// above a single stray tail and well below the plateau.
 ///
 /// The count runs from the start of rescue, NOT from the start of the
 /// current active window: nothing drains the channel during rescue, so a
@@ -98,6 +96,13 @@ const ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// every gap deadlocked the crash-exhaustion gate (main run 38825629603):
 /// a 7-chunk upload backlog, a ~34 s gap until OBS reconnected, then 3 new
 /// chunks filled the channel, and the last window could only ever see 3.
+/// It counts CHUNKS, not sent IDs: a skip-ahead or lag-probe jump queues one
+/// chunk whose ID is several past the last.
+///
+/// Worst case, since strays now add up across gaps: 5 stray chunks over a
+/// long trickle outage, then 120 s of continuous producer activity with no
+/// new chunk. Rescue exits and plays those 5 real chunks (~10 s), then the
+/// drained consumer falls back into rescue -- bounded, unlike a deadlock.
 const RESCUE_EXIT_MIN_FRESH_CHUNKS: i64 = {
     let half = crate::endpoint_task::PREFETCH_BUFFER_SIZE as i64 / 2;
     if half < 1 { 1 } else { half }
@@ -190,23 +195,24 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     // outage notice) so the first push is correct before any bookkeeping.
     let mut refilling = false;
     let mut eta = RESCUE_REFILL_TARGET_SECS;
-    // #289: the high-water mark of chunks the producer had SENT into the
-    // prefetch channel when rescue STARTED. Nothing drains the channel during
-    // rescue, so `sent - rescue_start_sent` is the real content queued to play.
+    // #289: how many chunks the producer had SENT into the prefetch channel
+    // when rescue STARTED.
     // Outage rescue must exit only on GENUINE resumed live delivery, never on
     // a bare `producer_active` flag flip. During a sustained/trickle outage the
     // #237 producer-respawn churn (and a stale-tail re-fetch) can hold
     // `producer_active` true for the whole refill window WITHOUT any fresh
     // content: the respawn resumes PAST the live edge, finds nothing, and
-    // `highest_sent_chunk_id` (a `fetch_max`, capped at the pre-outage edge)
-    // never advances. Keying the exit on the flag alone therefore dropped
+    // sends nothing. Keying the exit on the flag alone therefore dropped
     // rescue back to "normal" onto a dark/stuttering stream (issue #289).
-    // Requiring `highest_sent_chunk_id` to have ADVANCED during rescue proves
-    // genuinely new chunks were queued — the cache is really refilling —
-    // before we resume normal delivery. It is fixed for the whole rescue: a
-    // producer gap must not discard chunks already queued (see
-    // RESCUE_EXIT_MIN_FRESH_CHUNKS for the deadlock that re-basing caused).
-    let rescue_start_sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
+    // Requiring chunks to have been QUEUED during rescue (the producer's
+    // `chunks_sent_total`, the count of successful sends into the channel)
+    // proves the cache is really refilling before we resume normal delivery.
+    // Nothing drains the channel during rescue, so the difference from this
+    // rescue-start value is the real content waiting to play. It is fixed
+    // for the whole rescue: a producer gap must not discard chunks already
+    // queued (see RESCUE_EXIT_MIN_FRESH_CHUNKS for the deadlock re-basing
+    // caused, and why IDs are not counted).
+    let rescue_start_sent = buffer_state.chunks_sent_total.load(Ordering::Relaxed);
 
     loop {
         // #259: pick the segment for the CURRENT rescue state. For the
@@ -244,7 +250,7 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 let elapsed_ms = last_check.elapsed().as_millis() as u64;
                 last_check = Instant::now();
                 let active = buffer_state.producer_active.load(Ordering::Relaxed);
-                let sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
+                let sent = buffer_state.chunks_sent_total.load(Ordering::Relaxed);
                 if active {
                     continuous_active_ms =
                         continuous_active_ms.saturating_add(elapsed_ms);
@@ -260,7 +266,7 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 // live edge (real recovery); stays 0 while `producer_active`
                 // merely flaps true over a stalled producer (respawn churn /
                 // stale-tail re-fetch).
-                let fresh_chunks = sent.saturating_sub(rescue_start_sent);
+                let fresh_chunks = sent.saturating_sub(rescue_start_sent) as i64;
                 // A stray tail re-fetch lands 1-2 chunks; genuine recovery
                 // fills the prefetch channel and plateaus at
                 // PREFETCH_BUFFER_SIZE. The COUNT separates them — recency
