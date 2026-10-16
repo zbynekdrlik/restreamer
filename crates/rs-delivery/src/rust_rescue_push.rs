@@ -52,7 +52,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::buffer_state::BufferState;
-use crate::endpoint_rtmp_url::build_rtmp_url;
 use crate::endpoint_stats::Stats;
 // Canonical home for the refill-target constant is `rescue.rs` — that's
 // the legacy public name referenced across the crate. Task 6 (the
@@ -154,10 +153,10 @@ pub async fn rust_rescue_push(
     // pushed without standing up a real RTMP server (#239). This wrapper is
     // the ONLY place that builds the rescue pusher, through the one factory
     // (#368: the rescue clip reaches the YouTube backup ingest too).
-    let url = build_rtmp_url(target.service_type, &target.stream_key);
+    // The URL carries the stream key: log the service, never the URL.
     tracing::info!(
         alias = %target.alias,
-        url = %url,
+        service = ?target.service_type,
         source = %source.describe(mode, false, RESCUE_REFILL_TARGET_SECS),
         "rust_rescue_push: starting rust rescue loop"
     );

@@ -85,7 +85,6 @@ pub use crate::endpoint_stats::{
 mod endpoint_handle;
 pub use endpoint_handle::EndpointHandle;
 
-use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
 pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url as build_rtmp_url_pub;
 
@@ -167,8 +166,8 @@ async fn consumer_task<P: OutputProcessFactory>(
     if use_rust_pusher {
         // Rust pusher: lazy-connect on first write. Construct now so the
         // handle is available for the whole consumer lifetime.
-        let url = build_rtmp_url(service_type, &ep_cfg.stream_key);
-        tracing::info!(alias = %alias, url = %url, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
+        // The URL carries the stream key: log the service, never the URL.
+        tracing::info!(alias = %alias, service = ?service_type, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
         rust_pusher = Some(crate::backup_mirror::build_endpoint_pusher(&push_target, &stats).await);
     } else {
         // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
