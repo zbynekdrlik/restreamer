@@ -23,9 +23,14 @@
 //!   built, so the live chunks, the keepalive freeze and the rescue clip all
 //!   reach the backup as well.
 //!
+//! - The live consumer keeps the backup ONE chunk ahead of the primary
+//!   ([`feed_backup_ahead`]): while the primary reconnects and re-sends a
+//!   failed chunk, the backup already holds the next one.
+//!
 //! Limit: one VPS feeds both ingests, so this covers a YouTube-side session
-//! close, not a VPS loss. The backup is fed at the primary's push cadence: a
-//! primary stuck in a long write timeout starves the backup too.
+//! close, not a VPS loss. The backup is still fed at the primary's cadence
+//! plus one chunk: a primary stuck in a long write timeout starves the backup
+//! after that chunk.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -39,6 +44,7 @@ use tokio::time::Instant;
 use crate::audit_ring::{AuditRing, RingRowParts};
 use crate::endpoint_rtmp_url::{build_backup_rtmp_url, build_rtmp_url};
 use crate::endpoint_stats::Stats;
+use crate::endpoint_task::PrefetchedChunk;
 use crate::pushable::Pushable;
 
 /// Whole chunks (~2 s each) the backup may lag behind before the tee drops
@@ -351,20 +357,62 @@ impl Drop for BackupMirror {
 ///   ONLY the primary. The backup must stay up exactly while the primary
 ///   reconnects; that is what it is for.
 /// - `shutdown` (endpoint end, rescue switch) closes both.
+/// - `offer_ahead` hands a chunk to the backup before its turn on the
+///   primary; its `push_flv_bytes` then does not offer it again.
 pub(crate) struct TeePusher<P> {
     primary: P,
     backup: Option<BackupMirror>,
+    /// Chunks `offer_ahead` gave the backup that the primary has not pushed
+    /// yet. Each `push_flv_bytes` consumes one instead of offering.
+    pre_offered: u32,
 }
 
 impl<P> TeePusher<P> {
     pub fn new(primary: P, backup: Option<BackupMirror>) -> Self {
-        Self { primary, backup }
+        Self {
+            primary,
+            backup,
+            pre_offered: 0,
+        }
     }
 
-    #[cfg(test)]
-    pub fn has_backup(&self) -> bool {
+    /// This pusher mirrors to a backup ingest.
+    pub fn mirrors(&self) -> bool {
         self.backup.is_some()
     }
+
+    /// Offer `data` to the backup now, ahead of its primary push. A no-op
+    /// without a backup.
+    pub fn offer_ahead(&mut self, data: &[u8]) {
+        if let Some(backup) = &self.backup {
+            backup.offer(data);
+            self.pre_offered += 1;
+        }
+    }
+}
+
+/// #368 review: keep the backup ONE chunk ahead of the primary.
+///
+/// The tee offers a chunk to the backup when the primary starts it. When the
+/// primary failed mid-chunk, `push_chunk` reconnects and re-sends that chunk
+/// before the consumer takes the next one, so the backup had nothing queued:
+/// it went quiet for the reconnect plus the part already sent (up to ~2 s),
+/// exactly while YouTube rolls viewers over to it.
+///
+/// So the consumer offers the current chunk (unless it already did, as the
+/// previous look-ahead) and the NEXT chunk when the producer already has it,
+/// and keeps that next chunk in `lookahead` for its own next turn. Without a
+/// backup this touches nothing: other endpoints keep their exact receive
+/// order.
+pub(crate) fn feed_backup_ahead<P>(
+    tee: &mut TeePusher<P>,
+    current: &[u8],
+    current_offered: bool,
+    rx: &mut mpsc::Receiver<PrefetchedChunk>,
+    lookahead: &mut Option<PrefetchedChunk>,
+) {
+    // RED skeleton: no look-ahead yet.
+    let _ = (tee, current, current_offered, rx, lookahead);
 }
 
 impl<P: Pushable> TeePusher<P> {
@@ -381,7 +429,11 @@ impl<P: Pushable> TeePusher<P> {
 impl<P: Pushable + Send> Pushable for TeePusher<P> {
     async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
         if let Some(backup) = &self.backup {
-            backup.offer(data);
+            if self.pre_offered > 0 {
+                self.pre_offered -= 1;
+            } else {
+                backup.offer(data);
+            }
         }
         self.primary.push_flv_bytes(data).await
     }

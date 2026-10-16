@@ -462,21 +462,21 @@ async fn the_factory_mirrors_youtube_and_publishes_the_backup_state() {
         crate::endpoint_stats::EndpointStats::default(),
     ));
     let yt = build_endpoint_pusher(&target(ServiceType::YtRtmp, true), &stats).await;
-    assert!(yt.has_backup());
+    assert!(yt.mirrors());
     assert!(
         stats.lock().await.backup_ingest.is_some(),
         "the endpoint stats carry the mirror's state"
     );
 
     let fb = build_endpoint_pusher(&target(ServiceType::Facebook, true), &stats).await;
-    assert!(!fb.has_backup());
+    assert!(!fb.mirrors());
     assert!(
         stats.lock().await.backup_ingest.is_none(),
         "a pusher without a backup clears the stats entry"
     );
 
     let off = build_endpoint_pusher(&target(ServiceType::YtRtmp, false), &stats).await;
-    assert!(!off.has_backup(), "the kill switch turns the mirror off");
+    assert!(!off.mirrors(), "the kill switch turns the mirror off");
 }
 
 /// Every live and rescue pusher must come from `build_endpoint_pusher`, or
@@ -546,3 +546,119 @@ fn the_endpoint_push_target_follows_the_switch() {
         );
     }
 }
+
+/// #368 review: a chunk as the producer queues it for the consumer.
+fn prefetched(i: u8) -> PrefetchedChunk {
+    PrefetchedChunk {
+        chunk_id: i64::from(i),
+        data: chunk(i),
+        duration_ms: 2_000,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_backup_gets_the_next_chunk_while_the_primary_is_stuck_on_the_current_one() {
+    // A primary stuck on chunk 1 (reconnecting, re-sending it): before the
+    // look-ahead the backup got chunk 2 only after the primary was done with
+    // chunk 1, so it went quiet exactly while YouTube rolled over to it.
+    let primary = Mock {
+        hang: true,
+        ..Mock::default()
+    };
+    let backup = Mock::default();
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(primary, backup, None);
+    let (tx, mut rx) = mpsc::channel(PREFETCH_TEST_DEPTH);
+    for i in 1..=2 {
+        tx.send(prefetched(i)).await.expect("queue");
+    }
+    let mut lookahead = None;
+    let current = rx.recv().await.expect("chunk 1");
+
+    feed_backup_ahead(&mut tee, &current.data, false, &mut rx, &mut lookahead);
+    let stuck =
+        tokio::time::timeout(Duration::from_secs(5), tee.push_flv_bytes(&current.data)).await;
+    assert!(stuck.is_err(), "the primary is stuck on chunk 1");
+    settle(100, || pushes(&backup_log).len() == 2).await;
+
+    assert_eq!(
+        pushes(&backup_log),
+        vec![chunk(1), chunk(2)],
+        "the backup already has chunk 2 while the primary is stuck on chunk 1"
+    );
+    assert_eq!(
+        lookahead.as_ref().map(|c| c.chunk_id),
+        Some(2),
+        "the consumer keeps chunk 2 for its own next turn"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_look_ahead_chunk_reaches_the_backup_exactly_once_and_in_order() {
+    let primary = Mock::default();
+    let primary_log = Arc::clone(&primary.log);
+    let backup = Mock::default();
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(primary, backup, None);
+    let state = tee.backup.as_ref().expect("backup").state();
+    let (tx, mut rx) = mpsc::channel(PREFETCH_TEST_DEPTH);
+    for i in 1..=3 {
+        tx.send(prefetched(i)).await.expect("queue");
+    }
+    drop(tx);
+
+    // The consumer's turn order: the look-ahead first, then the queue.
+    let mut lookahead: Option<PrefetchedChunk> = None;
+    loop {
+        let from_lookahead = lookahead.is_some();
+        let current = match lookahead.take() {
+            Some(c) => c,
+            None => match rx.try_recv() {
+                Ok(c) => c,
+                Err(_) => break,
+            },
+        };
+        feed_backup_ahead(
+            &mut tee,
+            &current.data,
+            from_lookahead,
+            &mut rx,
+            &mut lookahead,
+        );
+        tee.push_flv_bytes(&current.data)
+            .await
+            .expect("primary push");
+    }
+    // A chunk pushed with nothing offered ahead (a keepalive frame) still
+    // reaches the backup through the tee.
+    tee.push_flv_bytes(&chunk(9)).await.expect("primary push");
+    settle(100, || pushes(&backup_log).len() == 4).await;
+
+    let sent = vec![chunk(1), chunk(2), chunk(3), chunk(9)];
+    assert_eq!(pushes(&primary_log), sent);
+    assert_eq!(
+        pushes(&backup_log),
+        sent,
+        "every chunk reaches the backup once, in order"
+    );
+    assert_eq!(state.snapshot().dropped_chunks, 0);
+}
+
+#[tokio::test]
+async fn without_a_backup_the_consumer_queue_is_left_alone() {
+    let mut tee = TeePusher::new(Mock::default(), None);
+    let (tx, mut rx) = mpsc::channel(PREFETCH_TEST_DEPTH);
+    tx.send(prefetched(2)).await.expect("queue");
+    let mut lookahead = None;
+
+    feed_backup_ahead(&mut tee, &chunk(1), false, &mut rx, &mut lookahead);
+
+    assert!(lookahead.is_none(), "no look-ahead without a backup");
+    assert_eq!(
+        rx.try_recv().expect("chunk 2 still queued").chunk_id,
+        2,
+        "a non-mirroring endpoint keeps its exact receive order"
+    );
+}
+
+const PREFETCH_TEST_DEPTH: usize = 10;

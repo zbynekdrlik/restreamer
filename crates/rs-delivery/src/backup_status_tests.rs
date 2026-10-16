@@ -52,7 +52,7 @@ async fn a_mirrored_endpoint_reports_its_backup_ingest() {
         &handle.stats_for_test(),
     )
     .await;
-    assert!(tee.has_backup());
+    assert!(tee.mirrors());
     let state = state_with("e2e rtmp", handle).await;
 
     let json = status_json(state).await;
