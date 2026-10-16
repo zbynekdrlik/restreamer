@@ -83,14 +83,21 @@ const ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// expires and the exit never fires. `highest_sent_chunk_id` is cumulative
 /// BY DESIGN precisely because of this backpressure plateau.
 ///
-/// The correct discriminator is the COUNT of fresh chunks queued since the
-/// active window began: a stray tail is 1-2 chunks; genuine recovery fills
-/// the channel to `PREFETCH_BUFFER_SIZE` (10) and plateaus there. Half the
+/// The correct discriminator is the COUNT of fresh chunks queued since
+/// rescue BEGAN: a stray tail is 1-2 chunks; genuine recovery fills the
+/// channel to `PREFETCH_BUFFER_SIZE` (10) and plateaus there. Half the
 /// channel is comfortably above any realistic stray tail and comfortably
 /// below the plateau, so recovery always reaches it and strays never do.
 /// Worst case if a long stray tail ever meets the threshold: rescue exits,
 /// drains those few stale chunks, the producer stalls again, and rescue
 /// re-latches within ~18s -- bounded and self-healing, unlike a deadlock.
+///
+/// The count runs from the start of rescue, NOT from the start of the
+/// current active window: nothing drains the channel during rescue, so a
+/// producer gap must not discard the chunks already queued. Re-basing on
+/// every gap deadlocked the crash-exhaustion gate (main run 38825629603):
+/// a 7-chunk upload backlog, a ~34 s gap until OBS reconnected, then 3 new
+/// chunks filled the channel, and the last window could only ever see 3.
 const RESCUE_EXIT_MIN_FRESH_CHUNKS: i64 = {
     let half = crate::endpoint_task::PREFETCH_BUFFER_SIZE as i64 / 2;
     if half < 1 { 1 } else { half }
@@ -184,7 +191,8 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     let mut refilling = false;
     let mut eta = RESCUE_REFILL_TARGET_SECS;
     // #289: the high-water mark of chunks the producer had SENT into the
-    // prefetch channel at the start of the current continuous-active window.
+    // prefetch channel when rescue STARTED. Nothing drains the channel during
+    // rescue, so `sent - rescue_start_sent` is the real content queued to play.
     // Outage rescue must exit only on GENUINE resumed live delivery, never on
     // a bare `producer_active` flag flip. During a sustained/trickle outage the
     // #237 producer-respawn churn (and a stale-tail re-fetch) can hold
@@ -193,10 +201,12 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     // `highest_sent_chunk_id` (a `fetch_max`, capped at the pre-outage edge)
     // never advances. Keying the exit on the flag alone therefore dropped
     // rescue back to "normal" onto a dark/stuttering stream (issue #289).
-    // Requiring `highest_sent_chunk_id` to have ADVANCED during the active
-    // window proves genuinely new chunks were queued — the cache is really
-    // refilling — before we resume normal delivery.
-    let mut active_window_start_sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
+    // Requiring `highest_sent_chunk_id` to have ADVANCED during rescue proves
+    // genuinely new chunks were queued — the cache is really refilling —
+    // before we resume normal delivery. It is fixed for the whole rescue: a
+    // producer gap must not discard chunks already queued (see
+    // RESCUE_EXIT_MIN_FRESH_CHUNKS for the deadlock that re-basing caused).
+    let rescue_start_sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
 
     loop {
         // #259: pick the segment for the CURRENT rescue state. For the
@@ -239,18 +249,18 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                     continuous_active_ms =
                         continuous_active_ms.saturating_add(elapsed_ms);
                 } else {
-                    // Producer stalled again: reset BOTH the refill timer and
-                    // the fresh-chunk baseline, so the NEXT active window is
-                    // measured from the current (frozen) high-water mark.
+                    // Producer stalled again: restart the continuous-active
+                    // refill timer. The fresh-chunk count keeps its rescue-start
+                    // baseline: the chunks queued before this gap are still in
+                    // the channel and will play once rescue exits.
                     continuous_active_ms = 0;
-                    active_window_start_sent = sent;
                 }
-                // #289: fresh chunks the producer has queued since the current
-                // continuous-active window began. > 0 iff genuinely new content
-                // appeared past the pre-window live edge (real recovery); stays
-                // 0 while `producer_active` merely flaps true over a stalled
-                // producer (respawn churn / stale-tail re-fetch).
-                let fresh_chunks = sent.saturating_sub(active_window_start_sent);
+                // #289: fresh chunks the producer has queued since rescue began.
+                // > 0 iff genuinely new content appeared past the pre-outage
+                // live edge (real recovery); stays 0 while `producer_active`
+                // merely flaps true over a stalled producer (respawn churn /
+                // stale-tail re-fetch).
+                let fresh_chunks = sent.saturating_sub(rescue_start_sent);
                 // A stray tail re-fetch lands 1-2 chunks; genuine recovery
                 // fills the prefetch channel and plateaus at
                 // PREFETCH_BUFFER_SIZE. The COUNT separates them — recency
