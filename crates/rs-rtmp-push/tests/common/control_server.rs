@@ -19,9 +19,10 @@ use tokio::sync::{Mutex, oneshot};
 const EVENT_PING_RESPONSE: u16 = 7;
 
 /// Accept ONE client, accept its publish, and once the client's first data
-/// message (its onMetaData) arrived send `PingRequest(ping_ts)` and an
-/// `Acknowledgement(ack_seq)`. Every PingResponse the client sends back is
-/// reported on `pong_tx` (first one only). Returns when the client closes.
+/// message (its onMetaData) arrived send TWO PingRequests (`ping_ts`, then
+/// `ping_ts + 1`) and an `Acknowledgement(ack_seq)`. Two pings, so a test can
+/// tell a real answer counter from a constant. The first PingResponse the
+/// client sends back is reported on `pong_tx`. Returns when the client closes.
 pub async fn run_control_server(
     listener: TcpListener,
     ping_ts: u32,
@@ -112,10 +113,12 @@ pub async fn run_control_server(
                         // its session (and its read loop) is up: now ping it.
                         if type_id == msg_type_id::DATA_AMF0 && !sent_control {
                             sent_control = true;
-                            EventMessagesWriter::new(AsyncBytesWriter::new(Arc::clone(&io)))
-                                .write_ping_request(ping_ts)
-                                .await
-                                .map_err(|e| format!("write_ping_request: {e:?}"))?;
+                            for ts in [ping_ts, ping_ts.wrapping_add(1)] {
+                                EventMessagesWriter::new(AsyncBytesWriter::new(Arc::clone(&io)))
+                                    .write_ping_request(ts)
+                                    .await
+                                    .map_err(|e| format!("write_ping_request: {e:?}"))?;
+                            }
                             ProtocolControlMessagesWriter::new(AsyncBytesWriter::new(Arc::clone(
                                 &io,
                             )))

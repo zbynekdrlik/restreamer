@@ -531,3 +531,73 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
     let s = stats.lock().await;
     assert_eq!(s.delivery_mode, "normal");
 }
+
+/// `run_defensive_rescue` (its live pusher became the #368 `EndpointPusher`):
+/// it records `RescueActivated`, closes the endpoint's live pusher before the
+/// rescue pusher dials the same key, shows "rescue", and returns on stop.
+#[tokio::test]
+async fn defensive_rescue_activates_closes_the_live_pusher_and_returns_on_stop() {
+    let alias = unique_alias("defensive");
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let ring = Some(crate::audit_ring::AuditRing::new(100));
+    let buffer_state = Arc::new(crate::buffer_state::BufferState::new());
+    buffer_state.producer_active.store(false, Ordering::Relaxed);
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let mut proc: Option<Box<dyn crate::endpoint_task::OutputProcess>> = None;
+    let mut pusher = Some(crate::backup_mirror::TeePusher::new(
+        rs_rtmp_push::RtmpPusher::new(
+            "rtmp://127.0.0.1:9/live/unused".to_string(),
+            rs_rtmp_push::PusherConfig::default(),
+        ),
+        None,
+    ));
+
+    // Wait until rescue is visible, then send the stop the endpoint task
+    // would send on teardown.
+    let probe_stats = stats.clone();
+    let probe = tokio::spawn(async move {
+        for _ in 0..250 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if probe_stats.lock().await.delivery_mode == "rescue" {
+                break;
+            }
+        }
+        let seen = probe_stats.lock().await.delivery_mode.clone();
+        let _ = stop_tx.send(true);
+        seen
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::rescue::run_defensive_rescue(
+            &alias,
+            None,
+            rs_ffmpeg::ServiceType::TestFile,
+            "unused",
+            &buffer_state,
+            &stats,
+            &mut stop_rx,
+            &ring,
+            41,
+            &mut proc,
+            &mut pusher,
+            false,
+        ),
+    )
+    .await
+    .expect("defensive rescue must return on the stop signal");
+
+    assert_eq!(probe.await.unwrap(), "rescue");
+    assert!(
+        pusher.is_none(),
+        "the live pusher must be taken and closed before the rescue pusher dials the same key"
+    );
+    let (rows, _) = ring.as_ref().unwrap().since(0);
+    assert!(
+        rows.iter()
+            .any(|r| r.action == rs_core::audit::Action::RescueActivated
+                && r.endpoint.as_deref() == Some(alias.as_str())
+                && r.detail["stalled_at_chunk_id"] == 41),
+        "a RescueActivated row for this endpoint at chunk 41 is required"
+    );
+}

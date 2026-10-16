@@ -58,16 +58,26 @@ async fn a_ping_request_is_answered_and_an_ack_is_recorded() {
         pusher.last_upstream_ack_at().is_some(),
         "an upstream Acknowledgement must be recorded within 1 s"
     );
+    // The server sent two PingRequests: both must be answered and counted.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while pusher.pings_answered() < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         pusher.pings_answered(),
-        1,
-        "exactly one PingRequest was answered"
+        2,
+        "both PingRequests must be answered"
     );
 
     pusher.close().await;
     assert!(
         pusher.last_upstream_ack_at().is_none(),
         "a closed session has no upstream acks"
+    );
+    assert_eq!(
+        pusher.pings_answered(),
+        0,
+        "a closed pusher has no session, so no answered pings"
     );
     server.abort();
 }
