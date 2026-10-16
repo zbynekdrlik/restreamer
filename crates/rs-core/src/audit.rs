@@ -117,6 +117,12 @@ pub enum Action {
     /// looking at the activity feed should immediately see "rust pusher
     /// reconnected" rather than the misleading "ffmpeg died" (#103).
     EndpointRtmpPushDied,
+    /// #368: the YouTube BACKUP ingest mirror of an endpoint lost its session
+    /// and is reconnecting on its own; the primary push is unaffected.
+    /// Deliberately NOT `EndpointRtmpPushDied`: the outage notifier and the CI
+    /// push-death gates count only the primary. Severity::Warn. Detail JSON:
+    /// {ingest: "youtube_backup", error, backoff_ms, reconnect_count}.
+    EndpointBackupPushDied,
     /// A mutating request arrived from the internet and was allowed because it
     /// carried a valid Cloudflare Access assertion. Detail JSON:
     /// {identity, method, path} — `identity` is the Access `email` claim, so
@@ -606,6 +612,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Action::RescueActivated).unwrap(),
             r#""rescue_activated""#
+        );
+        // #368: the backup-ingest death has its OWN string, so the gates that
+        // query `endpoint_rtmp_push_died` never count it.
+        assert_eq!(
+            serde_json::to_string(&Action::EndpointBackupPushDied).unwrap(),
+            r#""endpoint_backup_push_died""#
         );
         // #260: the audit panel renders the raw action string (audit_panel.rs),
         // so lock the serialization for the no-rescue-video warning too.

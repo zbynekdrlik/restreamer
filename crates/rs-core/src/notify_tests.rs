@@ -909,3 +909,13 @@ fn long_stream_warning_suppressed_for_e2e_event() {
 // for the 1000-line cap.
 #[path = "notify_scope_tests.rs"]
 mod scope;
+
+/// #368: a YouTube BACKUP ingest death is not an endpoint outage (the
+/// primary still delivers): no alert, and it opens no episode.
+#[test]
+fn a_backup_ingest_death_never_alerts() {
+    let mut n = notifier();
+    let r = row_ep(Action::EndpointBackupPushDied, "YT NLCH 4K");
+    assert!(!n.is_outage_relevant(&r));
+    assert!(n.observe(&r, None).is_none());
+}

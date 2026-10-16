@@ -141,6 +141,13 @@ impl EndpointHandle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
     }
 
+    /// Test-only: the shared stats handle (#368: a test publishes a backup
+    /// mirror's state in it, as `build_endpoint_pusher` does).
+    #[cfg(test)]
+    pub(crate) fn stats_for_test(&self) -> Stats {
+        Arc::clone(&self.stats)
+    }
+
     /// Test-only stub: creates a no-op EndpointHandle with the given start_chunk_id.
     /// Used by api_update_start_tests to seed AppState without a real DiskCache.
     #[cfg(test)]

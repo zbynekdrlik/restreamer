@@ -366,6 +366,10 @@ struct EndpointStatusEntry {
     /// ETA in seconds until rescue mode ends (warmup or buffer refill).
     #[serde(skip_serializing_if = "Option::is_none")]
     rescue_eta_secs: Option<u64>,
+    /// #368: the YouTube backup ingest mirror (connected, reconnects, pushed
+    /// and dropped chunks, last error); omitted for an endpoint without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_ingest: Option<crate::backup_mirror::BackupIngestStatus>,
 }
 
 async fn endpoint_status(
@@ -398,6 +402,7 @@ async fn endpoint_status(
             restart_history: stats.restart_history.into_iter().collect(),
             delivery_mode: stats.delivery_mode.clone(),
             rescue_eta_secs: stats.rescue_eta_secs,
+            backup_ingest: None,
         });
     }
     // Release the endpoint map BEFORE touching the sink slot: the reconcile
