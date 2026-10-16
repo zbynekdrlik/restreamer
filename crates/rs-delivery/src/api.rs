@@ -185,7 +185,9 @@ async fn init_endpoints(
         Some(cache) => {
             tracing::info!(
                 event = %req.event_identifier,
-                "DiskCache reused: re-init for the event it already serves"
+                window_chunks = cache.window_chunks,
+                requested_delay_ms = req.delivery_delay_ms,
+                "DiskCache reused: re-init for the event it already serves (its window stays)"
             );
             cache
         }
