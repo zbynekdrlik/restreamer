@@ -148,10 +148,27 @@ fn peer_gone(kind: io::ErrorKind) -> bool {
 
 /// #368: whether a push that failed with `err` may have left (part of) its
 /// chunk undelivered upstream, so the consumer must push that SAME chunk
-/// once more on the fresh session. Skeleton: never.
+/// once more on the fresh session.
+///
+/// A transport fault (`RemoteClosed`, `IoError`, `Timeout`) can strike mid
+/// chunk, and the bytes still in the 4 MB socket send buffer are lost with
+/// the connection. A connect-time failure sent nothing of it at all. An
+/// `AvSkewExceeded` trip is raised only AFTER the whole chunk went out, a
+/// `MalformedInput` chunk would fail identically again, and `LocalCancel`
+/// stops the endpoint.
 pub fn may_lose_chunk(err: &PushError) -> bool {
-    let _ = err;
-    false
+    match err {
+        PushError::RemoteClosed(_)
+        | PushError::IoError(_)
+        | PushError::Timeout
+        | PushError::HandshakeFailed(_)
+        | PushError::TlsHandshakeFailed(_)
+        | PushError::ConnectRejected { .. }
+        | PushError::PublishRejected { .. } => true,
+        PushError::AvSkewExceeded { .. }
+        | PushError::MalformedInput { .. }
+        | PushError::LocalCancel => false,
+    }
 }
 
 /// Whether to escalate the floor exponentially on consecutive same-class

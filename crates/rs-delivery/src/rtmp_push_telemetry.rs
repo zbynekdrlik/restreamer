@@ -14,6 +14,10 @@ pub struct RtmpPushTelemetry {
     last_upstream_ack_at: Option<Instant>,
     last_message_type_sent: Option<&'static str>,
     chunks_pushed: u32,
+    /// #368: the push that ended the PREVIOUS connect failed in a way that
+    /// may have lost its chunk upstream, so the first push of THIS connect
+    /// re-sends that same chunk (`endpoint_consumer_helpers::push_chunk`).
+    resend_pending: bool,
     /// Test-only override: when Some, overrides Instant::now() for snapshot math.
     test_clock: Option<Instant>,
 }
@@ -26,8 +30,34 @@ impl RtmpPushTelemetry {
             last_upstream_ack_at: None,
             last_message_type_sent: None,
             chunks_pushed: 0,
+            resend_pending: false,
             test_clock: None,
         }
+    }
+
+    /// Telemetry for the connect that follows a failed push. `resend_pending`
+    /// = the failed chunk must be pushed again on it (#368).
+    pub fn after_failure(resend_pending: bool) -> Self {
+        Self {
+            resend_pending,
+            ..Self::new()
+        }
+    }
+
+    /// Whether the failed chunk still has to be re-sent on this connect.
+    pub fn resend_pending(&self) -> bool {
+        self.resend_pending
+    }
+
+    /// Consume the pending re-send: `true` exactly once after a failure that
+    /// may have lost the chunk.
+    pub fn take_resend_pending(&mut self) -> bool {
+        std::mem::take(&mut self.resend_pending)
+    }
+
+    /// Drop a pending re-send: a chunk is re-sent at most once (#368).
+    pub fn clear_resend_pending(&mut self) {
+        self.resend_pending = false;
     }
 
     #[cfg(test)]
@@ -39,6 +69,7 @@ impl RtmpPushTelemetry {
             last_upstream_ack_at: None,
             last_message_type_sent: None,
             chunks_pushed: 0,
+            resend_pending: false,
             test_clock: Some(now),
         }
     }
@@ -188,6 +219,30 @@ mod tests {
         let v = t.snapshot(&buf);
         let hex = v["upstream_close_first_bytes_hex"].as_str().unwrap();
         assert_eq!(hex.len(), 128); // 64 bytes * 2 hex chars
+    }
+
+    // #368: the re-send flag of the connect after a failure.
+    #[test]
+    fn after_failure_carries_the_resend_flag_and_take_consumes_it_once() {
+        let mut t = RtmpPushTelemetry::after_failure(true);
+        assert!(t.resend_pending());
+        assert!(t.take_resend_pending());
+        assert!(!t.resend_pending(), "take must consume the flag");
+        assert!(!t.take_resend_pending());
+        assert!(!RtmpPushTelemetry::after_failure(false).resend_pending());
+        assert!(!RtmpPushTelemetry::new().resend_pending());
+        assert_eq!(
+            RtmpPushTelemetry::after_failure(true).bytes_sent(),
+            0,
+            "a failure starts a fresh connect"
+        );
+    }
+
+    #[test]
+    fn clear_resend_pending_drops_the_flag() {
+        let mut t = RtmpPushTelemetry::after_failure(true);
+        t.clear_resend_pending();
+        assert!(!t.resend_pending());
     }
 
     // #236: bytes_sent() accessor -- the dead-target classifier in

@@ -56,7 +56,7 @@ pub use crate::endpoint_audit::{
 mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{
-    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push, maybe_refill_throttle,
+    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, maybe_refill_throttle, push_chunk,
 };
 
 // Fast-endpoint keepalive + outage escalation (C1 #251) extracted to keep this
@@ -539,7 +539,8 @@ async fn consumer_task<P: OutputProcessFactory>(
             // leaving the pusher with raw tag bytes that fail the FLV
             // signature check at offset 0.
             if let Some(ref mut pusher) = rust_pusher {
-                let action = handle_rust_push(
+                // #368: `push_chunk` re-sends a chunk whose push failed, once.
+                let action = push_chunk(
                     pusher,
                     &chunk.data,
                     chunk_id,
