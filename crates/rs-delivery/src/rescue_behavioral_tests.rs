@@ -507,3 +507,88 @@ async fn outage_rescue_persists_when_only_one_stray_chunk_lands_early() {
     advance_in_steps(Duration::from_millis(50), 10).await;
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn rescue_exits_when_a_backlog_burst_and_a_gap_fill_the_channel_before_the_plateau() {
+    // Crash-exhaustion gate, main run 38825629603 (2026-10-16): the host was
+    // killed while chunks were still uploading, so after its restart the
+    // producer queued a 7-chunk BACKLOG at once, then hit a ~34 s gap (OBS
+    // had not reconnected yet: 3 misses -> producer_active=false), then
+    // queued 3 new chunks. The consumer does not drain the 10-slot prefetch
+    // channel during rescue, so the channel was then FULL (7 + 3) and the
+    // producer blocked in `tx.send` for good. Measuring "fresh" chunks from
+    // the start of the LAST active window saw only 3 (< 5) and kept every
+    // endpoint on the rescue clip forever, with producer_active=true and no
+    // fetch error anywhere. The 10 queued chunks are real content waiting
+    // to play: rescue must exit once the producer has been continuously
+    // active for the refill window.
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    let buffer_state = Arc::new(BufferState::new());
+    // Rescue starts on an exhausted producer at the pre-crash live edge.
+    buffer_state.producer_active.store(false, Ordering::Relaxed);
+    buffer_state
+        .highest_sent_chunk_id
+        .store(500, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-backlog-gap-test",
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
+            bs_task,
+            stats,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Host restarted: the uploader drains its backlog and the producer
+    // queues 7 chunks in quick succession.
+    advance_in_steps(Duration::from_millis(500), 10).await; // ~5s in rescue
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+    for _ in 0..7 {
+        advance_in_steps(Duration::from_millis(250), 1).await;
+        buffer_state
+            .highest_sent_chunk_id
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // OBS has not reconnected yet: the next chunk 404s, the producer goes
+    // inactive for ~10s.
+    buffer_state.producer_active.store(false, Ordering::Relaxed);
+    advance_in_steps(Duration::from_millis(500), 20).await;
+
+    // OBS is back: 3 new chunks fill the channel to 10, then the producer
+    // blocks on the full channel and highest_sent plateaus.
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+    for _ in 0..3 {
+        advance_in_steps(Duration::from_millis(500), 4).await;
+        buffer_state
+            .highest_sent_chunk_id
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    advance_in_steps(Duration::from_millis(500), 320).await; // ~160s plateau
+
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect(
+            "rescue must exit once the producer is continuously active with a full \
+             channel of real chunks queued, even when a gap split the refill into a \
+             backlog burst and a later tail (crash-exhaustion gate, run 38825629603)",
+        )
+        .expect("rescue task panicked");
+    assert!(
+        !result,
+        "rescue loop must return false (refilled, resume normal), not true (stop)"
+    );
+}
