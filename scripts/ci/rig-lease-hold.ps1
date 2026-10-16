@@ -9,9 +9,11 @@
 #                    keeps the lease id in $RUNNER_TEMP, writes RIG_LEASE_HELD=true to
 #                    GITHUB_ENV and starts a detached heartbeat (-Action Beat).
 #   -Action Beat     the detached heartbeat: POST /rig-lease/heartbeat every
-#                    RIG_LEASE_BEAT_S (30) while the lease file exists. A 404 means the
-#                    lease is gone (reclaimed after 180 s without a beat): it leaves a
-#                    "lost" file that Release turns into a failed job.
+#                    RIG_LEASE_BEAT_S (30) while the lease file holds ITS lease. A 404
+#                    means the lease is gone (reclaimed after 180 s without a beat): it
+#                    leaves a "lost" file that Release turns into a failed job. When its
+#                    job's Runner.Worker is gone (a force-cancel: no Release step, no
+#                    job-end cleanup) it releases its lease itself and exits (job-owner.ps1).
 #   -Action Release  in an always() step after the OBS stop: stops the heartbeat, POSTs
 #                    /rig-lease/release (idempotent), and fails the job if the lease was
 #                    lost while we streamed.
@@ -28,6 +30,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "job-owner.ps1")
 
 $Base = if ($env:RIG_LEASE_API) { $env:RIG_LEASE_API.TrimEnd("/") } else { "http://dev1:8890" }
 $Token = $env:RIG_LEASE_TOKEN
@@ -36,6 +39,7 @@ $LeaseFile = Join-Path $StateDir "rig-lease-id"
 $BeatPidFile = Join-Path $StateDir "rig-lease-beat.pid"
 $LostFile = Join-Path $StateDir "rig-lease-lost"
 $BeatLog = Join-Path $StateDir "rig-lease-beat.log"
+$OwnerFile = Join-Path $StateDir "rig-lease-job-owner"
 
 function Get-NowEpoch { return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0 }
 
@@ -95,9 +99,10 @@ function Invoke-Acquire {
         Set-Content -Path $LeaseFile -Value $id -Encoding ascii -NoNewline
         Remove-Item -Path $LostFile -ErrorAction SilentlyContinue
         if ($env:GITHUB_ENV) { "RIG_LEASE_HELD=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+        $owner = Write-JobOwnerRecord $OwnerFile
         Start-Beat
         $note = if ($r.body.reclaimed) { ", reclaimed from a stale holder" } else { "" }
-        Write-Host "[rig-lease] acquired for $($body.job) until $($r.body.expected_release_at)$note"
+        Write-Host "[rig-lease] acquired for $($body.job) until $($r.body.expected_release_at)$note; heartbeat $owner"
         return
       }
       409 {
@@ -123,8 +128,9 @@ function Invoke-Acquire {
   }
 }
 
-# The heartbeat outlives this step: a detached copy of this script (-Action Beat). The
-# runner ends it with the job at the latest; Release stops it first.
+# The heartbeat outlives this step: a detached copy of this script (-Action Beat). Release
+# stops it; the runner's job-end cleanup ends it otherwise, and after a force-cancel (no
+# cleanup) it ends itself when its job's Runner.Worker is gone.
 function Start-Beat {
   $exe = (Get-Process -Id $PID).Path
   $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Action Beat"
@@ -146,11 +152,30 @@ function Write-BeatLog([string]$line) {
 
 function Invoke-Beat {
   $every = if ($env:RIG_LEASE_BEAT_S) { [int]$env:RIG_LEASE_BEAT_S } else { 30 }
-  while (Test-Path $LeaseFile) {
+  # Read once: a later job on this runner reuses RUNNER_TEMP (its own lease file, and a
+  # cleanup that removes ours), so neither file may decide whose lease this beat holds.
+  $owner = Read-JobOwnerRecord $OwnerFile
+  if (-not (Test-Path $LeaseFile)) { return }
+  $mine = Read-LeaseId
+  while ($true) {
     Start-Sleep -Seconds $every
+    if (Test-JobOwnerGone $owner) {
+      # #349: the job is gone without its Release step (a force-cancel kills Runner.Worker
+      # with no cleanup). Give the lease back now instead of beating it on forever.
+      $r = Invoke-LeaseCall "release" @{ lease_id = $mine }
+      if ((Test-Path $LeaseFile) -and (Read-LeaseId) -eq $mine) { Remove-Item -Path $LeaseFile -ErrorAction SilentlyContinue }
+      # A dead job never reads this; a live one (a false "gone") fails loudly at Release
+      # instead of passing with "no lease held".
+      Set-Content -Path $LostFile -Value "released by the heartbeat: the job's Runner.Worker looked gone" -Encoding utf8
+      Write-BeatLog "job ended without Release (Runner.Worker pid $($owner.Id) gone): lease released ($($r.code)), heartbeat exits"
+      return
+    }
     if (-not (Test-Path $LeaseFile)) { break }
-    $id = Read-LeaseId
-    $r = Invoke-LeaseCall "heartbeat" @{ lease_id = $id }
+    if ((Read-LeaseId) -ne $mine) {
+      Write-BeatLog "the lease file holds another job's lease now: this heartbeat exits without touching it"
+      return
+    }
+    $r = Invoke-LeaseCall "heartbeat" @{ lease_id = $mine }
     if ($r.code -eq 200) { Write-BeatLog "heartbeat ok, release at $($r.body.expected_release_at)"; continue }
     if ($r.code -eq 404) {
       Set-Content -Path $LostFile -Value "heartbeat answered 404 not_holder: $($r.text)" -Encoding utf8
@@ -168,7 +193,10 @@ function Get-BeatProcess {
   $parts = (Get-Content -Path $BeatPidFile -Raw).Trim() -split " "
   $proc = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
   if ($null -eq $proc) { return $null }
-  if ($parts.Count -gt 1 -and "$($proc.StartTime.ToUniversalTime().Ticks)" -ne $parts[1]) { return $null }
+  # Same start time within 2 s: Start-Process -PassThru and Get-Process read it slightly differently.
+  $ticks = $null
+  if ($parts.Count -gt 1) { $ticks = $parts[1] -as [long] }
+  if ($null -ne $ticks -and [Math]::Abs($proc.StartTime.ToUniversalTime().Ticks - $ticks) -gt 20000000) { return $null }
   return $proc
 }
 
@@ -176,6 +204,7 @@ function Invoke-Release {
   $beat = Get-BeatProcess
   if ($beat) { Stop-Process -Id $beat.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item -Path $BeatPidFile -ErrorAction SilentlyContinue
+  Remove-Item -Path $OwnerFile -ErrorAction SilentlyContinue
   if (Test-Path $BeatLog) { Write-Host "[rig-lease] heartbeat log:"; Get-Content -Path $BeatLog | ForEach-Object { Write-Host "  $_" } }
   if (Test-Path $LeaseFile) {
     $id = Read-LeaseId

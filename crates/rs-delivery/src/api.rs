@@ -177,13 +177,35 @@ async fn init_endpoints(
     // Required: a failure to construct the cache means the stream cannot
     // run with bandwidth-managed prefetch, so surface as 500 to the
     // orchestrator (rather than silently downgrading the data path).
-    let disk_cache_arc = build_disk_cache(&s3_config, &req, Some(Arc::clone(&state.audit_ring)))
-        .await
-        .map_err(|e| {
-            tracing::error!("DiskCache init failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    tracing::info!("DiskCache initialized");
+    // A re-init for the same event (host restarted mid-event) keeps the
+    // running cache: see `DiskCache::reuse_for_event`.
+    let existing = state.disk_cache.read().await.clone();
+    let disk_cache_arc = match DiskCache::reuse_for_event(existing.as_ref(), &req.event_identifier)
+    {
+        Some(cache) => {
+            tracing::info!(
+                event = %req.event_identifier,
+                window_chunks = cache.window_chunks,
+                requested_delay_ms = req.delivery_delay_ms,
+                "DiskCache reused: re-init for the event it already serves (its window stays)"
+            );
+            cache
+        }
+        None => {
+            let cache = build_disk_cache(&s3_config, &req, Some(Arc::clone(&state.audit_ring)))
+                .await
+                .map_err(|e| {
+                    tracing::error!("DiskCache init failed: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            tracing::info!(
+                event = %req.event_identifier,
+                replaced_other_event = existing.is_some(),
+                "DiskCache initialized"
+            );
+            cache
+        }
+    };
     *state.disk_cache.write().await = Some(Arc::clone(&disk_cache_arc));
 
     // #192: bring the TEST_FILE sink up BEFORE spawning, so a TEST_FILE

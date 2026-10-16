@@ -128,4 +128,24 @@ impl DiskCache {
     pub async fn shutdown(self) {
         self.eviction_handle.abort();
     }
+
+    /// The cache an `/api/init` should keep using: `existing` when it already
+    /// serves `event_id`, else `None` (build one).
+    ///
+    /// A host that restarts mid-event re-POSTs `/api/init` to the SAME running
+    /// VPS. Its endpoints are already running and keep the cache they were
+    /// spawned with. A second `DiskCache` for the same event would start a
+    /// second eviction sweep over the SAME event directory with an EMPTY
+    /// position registry, which deletes every cached chunk those endpoints
+    /// still need on each sweep (crash-exhaustion gate, main run 38825629603).
+    pub fn reuse_for_event(
+        existing: Option<&Arc<DiskCache>>,
+        event_id: &str,
+    ) -> Option<Arc<DiskCache>> {
+        existing.filter(|c| c.event_id == event_id).cloned()
+    }
 }
+
+#[cfg(test)]
+#[path = "reuse_tests.rs"]
+mod reuse_tests;

@@ -10,7 +10,9 @@ every 30 s while it streams, and releases it in an always() step:
   * acquire 409: retry until the job's shared deadline, then fail with the holder;
   * a heartbeat 404 (the lease was reclaimed) fails the job at Release;
   * no token or an unreachable server: fail-open (warning, lease not taken);
-  * a 400/401 is our own bug and fails the job.
+  * a 400/401 is our own bug and fails the job;
+  * the job ends without Release (a force-cancel kills Runner.Worker with no cleanup):
+    the heartbeat releases ITS lease and exits, and never touches the next job's lease.
 
 Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
 `pwsh` elsewhere, or the interpreter named by $OBS_TEST_PWSH.
@@ -289,6 +291,75 @@ def case_lost_lease_fails_at_release(tmp: Path) -> list[str]:
     return r.problems
 
 
+def owner_process() -> subprocess.Popen:
+    """Stands in for the job's Runner.Worker (CI_JOB_OWNER_PID): killing it is a force-cancel."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+
+
+def wait_until(pred, seconds: float) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.2)
+    return pred()
+
+
+def case_force_cancel_releases_the_lease(tmp: Path) -> list[str]:
+    # #349: a force-cancel kills Runner.Worker without the job-end cleanup and without
+    # the Release step. Run 38745691029's heartbeat beat on until it was killed by hand.
+    r, api, owner = Result(), MockLeaseApi(held_for_s=0), owner_process()
+    try:
+        env = job_env(tmp, api, CI_JOB_OWNER_PID=str(owner.pid))
+        p = run("Acquire", env)
+        r.check(p.returncode == 0, f"acquire exit {p.returncode}, want 0", p)
+        r.check(wait_until(lambda: api.beats >= 1, 10), "no heartbeat while the job runs")
+        owner.kill()
+        owner.wait()
+        released = wait_until(lambda: "/rig-lease/release" in api.paths(), 10)
+        r.check(released, "the orphaned heartbeat did not release the lease after its job died")
+        rel = [b for path, b, _ in api.requests if path == "/rig-lease/release"]
+        r.check(rel == [{"lease_id": LEASE_ID}], f"release requests {rel}, want one with the job's lease")
+        beats = api.beats
+        time.sleep(2.5)
+        r.check(api.beats == beats, "the heartbeat kept beating after its job died")
+        r.check(not (tmp / "rig-lease-id").exists(), "the lease file is left behind")
+        # A live job with a false "gone" must fail loudly at Release, not pass with "no lease held".
+        r.check((tmp / "rig-lease-lost").exists(), "the heartbeat's own release left no lost-file for Release")
+        log = (tmp / "rig-lease-beat.log").read_text(encoding="utf-8-sig") if (tmp / "rig-lease-beat.log").exists() else ""
+        r.check("job ended" in log, f"the heartbeat log does not say why it released: {log!r}")
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        api.close()
+    return r.problems
+
+
+def case_next_jobs_lease_is_left_alone(tmp: Path) -> list[str]:
+    # The next job on the runner reuses RUNNER_TEMP and writes ITS lease id there: an
+    # orphaned heartbeat must neither beat nor release a lease that is not its own.
+    r, api, owner = Result(), MockLeaseApi(held_for_s=0), owner_process()
+    other = "cd" * 16
+    try:
+        env = job_env(tmp, api, CI_JOB_OWNER_PID=str(owner.pid))
+        p = run("Acquire", env)
+        r.check(p.returncode == 0, f"acquire exit {p.returncode}, want 0", p)
+        r.check(wait_until(lambda: api.beats >= 1, 10), "no heartbeat while the job runs")
+        (tmp / "rig-lease-id").write_text(other, encoding="ascii")
+        time.sleep(3)
+        owner.kill()
+        owner.wait()
+        time.sleep(2.5)
+        foreign = [(path, b) for path, b, _ in api.requests if b.get("lease_id") == other]
+        r.check(foreign == [], f"the old heartbeat touched the next job's lease: {foreign}")
+        r.check((tmp / "rig-lease-id").read_text(encoding="ascii") == other, "the next job's lease file was removed")
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        api.close()
+    return r.problems
+
+
 CASES = [
     ("free rig: acquire, heartbeat while streaming, release once", case_free_acquire_beat_release),
     ("camera-box holds the rig: wait inside the budget, then acquire", case_waits_for_camera_box_then_acquires),
@@ -297,6 +368,10 @@ CASES = [
     ("server unreachable: fail-open", case_unreachable_is_fail_open),
     ("401: our bug, the job fails", case_unauthorized_fails),
     ("heartbeat 404 (lease reclaimed): Release fails the job", case_lost_lease_fails_at_release),
+    ("force-cancel (Runner.Worker gone, no Release): the heartbeat releases its lease and exits",
+     case_force_cancel_releases_the_lease),
+    ("the next job's lease in the same RUNNER_TEMP: the old heartbeat leaves it alone",
+     case_next_jobs_lease_is_left_alone),
 ]
 
 
