@@ -37,6 +37,13 @@ pub fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
 /// primary: when the primary session drops, YouTube rolls viewers over to the
 /// backup instead of showing a gap.
 pub fn build_backup_rtmp_url(service_type: ServiceType, stream_key: &str) -> Option<String> {
-    let _ = (service_type, stream_key);
-    None
+    match service_type {
+        ServiceType::YtRtmp => Some(format!(
+            "rtmp://b.rtmp.youtube.com/live2?backup=1/{stream_key}"
+        )),
+        ServiceType::Facebook
+        | ServiceType::Vimeo
+        | ServiceType::Instagram
+        | ServiceType::TestFile => None,
+    }
 }
