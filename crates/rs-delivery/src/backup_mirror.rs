@@ -52,7 +52,7 @@ const BACKUP_WRITE_TIMEOUT: Duration =
 
 /// The pusher every rust-push path uses: the primary plus, for YouTube, the
 /// backup mirror.
-pub type EndpointPusher = TeePusher<RtmpPusher>;
+pub(crate) type EndpointPusher = TeePusher<RtmpPusher>;
 
 /// Everything needed to build one endpoint's pusher.
 #[derive(Clone)]
@@ -68,16 +68,17 @@ pub struct PushTarget {
 /// The backup URL this target streams to, if any: only with
 /// `backup_ingest` and only for a service that has a backup ingest.
 pub fn backup_url_for(target: &PushTarget) -> Option<String> {
-    // RED skeleton: no backup yet.
-    let _ = (target, build_backup_rtmp_url);
-    None
+    if !target.backup_ingest {
+        return None;
+    }
+    build_backup_rtmp_url(target.service_type, &target.stream_key)
 }
 
 /// THE one place a live or rescue pusher is built (#368): the primary to the
 /// endpoint URL, plus the backup mirror for a YouTube target. The mirror's
 /// state is published in the endpoint stats (`/api/status` `backup_ingest`).
 /// Nothing connects here: both pushers dial on their first chunk.
-pub async fn build_endpoint_pusher(target: &PushTarget, stats: &Stats) -> EndpointPusher {
+pub(crate) async fn build_endpoint_pusher(target: &PushTarget, stats: &Stats) -> EndpointPusher {
     let primary = RtmpPusher::new(
         build_rtmp_url(target.service_type, &target.stream_key),
         PusherConfig::default(),
@@ -168,20 +169,25 @@ struct MirrorBackoff {
 
 impl MirrorBackoff {
     fn on_ok(&mut self, now: Instant) {
-        // RED skeleton: no health tracking.
-        let _ = now;
+        self.consecutive_errors = 0;
+        self.follows_fast_retry = false;
+        self.healthy_since.get_or_insert(now);
     }
 
     /// The delay before the backup reconnects, `None` = stop (LocalCancel).
     fn on_error(&mut self, err: &PushError, now: Instant) -> Option<u64> {
-        // RED skeleton: the plain floor.
-        let _ = (
-            now,
+        self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+        let healthy_ms = self.healthy_since.take().map_or(0, |since| {
+            now.saturating_duration_since(since).as_millis() as u64
+        });
+        let delay = rs_rtmp_push::reconnect_delay_ms(
+            err,
             self.consecutive_errors,
-            self.healthy_since,
+            healthy_ms,
             self.follows_fast_retry,
-        );
-        rs_rtmp_push::backoff_floor_ms(err)
+        )?;
+        self.follows_fast_retry = delay == 0;
+        Some(delay)
     }
 }
 
@@ -216,23 +222,48 @@ async fn run_mirror<P: Pushable>(
     alias: String,
     audit_ring: Option<Arc<AuditRing>>,
 ) {
-    // RED skeleton: the backup pushes nothing yet.
-    let _ = (
-        &mut pusher,
-        &alias,
-        &audit_ring,
-        MirrorBackoff::default(),
-        BACKUP_WRITE_TIMEOUT,
-    );
-    let _ = backup_died_row;
-    while rx.recv().await.is_some() {}
+    let mut backoff = MirrorBackoff::default();
+    while let Some(chunk) = rx.recv().await {
+        let result =
+            tokio::time::timeout(BACKUP_WRITE_TIMEOUT, pusher.push_flv_bytes(&chunk)).await;
+        // Drain the backup pusher's A/V invariant edges (it queues them until
+        // taken). They are not audited: the endpoint's push-stage invariant
+        // episode belongs to the primary (outage-notifier keying).
+        let _ = pusher.take_av_invariant_events();
+        let err = match result {
+            Ok(Ok(())) => {
+                backoff.on_ok(Instant::now());
+                state.note_pushed(pusher.reconnect_count());
+                continue;
+            }
+            Ok(Err(e)) => e,
+            Err(_elapsed) => PushError::Timeout,
+        };
+        pusher.close().await;
+        let Some(delay_ms) = backoff.on_error(&err, Instant::now()) else {
+            break;
+        };
+        let error = err.to_string();
+        let reconnect_count = pusher.reconnect_count();
+        state.note_died(&error, reconnect_count);
+        tracing::warn!(
+            alias = %alias,
+            error = %error,
+            backoff_ms = delay_ms,
+            "backup ingest push died; the primary is unaffected (#368)"
+        );
+        if let Some(ring) = &audit_ring {
+            ring.push_parts(backup_died_row(&alias, &error, delay_ms, reconnect_count));
+        }
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
     pusher.close().await;
     state.note_stopped();
 }
 
 /// One endpoint's backup ingest: a task with its own pusher, fed through a
 /// bounded queue the tee never waits on.
-pub struct BackupMirror {
+pub(crate) struct BackupMirror {
     tx: mpsc::Sender<Arc<[u8]>>,
     state: Arc<BackupMirrorState>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -263,8 +294,9 @@ impl BackupMirror {
     /// Queue one chunk for the backup; never waits. A full queue (or a
     /// stopped mirror) drops the chunk and counts it.
     pub fn offer(&self, data: &[u8]) {
-        // RED skeleton: never mirrored.
-        let _ = (data, &self.tx);
+        if self.tx.try_send(Arc::from(data)).is_err() {
+            self.state.note_dropped();
+        }
     }
 
     pub fn state(&self) -> Arc<BackupMirrorState> {
@@ -275,14 +307,19 @@ impl BackupMirror {
     /// built right after (rescue, recovery) never overlaps it on the same
     /// key.
     pub async fn shutdown(&mut self) {
-        // RED skeleton: the backup is left running.
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.note_stopped();
     }
 }
 
 impl Drop for BackupMirror {
     fn drop(&mut self) {
-        // RED skeleton: no abort.
-        let _ = &self.task;
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -296,7 +333,7 @@ impl Drop for BackupMirror {
 ///   ONLY the primary. The backup must stay up exactly while the primary
 ///   reconnects; that is what it is for.
 /// - `shutdown` (endpoint end, rescue switch) closes both.
-pub struct TeePusher<P> {
+pub(crate) struct TeePusher<P> {
     primary: P,
     backup: Option<BackupMirror>,
 }
@@ -306,6 +343,7 @@ impl<P> TeePusher<P> {
         Self { primary, backup }
     }
 
+    #[cfg(test)]
     pub fn has_backup(&self) -> bool {
         self.backup.is_some()
     }
@@ -315,14 +353,18 @@ impl<P: Pushable> TeePusher<P> {
     /// Close the primary and stop the backup (endpoint end, or before a
     /// rescue pusher takes over the same key).
     pub async fn shutdown(&mut self) {
-        // RED skeleton: the primary only.
         self.primary.close().await;
+        if let Some(backup) = self.backup.as_mut() {
+            backup.shutdown().await;
+        }
     }
 }
 
 impl<P: Pushable + Send> Pushable for TeePusher<P> {
     async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
-        // RED skeleton: the primary only.
+        if let Some(backup) = &self.backup {
+            backup.offer(data);
+        }
         self.primary.push_flv_bytes(data).await
     }
 

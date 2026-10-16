@@ -2,7 +2,6 @@
 /// Producer -> bounded channel (~20s) -> Consumer (ffmpeg writer).
 use rs_core::models::PusherKind;
 use rs_ffmpeg::ServiceType;
-use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{mpsc, watch};
 
@@ -128,7 +127,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     // `proc` is the ffmpeg-path output handle (None when using Rust pusher).
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     // `rust_pusher` is the Rust-path output handle (None when using ffmpeg).
-    let mut rust_pusher: Option<RtmpPusher> = None;
+    let mut rust_pusher: Option<crate::backup_mirror::EndpointPusher> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     // Class-aware backoff: tracks the ReasonClass of the most recent death
     // and how many deaths in a row shared that class. See `ffmpeg_reason`.
@@ -157,13 +156,22 @@ async fn consumer_task<P: OutputProcessFactory>(
     let push_ctx = PushSampleCtx::new(&audit_ring, &push_audit_rl, &alias, delivery_delay_ms);
 
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
+    // #368: ONE factory builds every live and rescue pusher: the primary plus,
+    // for YouTube, the backup ingest mirror.
+    let push_target = crate::backup_mirror::PushTarget {
+        alias: alias.clone(),
+        service_type,
+        stream_key: ep_cfg.stream_key.clone(),
+        backup_ingest: true,
+        audit_ring: audit_ring.clone(),
+    };
 
     if use_rust_pusher {
         // Rust pusher: lazy-connect on first write. Construct now so the
         // handle is available for the whole consumer lifetime.
         let url = build_rtmp_url(service_type, &ep_cfg.stream_key);
         tracing::info!(alias = %alias, url = %url, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
-        rust_pusher = Some(RtmpPusher::new(url, PusherConfig::default()));
+        rust_pusher = Some(crate::backup_mirror::build_endpoint_pusher(&push_target, &stats).await);
     } else {
         // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
         // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
@@ -332,6 +340,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 last_delivered_chunk_id,
                                 &mut proc,
                                 &mut rust_pusher,
+                                push_target.backup_ingest,
                             )
                             .await;
                             break;
@@ -397,6 +406,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                                 &mut proc,
                                 &mut rust_pusher,
                                 use_rust_pusher,
+                                push_target.backup_ingest,
                             )
                             .await;
                             match outcome {
@@ -467,6 +477,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             last_delivered_chunk_id,
                             &mut proc,
                             &mut rust_pusher,
+                            push_target.backup_ingest,
                         )
                         .await;
                         break;
@@ -504,6 +515,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                         &mut proc,
                         &mut rust_pusher,
                         use_rust_pusher,
+                        push_target.backup_ingest,
                     )
                     .await;
                     match outcome {
@@ -701,7 +713,8 @@ async fn consumer_task<P: OutputProcessFactory>(
         p.kill().await;
     }
     if let Some(mut pusher) = rust_pusher {
-        pusher.close().await;
+        // #368: closes the primary AND stops the backup mirror.
+        pusher.shutdown().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
 }
