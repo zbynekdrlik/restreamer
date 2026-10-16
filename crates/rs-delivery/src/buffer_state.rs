@@ -1,6 +1,6 @@
 //! Shared state types between producer and consumer tasks, plus pure
 //! helpers for delivery mode decisions.
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 /// Shared buffer state between producer and consumer for rescue mode.
 pub struct BufferState {
@@ -24,6 +24,12 @@ pub struct BufferState {
     /// and this value so queued chunks are never re-fetched. Init to -1 so the
     /// "nothing sent yet" case clamps correctly (see endpoint_respawn FIX 3).
     pub highest_sent_chunk_id: AtomicI64,
+    /// Number of chunks the producer has successfully `tx.send()`'d into the
+    /// prefetch channel. Unlike `highest_sent_chunk_id`, an ID high-water mark
+    /// that one skip-ahead or lag-probe JUMP moves by several IDs at once, this
+    /// counts queued chunks one by one. Rescue measures the real content
+    /// waiting in the channel with it (`rust_rescue_push`).
+    pub chunks_sent_total: AtomicU64,
     /// #294: the fast endpoint's ratcheted read-delay target (seconds).
     /// Persisted here — outside the per-producer-task `FastDelayController` —
     /// so a #237 producer RESPAWN resumes at the level the session's real
@@ -56,9 +62,18 @@ impl BufferState {
             producer_active: AtomicBool::new(true),
             starvation_gap_ms: AtomicU64::new(0),
             highest_sent_chunk_id: AtomicI64::new(-1),
+            chunks_sent_total: AtomicU64::new(0),
             fast_delay_target_secs: AtomicU64::new(0),
             refill_deficit_secs: AtomicU64::new(0),
         }
+    }
+
+    /// Record one chunk the producer successfully sent into the prefetch
+    /// channel: raise the ID high-water mark and count the chunk.
+    pub fn note_sent(&self, chunk_id: i64) {
+        self.highest_sent_chunk_id
+            .fetch_max(chunk_id, Ordering::Relaxed);
+        self.chunks_sent_total.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -87,7 +102,16 @@ pub fn initial_delivery_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn note_sent_counts_every_send_and_keeps_the_highest_id() {
+        let bs = BufferState::new();
+        bs.note_sent(10);
+        bs.note_sent(16); // a skip-ahead jump: one chunk, six IDs
+        bs.note_sent(12); // a lower ID never lowers the high-water mark
+        assert_eq!(bs.highest_sent_chunk_id.load(Ordering::Relaxed), 16);
+        assert_eq!(bs.chunks_sent_total.load(Ordering::Relaxed), 3);
+    }
 
     #[test]
     fn buffer_state_default_duration_zero() {

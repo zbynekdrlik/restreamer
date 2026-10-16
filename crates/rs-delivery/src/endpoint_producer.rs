@@ -144,9 +144,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     tracing::info!(alias = %alias, "Producer: consumer gone, stopping");
                     break;
                 }
-                buffer_state
-                    .highest_sent_chunk_id
-                    .fetch_max(sent_id, AtomicOrdering::Relaxed);
+                buffer_state.note_sent(sent_id);
 
                 chunk_id += 1;
                 // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
