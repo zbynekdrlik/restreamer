@@ -145,8 +145,18 @@ async fn run_until_rescue_or_timeout(
 
     // Budget: serve a few chunks, drain, let the producer flip producer_active
     // (>=3 misses/errors), let the 8s rescue threshold elapse, let
-    // run_outage_rescue fire. ~200s of 100ms steps is ample.
-    for _ in 0..2000 {
+    // run_outage_rescue fire. The loop stops as soon as rescue fires; the cap
+    // is only a liveness bound, in VIRTUAL time.
+    //
+    // The TEST_FILE target (127.0.0.1:1935) is refused at once on Linux, but
+    // on Windows a refused localhost connect takes ~2 s of REAL time, so each
+    // push of the 3 served chunks runs into the consumer's 30 s (virtual)
+    // write timeout plus its backoff. Since #368 a chunk whose push timed out
+    // is re-sent once, so that is 6 timeouts instead of 3 before the consumer
+    // reaches the drain: ~200 s of virtual time was too little (Windows CI on
+    // 35a56bf7; reproduced on Linux with a listener on 1935 that never
+    // answers). 1000 s covers it with room.
+    for _ in 0..10_000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
         if rescue_activated(&ring) {
