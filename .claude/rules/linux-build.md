@@ -46,6 +46,14 @@ paths:
   sudo path) runs `sudo dpkg -i` + `systemctl --user daemon-reload` (the package ships
   the unit file) + `systemctl --user restart restreamer`. Then verify the version on the
   dashboard and `dpkg-query -W restreamer` (0.29.38, 2026-10-13).
+  The repo is public, so stage the `.deb` with `curl -sSL -o /tmp/<deb>
+  https://github.com/zbynekdrlik/restreamer/releases/download/restreamer-v<X.Y.Z>/<deb>`
+  run on the box (MCP Shell), and compare its sha256 with a `gh release download` copy
+  on dev1 before handing it over (0.29.47).
+- **Watching the release run:** `release.yml` runs list with `headBranch == "main"`, not
+  the `restreamer-v*` tag. A waiter that filters on the tag never matches and sits to its
+  timeout (cost ~1.5 h on 0.29.47). Pick the newest Release run created after the main
+  merge run, or poll `gh release view restreamer-v<X.Y.Z>` for the assets.
 - **Smoke test without the box:** install the `.deb` in a `ubuntu:26.04` container on
   dev2, start `Restreamer --headless` as a normal user, and expect 200 from
   `/api/v1/status` and `/` (recipe: build-deb + deb-smoke scripts, 2026-10-11).
