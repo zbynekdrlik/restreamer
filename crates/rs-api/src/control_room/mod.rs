@@ -99,7 +99,8 @@ pub fn remember_url(url: &str) -> bool {
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (host, path) = rest.split_at(end);
     match host {
-        "studio.youtube.com" => true,
+        // `/reauth` is a verification popup's hand-back page (#405).
+        "studio.youtube.com" => !path.starts_with("/reauth"),
         "www.facebook.com" | "facebook.com" | "web.facebook.com" => {
             path.starts_with("/live/producer")
         }
