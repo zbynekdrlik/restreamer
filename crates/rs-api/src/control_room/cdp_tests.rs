@@ -8,6 +8,7 @@ fn target(id: &str, kind: &str, url: &str) -> TargetInfo {
         title: String::new(),
         browser_context_id: None,
         opener_id: None,
+        can_access_opener: false,
     }
 }
 
@@ -123,4 +124,18 @@ async fn browser_endpoint_and_pages_through_a_fake_chrome() {
     assert_eq!(pages[0].target_id, "T1");
     assert_eq!(pages[0].browser_context_id.as_deref(), Some("C1"));
     assert_eq!(chrome.methods(), vec!["Target.getTargets"]);
+}
+
+#[test]
+fn target_info_reads_whether_a_popup_can_reach_its_opener() {
+    let popup: TargetInfo = serde_json::from_value(json!({
+        "targetId": "P", "type": "page", "url": "https://x/", "openerId": "R",
+        "canAccessOpener": true
+    }))
+    .unwrap();
+    assert!(popup.can_access_opener);
+    let tab: TargetInfo =
+        serde_json::from_value(json!({"targetId": "T", "type": "page", "url": "https://x/"}))
+            .unwrap();
+    assert!(!tab.can_access_opener);
 }

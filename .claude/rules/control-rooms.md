@@ -87,6 +87,28 @@ paths:
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.
+  - **Except a popup with `canAccessOpener: true`** (a `window.open` popup; a
+    `noopener` tab is false, verified on Chrome 155). Google's "Overte svoju
+    totožnosť" challenge hands its proof back to `window.opener` from
+    `studio.youtube.com/reauth`; moving it into the room tab destroyed the opener and
+    the flow hung on "Spracúva sa. Čakajte." forever (#405). The relay shows such a
+    popup in place, one `relay_tab` session per shown tab, until it leaves the target
+    list, then shows the tab under it again (popups stack: Google's flow can nest). A
+    popup that lands on a room page is handed to the tab under it. `/reauth` is never
+    remembered. The pure decisions live in `popups.rs`.
+  - The dashboard gets `{t:"popup",open}` and shows "Zavrieť okno a späť na
+    stránku" (`{t:"close-popup"}`): a popped-out chat never closes itself.
+  - A popup the room is done with (closed, handed over, left, or unattachable) is
+    never shown or moved again, so a refused `Target.closeTarget` cannot loop. A room
+    closed at `MAX_LIVE_ROOMS` takes its popups with it (`opened_by`).
+  - Test harness: `FakeChrome` closes a page's socket when the page leaves the
+    target list, like Chrome, so the real return path (the popup's socket ends) is
+    what the relay tests exercise. `refuse_attach` / `attaches` cover attach failures.
+  - To see what a room shows without the dashboard, screenshot its tab over CDP on the
+    box (`Page.captureScreenshot` on `ws://127.0.0.1:9231/devtools/page/<id>`; the
+    box has python `websocket-client`). Chrome's own sign-in bubble
+    (`chrome://signin-dice-web-intercept...`) is a separate target the viewer never
+    sees; it is harmless.
 - **Frames are paced by the viewer.** Chrome sends the next screencast frame only after
   the last one is acked. The relay acks when the dashboard reports `{t:drawn}` after
   drawing, never on queueing: acking on queueing let a playing video (a YouTube seek, a

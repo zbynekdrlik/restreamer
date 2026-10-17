@@ -343,3 +343,37 @@ test("a room's page is reloaded from its button, F5 and Ctrl+R", async ({ page, 
   expect(await keys()).toBe(0);
   expect(unexpected(consoleMessages)).toEqual([]);
 });
+
+// #405: Studio's "Overte svoju totožnosť" opens a Google challenge popup.
+// The room shows that popup (its opener must stay alive behind it) and
+// offers the way back for a popup that never closes itself.
+test("a popup shown in a room offers the way back to the page", async ({ page, request }) => {
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
+  const send = (msg: object) => request.post(`${API}/_test/control-rooms/send`, { data: { target: "T11", msg } });
+  const closes = async () => {
+    const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+    return s.inputs.filter((i: { t: string }) => i.t === "close-popup").length;
+  };
+
+  await expect(page.getByTestId("cr-popup-bar")).toHaveCount(0);
+  await send({ t: "url", url: "https://accounts.google.com/v3/signin/challenge/pwd" });
+  await send({ t: "popup", open: true });
+  await expect(page.getByTestId("cr-popup-bar")).toBeVisible();
+  await expect(page.getByTestId("cr-url")).toHaveValue("https://accounts.google.com/v3/signin/challenge/pwd");
+
+  await page.getByTestId("cr-popup-close").click();
+  await expect.poll(closes).toBe(1);
+
+  // The relay is back on the page.
+  await send({ t: "popup", open: false });
+  await send({ t: "url", url: "https://studio.youtube.com/channel/UC1/livestreaming" });
+  await expect(page.getByTestId("cr-popup-bar")).toHaveCount(0);
+  await expect(page.getByTestId("cr-url")).toHaveValue("https://studio.youtube.com/channel/UC1/livestreaming");
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});

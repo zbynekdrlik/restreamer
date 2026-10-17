@@ -19,6 +19,7 @@ pub mod cdp;
 #[cfg(test)]
 pub(crate) mod fake_chrome;
 pub mod handlers;
+pub mod popups;
 pub mod relay;
 #[cfg(windows)]
 mod spawn_windows;
@@ -99,7 +100,8 @@ pub fn remember_url(url: &str) -> bool {
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (host, path) = rest.split_at(end);
     match host {
-        "studio.youtube.com" => true,
+        // `/reauth` is a verification popup's hand-back page (#405).
+        "studio.youtube.com" => !path.starts_with("/reauth"),
         "www.facebook.com" | "facebook.com" | "web.facebook.com" => {
             path.starts_with("/live/producer")
         }
@@ -522,6 +524,11 @@ impl ControlRooms {
                 tracing::info!(
                     "control rooms: closing room {ep} (tab {t}): over {MAX_LIVE_ROOMS} open rooms, viewed longest ago; it reopens at its last page"
                 );
+                // Its popups would outlive it, shown and closed by no room (#405).
+                for p in popups::opened_by(pages, t) {
+                    tracing::info!("control rooms: closing popup {p} of room {ep}");
+                    self.close_tab(&p).await;
+                }
                 if self.close_tab(t).await {
                     closed.push(t.clone());
                 }

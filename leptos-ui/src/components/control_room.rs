@@ -308,6 +308,9 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
     let clip: RwSignal<Option<String>> = RwSignal::new(None);
     // The page opened a file chooser ("Upload thumbnail", #399).
     let wants_file = RwSignal::new(false);
+    // The room shows a popup of its page (a sign-in, "Overte svoju
+    // totožnosť", #405) instead of the page itself.
+    let in_popup = RwSignal::new(false);
     let viewer = StoredValue::new_local(None::<Viewer>);
     let editing = RwSignal::new(false);
     let acct_input = RwSignal::new(dest.account.clone().unwrap_or_default());
@@ -315,6 +318,8 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
 
     let attach = move || {
         status.set("otváram…".into());
+        // A new relay tells again whether a popup is shown.
+        in_popup.set(false);
         spawn_local(async move {
             let target = match api::open_control_room(endpoint_id).await {
                 Ok(t) => t,
@@ -355,6 +360,13 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                     }
                     Some("file-chooser-closed") => {
                         wants_file.try_set(false);
+                    }
+                    Some("popup") => {
+                        let open = m.get("open").and_then(|o| o.as_bool()).unwrap_or(false);
+                        in_popup.try_set(open);
+                        if open {
+                            status.try_set("vyskakovacie okno stránky".into());
+                        }
                     }
                     Some("file-done") => {
                         let name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
@@ -493,6 +505,18 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                     attach();
                 }>"↻"</button>
             </div>
+            <Show when=move || in_popup.get()>
+                <div class="cr-room__clip" data-testid="cr-popup-bar">
+                    <span>"Stránka otvorila vyskakovacie okno (napr. overenie totožnosti). Po dokončení sa zavrie samo."</span>
+                    <button
+                        class="cr-btn"
+                        data-testid="cr-popup-close"
+                        on:click=move |_| send(r#"{"t":"close-popup"}"#.into())
+                    >
+                        "✕ Zavrieť okno a späť na stránku"
+                    </button>
+                </div>
+            </Show>
             <Show when=move || wants_file.get()>
                 <div class="cr-room__clip" data-testid="cr-file-bar">
                     <span>"Stránka chce súbor:"</span>

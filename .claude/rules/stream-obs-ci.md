@@ -198,6 +198,13 @@ UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
       mbc mic, 08:14-08:31Z, not ours). Read `:8891/program-audio.json`. Once it shows
       `MEASUREMENT` for a few polls with no recent FOREIGN, rerun the failed job. Never
       loosen the guard, and never play anything into the mix yourself.
+    - **A timeout at "Rig lease: take it before StartStream (#349)" is rig state too.** The
+      lease (dev1:8890) is held per JOB, not per run, so a foreign holder can take it in the
+      gap between two E2E jobs of one run (camera-box `av-soak`, 8 h, run 38984897525). The
+      job spends its 3600 s budget and fails before StartStream, with nothing touched. Read
+      the holder and its `ttl_s` in the job log; rerun after it ends, or let the next push
+      re-prove it. Peers waiting for a restreamer run must watch the GitHub run status, not
+      the lease release.
   - `Set-StartedMarker` mirrors the marker into `program-audio-stream-owned`. The watchdog
     stops only OUR stream (#374). Music while the marker is false is logged and is not a
     breach: nothing of ours is live, and the next start re-checks.
