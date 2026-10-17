@@ -93,8 +93,17 @@ paths:
     `studio.youtube.com/reauth`; moving it into the room tab destroyed the opener and
     the flow hung on "Spracúva sa. Čakajte." forever (#405). The relay shows such a
     popup in place, one `relay_tab` session per shown tab, until it leaves the target
-    list, then shows the room tab again. A popup that lands on a room page is handed
-    to the room tab. `/reauth` is never remembered.
+    list, then shows the tab under it again (popups stack: Google's flow can nest). A
+    popup that lands on a room page is handed to the tab under it. `/reauth` is never
+    remembered. The pure decisions live in `popups.rs`.
+  - The dashboard gets `{t:"popup",open}` and shows "Zavrieť okno a späť na
+    stránku" (`{t:"close-popup"}`): a popped-out chat never closes itself.
+  - A popup the room is done with (closed, handed over, left, or unattachable) is
+    never shown or moved again, so a refused `Target.closeTarget` cannot loop. A room
+    closed at `MAX_LIVE_ROOMS` takes its popups with it (`opened_by`).
+  - Test harness: `FakeChrome` closes a page's socket when the page leaves the
+    target list, like Chrome, so the real return path (the popup's socket ends) is
+    what the relay tests exercise. `refuse_attach` / `attaches` cover attach failures.
   - To see what a room shows without the dashboard, screenshot its tab over CDP on the
     box (`Page.captureScreenshot` on `ws://127.0.0.1:9231/devtools/page/<id>`; the
     box has python `websocket-client`). Chrome's own sign-in bubble
