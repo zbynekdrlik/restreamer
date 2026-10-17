@@ -17,6 +17,7 @@ fn page(id: &str, ctx: &str) -> TargetInfo {
         title: String::new(),
         browser_context_id: Some(ctx.into()),
         opener_id: None,
+        can_access_opener: false,
     }
 }
 
@@ -105,6 +106,8 @@ fn remember_url_keeps_only_room_pages() {
     for no in [
         "https://accounts.google.com/v3/signin/identifier",
         "https://www.youtube.com/channel_switcher",
+        // #405: the hand-back page of a verification popup, never a room page.
+        "https://studio.youtube.com/reauth?rapt=x",
         "https://www.facebook.com/login/",
         "https://www.facebook.com/checkpoint/",
         "http://studio.youtube.com/",

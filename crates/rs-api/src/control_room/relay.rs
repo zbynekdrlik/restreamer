@@ -368,6 +368,40 @@ pub fn popups_of(pages: &[TargetInfo], room: &str) -> Vec<TargetInfo> {
         .collect()
 }
 
+/// What the relay does with one popup of the tab it shows (#405).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PopupMove {
+    /// Show the popup itself until it closes. It reports back to its opener
+    /// (a Google sign-in or "Overte svoju totožnosť" flow), so the tab that
+    /// opened it must stay alive behind it.
+    ShowInPlace(TargetInfo),
+    /// Load its URL into the shown tab and close it (#399).
+    MoveIntoTab(TargetInfo),
+}
+
+/// The popups of `shown`, each with what to do with it.
+pub fn popup_moves(pages: &[TargetInfo], shown: &str) -> Vec<PopupMove> {
+    popups_of(pages, shown)
+        .into_iter()
+        .map(PopupMove::MoveIntoTab)
+        .collect()
+}
+
+/// Why the relay stops showing a popup.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PopupEnd {
+    /// It is gone: its opener closed it after the hand-back.
+    Closed,
+    /// It reached a room page itself (a channel switch): the room tab takes
+    /// that URL over.
+    Landed(String),
+}
+
+/// Whether the popup `popup` is done, read from the tab list.
+pub fn popup_end(_pages: &[TargetInfo], _popup: &str) -> Option<PopupEnd> {
+    None
+}
+
 /// How often the relay looks for tabs the room opened.
 const POPUP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
