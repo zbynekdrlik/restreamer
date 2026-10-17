@@ -3,6 +3,7 @@
 //! (`Network.getCookies`, `Target.closeTarget` drops the target, everything
 //! else answered `{}`). Every request is
 //! recorded, and the target list and cookies can be changed while it runs.
+//! Like Chrome, it closes a page's socket once the page leaves the list.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,10 @@ pub struct FakeState {
     pub requests: Vec<(String, Value)>,
     /// Target ids whose `Target.closeTarget` fails with a CDP error.
     pub refuse_close: Vec<String>,
+    /// Page ids whose socket cannot be opened (HTTP 404).
+    pub refuse_attach: Vec<String>,
+    /// Every page socket asked for, in order.
+    pub attaches: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -78,12 +83,44 @@ async fn socket(
     State((_, state)): State<Shared>,
     Path((kind, id)): Path<(String, String)>,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if kind == "page" {
+        let mut s = state.lock().unwrap();
+        s.attaches.push(id.clone());
+        if s.refuse_attach.contains(&id) {
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
+    }
     ws.on_upgrade(move |s| serve_socket(s, state, format!("{kind}/{id}"), id))
+        .into_response()
+}
+
+fn listed(state: &Mutex<FakeState>, id: &str) -> bool {
+    state
+        .lock()
+        .unwrap()
+        .targets
+        .iter()
+        .any(|t| t["targetId"] == id)
 }
 
 async fn serve_socket(mut ws: WebSocket, state: Arc<Mutex<FakeState>>, path: String, id: String) {
-    while let Some(Ok(Message::Text(text))) = ws.next().await {
+    // A listed page's socket closes when the page goes away.
+    let watched = path.starts_with("page/") && listed(&state, &id);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        let msg = tokio::select! {
+            m = ws.next() => m,
+            _ = tick.tick(), if watched => {
+                if listed(&state, &id) {
+                    continue;
+                }
+                break;
+            }
+        };
+        let Some(Ok(Message::Text(text))) = msg else {
+            break;
+        };
         let req: Value = serde_json::from_str(&text).unwrap();
         let refused = req["method"] == "Target.closeTarget" && {
             let s = state.lock().unwrap();

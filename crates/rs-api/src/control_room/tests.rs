@@ -643,7 +643,13 @@ mod with_fake_chrome {
                 "https://studio.youtube.com/",
             )
         };
-        chrome.set_targets((1..=4).map(tab).collect());
+        // Room 1 has a popup open (#405): it must go with its room.
+        let popup = serde_json::json!({"targetId": "P1", "type": "page",
+            "url": "https://accounts.google.com/", "title": "p",
+            "openerId": "T1", "canAccessOpener": true});
+        let mut four: Vec<serde_json::Value> = (1..=4).map(tab).collect();
+        four.push(popup.clone());
+        chrome.set_targets(four);
         let map = TabMap {
             ctx: (1..=4)
                 .map(|i| (format!("C{i}"), format!("dest-{i}")))
@@ -670,7 +676,9 @@ mod with_fake_chrome {
             .collect();
         let dests = destinations(&eps, &AccountsFile::default());
 
-        after_handover(dir.path(), &chrome, 1, (1..=5).map(tab).collect());
+        let mut five: Vec<serde_json::Value> = (1..=5).map(tab).collect();
+        five.push(popup);
+        after_handover(dir.path(), &chrome, 1, five);
         let id = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             rooms.open(&dests[4], &[]),
@@ -682,7 +690,7 @@ mod with_fake_chrome {
         assert_eq!(
             target_ids(&chrome),
             vec!["T2", "T3", "T4", "T5"],
-            "room 1 was viewed longest ago"
+            "room 1 was viewed longest ago, and its popup went with it"
         );
         let m = read_map(dir.path());
         assert!(!m.tab.contains_key("T1"), "{m:?}");

@@ -270,35 +270,6 @@ async fn screencast_restarts_after_a_main_frame_navigation() {
     assert!(url_seen, "the dashboard hears about the new URL");
 }
 
-fn tinfo(id: &str, url: &str, opener: Option<&str>) -> TargetInfo {
-    TargetInfo {
-        target_id: id.into(),
-        kind: "page".into(),
-        url: url.into(),
-        title: String::new(),
-        browser_context_id: None,
-        opener_id: opener.map(Into::into),
-        can_access_opener: false,
-    }
-}
-
-#[test]
-fn popups_are_the_http_tabs_the_room_opened() {
-    let pages = vec![
-        tinfo("R", "https://studio.youtube.com/", None),
-        tinfo("P1", "https://www.youtube.com/account", Some("R")),
-        tinfo("P2", "about:blank", Some("R")),
-        tinfo("P3", "https://x/", Some("OTHER")),
-        tinfo("P4", "http://y/", Some("R")),
-        tinfo("P5", "chrome://newtab/", Some("R")),
-    ];
-    let ids: Vec<String> = popups_of(&pages, "R")
-        .into_iter()
-        .map(|t| t.target_id)
-        .collect();
-    assert_eq!(ids, vec!["P1", "P4"]);
-}
-
 #[tokio::test]
 async fn relay_moves_a_popup_into_the_room_tab() {
     use crate::control_room::fake_chrome::FakeChrome;
