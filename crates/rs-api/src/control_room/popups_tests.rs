@@ -117,16 +117,18 @@ fn a_tab_closes_with_everything_it_opened() {
 
 #[test]
 fn a_switch_tells_the_dashboard_what_the_old_tab_took_with_it() {
-    assert!(switch_notices(false, false).is_empty());
+    assert!(switch_notices(false, false, false).is_empty());
     assert_eq!(
-        switch_notices(true, false),
+        switch_notices(false, true, false),
         vec![json!({ "t": "file-chooser-closed" })]
     );
-    let both = switch_notices(true, true);
+    let both = switch_notices(false, true, true);
     assert_eq!(both.len(), 2);
     assert_eq!(both[0]["t"], "file-chooser-closed");
     assert_eq!(both[1]["t"], "file-error");
-    assert_eq!(switch_notices(false, true)[0]["t"], "file-error");
+    assert_eq!(switch_notices(false, false, true)[0]["t"], "file-error");
+    // The viewer is gone: nobody to tell.
+    assert!(switch_notices(true, true, true).is_empty());
 }
 
 #[test]

@@ -892,15 +892,17 @@ async fn relay_tab(
         e = from_client => e,
         e = follow_popups => e,
     };
-    if !matches!(end, TabEnd::Over) {
-        let chooser_pending = chooser_left
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-            .is_some();
-        for n in switch_notices(chooser_pending, uploading_left.load(Ordering::Relaxed)) {
-            let _ = to_client.send(text_message(&n));
-        }
+    let chooser_pending = chooser_left
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .is_some();
+    for n in switch_notices(
+        matches!(end, TabEnd::Over),
+        chooser_pending,
+        uploading_left.load(Ordering::Relaxed),
+    ) {
+        let _ = to_client.send(text_message(&n));
     }
     // The writer sends what is still queued (a file's last commands), then
     // ends with the last sender.

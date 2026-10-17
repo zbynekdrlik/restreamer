@@ -331,3 +331,28 @@ async fn popups_of_a_shown_popup_are_shown_over_it_or_moved_into_it() {
     );
     assert_eq!(screencasts(&chrome, "P3"), 0);
 }
+
+/// Chrome refuses to close a `noopener` tab: it is moved into the room tab
+/// once, not on every poll.
+#[tokio::test]
+async fn a_noopener_tab_chrome_will_not_close_is_moved_only_once() {
+    let chrome = FakeChrome::start().await;
+    let account = "https://www.youtube.com/account";
+    chrome.set_targets(vec![
+        room(),
+        json!({"targetId": "P1", "type": "page", "url": account, "title": "a",
+               "openerId": "T1", "canAccessOpener": false}),
+    ]);
+    chrome.state.lock().unwrap().refuse_close.push("P1".into());
+    let addr = serve_relay(Cdp::new(chrome.addr.clone()), "T1").await;
+    let (_tx, _got) = viewer(addr).await;
+    wait_for("the tab was never moved", &chrome, || {
+        !requests_on(&chrome, "page/T1", "Page.navigate").is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+    assert_eq!(
+        requests_on(&chrome, "page/T1", "Page.navigate"),
+        vec![json!({"url": account})]
+    );
+}

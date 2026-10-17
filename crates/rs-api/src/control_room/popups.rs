@@ -80,9 +80,12 @@ pub fn opened_by(pages: &[TargetInfo], tab: &str) -> Vec<String> {
 
 /// What the dashboard is told when the room switches away from a tab: a
 /// file chooser of that tab is gone, and a file still being put into it may
-/// not have arrived.
-pub fn switch_notices(chooser_pending: bool, file_in_flight: bool) -> Vec<Value> {
+/// not have arrived. Nothing when the whole relay is over (no viewer left).
+pub fn switch_notices(relay_over: bool, chooser_pending: bool, file_in_flight: bool) -> Vec<Value> {
     let mut out = Vec::new();
+    if relay_over {
+        return out;
+    }
     if chooser_pending {
         out.push(json!({ "t": "file-chooser-closed" }));
     }
