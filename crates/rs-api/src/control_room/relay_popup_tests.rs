@@ -317,8 +317,11 @@ async fn popups_of_a_shown_popup_are_shown_over_it_or_moved_into_it() {
         json!({"targetId": "P3", "type": "page", "url": help, "title": "h",
                "openerId": "P1", "canAccessOpener": false}),
     ]);
+    // The navigate goes out on the page socket, the close on its own
+    // browser socket: wait for both, their order is not fixed.
     wait_for("the noopener tab was never moved", &chrome, || {
         !requests_on(&chrome, "page/P1", "Page.navigate").is_empty()
+            && !requests_on(&chrome, "browser/b1", "Target.closeTarget").is_empty()
     })
     .await;
     assert_eq!(
