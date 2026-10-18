@@ -25,6 +25,10 @@ pub struct TargetInfo {
     /// The tab that opened this one (`window.open`, a `target=_blank` link).
     #[serde(default)]
     pub opener_id: Option<String>,
+    /// Whether this tab can still reach its opener (`window.opener`): true for
+    /// a `window.open` popup, false for a `noopener` link (#405).
+    #[serde(default)]
+    pub can_access_opener: bool,
 }
 
 /// The page targets an operator can see: real tabs, no extension pages.

@@ -10,6 +10,11 @@
 //! `{"t":"size","w","h"}` (the canvas size in CSS pixels: the page viewport
 //! follows it, so the room fills the operator's window at full sharpness).
 //! Anything else is dropped, and only the listed fields are forwarded.
+//!
+//! Popups: a tab the page opens is moved into the room tab (#399), except a
+//! popup that can still reach its opener (a Google sign-in or "Overte svoju
+//! totožnosť"): the room shows that popup until it closes, so the page that
+//! opened it can take the proof back (#405).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
+use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 
 const MOUSE_FIELDS: &[&str] = &[
     "type",
@@ -354,20 +360,6 @@ pub fn same_document_url(m: &Value, main_frame: &str) -> Option<String> {
         .flatten()
 }
 
-/// The tabs the room tab `room` opened (`window.open`, a `target=_blank`
-/// link) that already carry an http(s) URL: the room shows them in its own
-/// tab, since the viewer only ever sees that one.
-pub fn popups_of(pages: &[TargetInfo], room: &str) -> Vec<TargetInfo> {
-    pages
-        .iter()
-        .filter(|t| {
-            t.opener_id.as_deref() == Some(room)
-                && (t.url.starts_with("https://") || t.url.starts_with("http://"))
-        })
-        .cloned()
-        .collect()
-}
-
 /// How often the relay looks for tabs the room opened.
 const POPUP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -435,8 +427,35 @@ pub async fn relay_with(
     relay_room(client, cdp, target_id, start_url, on_url, uploads).await;
 }
 
+/// The `{"t":"url"}` message telling the dashboard which page it sees.
+fn url_message(url: &str) -> AxMessage {
+    AxMessage::Text(json!({ "t": "url", "url": url }).to_string().into())
+}
+
+/// The JSON `msg` as a text message to the dashboard.
+fn text_message(msg: &Value) -> AxMessage {
+    AxMessage::Text(msg.to_string().into())
+}
+
+/// Why one [`relay_tab`] session ended.
+enum TabEnd {
+    /// The viewer left, or the room tab is gone: the relay is over.
+    Over,
+    /// The shown tab opened a popup that reports back to it: show that.
+    Popup(TargetInfo),
+    /// The shown popup is done: closed (`None`), or landed on a room page
+    /// that the tab under it takes over.
+    PopupDone(Option<String>),
+    /// The viewer asked to leave the shown popup (a popup that never closes
+    /// itself, a popped-out chat).
+    LeavePopup,
+}
+
 /// Relay `client` to the page `target_id` until either side closes. Files
-/// the operator puts into the room are written to `uploads`.
+/// the operator puts into the room are written to `uploads`. A popup that
+/// reports back to the tab that opened it (a sign-in, "Overte svoju
+/// totožnosť") is shown instead of that tab until it closes, with the tab
+/// kept alive behind it (#405).
 pub async fn relay_room(
     client: WebSocket,
     cdp: Cdp,
@@ -445,19 +464,158 @@ pub async fn relay_room(
     on_url: UrlSink,
     uploads: std::path::PathBuf,
 ) {
-    let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(&target_id)).await {
+    let (mut client_tx, mut client_rx) = client.split();
+    let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
+    let _ = to_client.send(url_message(&start_url));
+    let client_writer = tokio::spawn(async move {
+        while let Some(m) = to_client_rx.recv().await {
+            if client_tx.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+    // The viewport the viewer asked for, re-applied after a navigation and
+    // on every tab the room shows.
+    let view: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
+    // A popup's pages (a sign-in, /reauth) are never the room's last page.
+    let no_urls: UrlSink = Arc::new(|_| {});
+    // The popups shown over the room tab, innermost last.
+    let mut popups: Vec<String> = Vec::new();
+    // Popups the room is done with: never shown or moved again, even when
+    // Chrome refused to close one (no show/hand-over loop).
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut navigate_to: Option<String> = None;
+    loop {
+        let shown = TabSession {
+            cdp: &cdp,
+            tab: popups.last().map_or(target_id.as_str(), String::as_str),
+            is_popup: !popups.is_empty(),
+            to_client: &to_client,
+            view: &view,
+            on_url: if popups.is_empty() {
+                on_url.clone()
+            } else {
+                no_urls.clone()
+            },
+            uploads: &uploads,
+            skip: &done,
+        };
+        let end = relay_tab(shown, &mut client_rx, navigate_to.take()).await;
+        let left = match end {
+            TabEnd::Over => break,
+            TabEnd::Popup(p) => {
+                tracing::info!(
+                    "control rooms: room {target_id}: {} opened {} as a popup that reports back to it; showing the popup until it closes",
+                    popups.last().map_or(target_id.as_str(), String::as_str),
+                    p.url
+                );
+                let _ = to_client.send(url_message(&p.url));
+                let _ = to_client.send(text_message(&popup_message(true)));
+                popups.push(p.target_id);
+                continue;
+            }
+            TabEnd::PopupDone(landed) => {
+                let p = popups.pop().unwrap_or_default();
+                match &landed {
+                    Some(url) => {
+                        tracing::info!(
+                            "control rooms: popup {p} reached {url}; the tab under it takes it over"
+                        );
+                        close_popup(&cdp, &p).await;
+                    }
+                    None => tracing::info!("control rooms: popup {p} closed"),
+                }
+                navigate_to = landed;
+                p
+            }
+            TabEnd::LeavePopup => {
+                let p = popups.pop().unwrap_or_default();
+                tracing::info!("control rooms: the viewer left popup {p}; closing it");
+                close_popup(&cdp, &p).await;
+                p
+            }
+        };
+        done.insert(left);
+        let now = popups.last().map_or(target_id.as_str(), String::as_str);
+        tracing::info!("control rooms: room {target_id}: showing tab {now} again");
+        let _ = to_client.send(text_message(&popup_message(!popups.is_empty())));
+        let url = match &navigate_to {
+            Some(u) => Some(u.clone()),
+            None => cdp
+                .pages()
+                .await
+                .ok()
+                .and_then(|ps| ps.into_iter().find(|t| t.target_id == now))
+                .map(|t| t.url),
+        };
+        if let Some(u) = url {
+            let _ = to_client.send(url_message(&u));
+        }
+    }
+    drop(to_client);
+    client_writer.abort();
+    tracing::info!("control rooms: viewer detached from tab {target_id}");
+}
+
+/// Close a popup the room is done with; a refusal is only logged (the room
+/// never shows it again either way).
+async fn close_popup(cdp: &Cdp, popup: &str) {
+    if let Err(e) = cdp
+        .browser_call("Target.closeTarget", json!({ "targetId": popup }))
+        .await
+    {
+        tracing::warn!("control rooms: closing popup {popup} failed: {e:#}");
+    }
+}
+
+/// The tab one [`relay_tab`] session shows, and what it shares with the
+/// sessions before and after it.
+struct TabSession<'a> {
+    cdp: &'a Cdp,
+    /// The room tab, or the popup of it shown now.
+    tab: &'a str,
+    is_popup: bool,
+    to_client: &'a mpsc::UnboundedSender<AxMessage>,
+    view: &'a Arc<std::sync::Mutex<Option<Value>>>,
+    on_url: UrlSink,
+    uploads: &'a std::path::Path,
+    /// Popups the room is done with.
+    skip: &'a std::collections::HashSet<String>,
+}
+
+/// Relay the viewer to one tab until the viewer leaves, the tab goes away,
+/// or the room switches between its tab and a popup. `navigate_to` is
+/// loaded into the tab first (a popup's room page, handed over).
+async fn relay_tab(
+    shown: TabSession<'_>,
+    client_rx: &mut futures::stream::SplitStream<WebSocket>,
+    navigate_to: Option<String>,
+) -> TabEnd {
+    let TabSession {
+        cdp,
+        tab,
+        is_popup,
+        to_client,
+        view,
+        on_url,
+        uploads,
+        skip,
+    } = shown;
+    let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(tab)).await {
         Ok((ws, _)) => ws,
         Err(e) => {
-            tracing::warn!("control rooms: cannot attach to tab {target_id}: {e}");
-            return;
+            tracing::warn!("control rooms: cannot attach to tab {tab}: {e}");
+            // A popup that cannot be shown counts as done.
+            return if is_popup {
+                TabEnd::PopupDone(None)
+            } else {
+                TabEnd::Over
+            };
         }
     };
-    tracing::info!("control rooms: viewer attached to tab {target_id}");
+    tracing::info!("control rooms: viewer attached to tab {tab}");
     let (mut page_tx, mut page_rx) = page.split();
-    let (mut client_tx, mut client_rx) = client.split();
     let seq = Arc::new(AtomicU64::new(0));
-    // The viewport the viewer asked for, re-applied after a navigation.
-    let view: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
     // The <input type=file> of a file chooser the page opened that no file
     // went into yet.
     let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
@@ -465,6 +623,8 @@ pub async fn relay_room(
     // Chrome sends the next frame only after an ack, so acking on "drawn"
     // paces the frames to the viewer (no queue grows behind a slow one).
     let unacked: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
+    // A file is being put into this tab right now.
+    let uploading = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // One writer per socket: the reader tasks hand their messages over.
     let (to_page, mut to_page_rx) = mpsc::unbounded_channel::<String>();
@@ -500,27 +660,23 @@ pub async fn relay_room(
         json!({ "enabled": true }),
     );
     call("Page.bringToFront", json!({}));
+    // A tab shown after the first one gets the viewer's size at once.
+    let size = view.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(size) = size {
+        call(SET_VIEWPORT, size);
+    }
     call("Page.startScreencast", screencast_params());
-
-    let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
-    let _ = to_client.send(AxMessage::Text(
-        json!({ "t": "url", "url": start_url }).to_string().into(),
-    ));
-    let client_writer = tokio::spawn(async move {
-        while let Some(m) = to_client_rx.recv().await {
-            if client_tx.send(m).await.is_err() {
-                break;
-            }
-        }
-    });
+    if let Some(url) = navigate_to {
+        call("Page.navigate", json!({ "url": url }));
+    }
 
     let from_page = {
         let call = call.clone();
         let to_client = to_client.clone();
-        let view = Arc::clone(&view);
+        let view = Arc::clone(view);
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
-        let main_frame = target_id.clone();
+        let main_frame = tab.to_string();
         async move {
             let mut last = (0, 0);
             while let Some(Ok(msg)) = page_rx.next().await {
@@ -605,13 +761,21 @@ pub async fn relay_room(
                     PageOut::Ignore => {}
                 }
             }
+            // The tab is gone: a closed popup hands back to the tab under it.
+            if is_popup {
+                TabEnd::PopupDone(None)
+            } else {
+                TabEnd::Over
+            }
         }
     };
     let follow_popups = {
         let cdp = cdp.clone();
-        let room = target_id.clone();
+        let shown = tab.to_string();
         let call = call.clone();
         async move {
+            // Popups already moved into this tab, even if closing one failed.
+            let mut moved: std::collections::HashSet<String> = std::collections::HashSet::new();
             loop {
                 tokio::time::sleep(POPUP_POLL).await;
                 let pages = match cdp.pages().await {
@@ -621,9 +785,22 @@ pub async fn relay_room(
                         continue;
                     }
                 };
-                for p in popups_of(&pages, &room) {
+                if is_popup && let Some(end) = popup_end(&pages, &shown) {
+                    return TabEnd::PopupDone(match end {
+                        PopupEnd::Closed => None,
+                        PopupEnd::Landed(url) => Some(url),
+                    });
+                }
+                for m in popup_moves(&pages, &shown, skip) {
+                    let p = match m {
+                        PopupMove::ShowInPlace(p) => return TabEnd::Popup(p),
+                        PopupMove::MoveIntoTab(p) => p,
+                    };
+                    if !moved.insert(p.target_id.clone()) {
+                        continue;
+                    }
                     tracing::info!(
-                        "control rooms: tab {room} opened {}; showing it in the room tab",
+                        "control rooms: tab {shown} opened {}; moving it into tab {shown}",
                         p.url
                     );
                     call("Page.navigate", json!({ "url": p.url }));
@@ -640,7 +817,8 @@ pub async fn relay_room(
             }
         }
     };
-    let tab = target_id.clone();
+    let (chooser_left, uploading_left) = (Arc::clone(&chooser), Arc::clone(&uploading));
+    let tab = tab.to_string();
     let to_viewer = to_client.clone();
     let from_client = async move {
         // A Close frame ends the stream, which ends this loop.
@@ -659,14 +837,21 @@ pub async fn relay_room(
                 }
                 continue;
             }
+            if v["t"] == "close-popup" {
+                if is_popup {
+                    return TabEnd::LeavePopup;
+                }
+                continue;
+            }
             if v["t"] == "file" {
                 // Decoding and writing up to 20 MB must not hold up the relay.
                 let (uploads, chooser, call, tab) = (
-                    uploads.clone(),
+                    uploads.to_path_buf(),
                     Arc::clone(&chooser),
                     call.clone(),
                     tab.clone(),
                 );
+                uploading.store(true, Ordering::Relaxed);
                 let reply = tokio::task::spawn_blocking(move || {
                     put_file(&v, &uploads, &chooser, &call, &tab)
                 })
@@ -674,6 +859,7 @@ pub async fn relay_room(
                 .unwrap_or_else(
                     |e| json!({ "t": "file-error", "error": format!("interná chyba ({e})") }),
                 );
+                uploading.store(false, Ordering::Relaxed);
                 if to_viewer
                     .send(AxMessage::Text(reply.to_string().into()))
                     .is_err()
@@ -698,17 +884,31 @@ pub async fn relay_room(
                 }
             }
         }
+        // The viewer closed the room.
+        TabEnd::Over
     };
-    tokio::select! {
-        _ = from_page => {}
-        _ = from_client => {}
-        _ = follow_popups => {}
+    let end = tokio::select! {
+        e = from_page => e,
+        e = from_client => e,
+        e = follow_popups => e,
+    };
+    let chooser_pending = chooser_left
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .is_some();
+    for n in switch_notices(
+        matches!(end, TabEnd::Over),
+        chooser_pending,
+        uploading_left.load(Ordering::Relaxed),
+    ) {
+        let _ = to_client.send(text_message(&n));
     }
+    // The writer sends what is still queued (a file's last commands), then
+    // ends with the last sender.
     drop(to_page);
-    drop(to_client);
-    page_writer.abort();
-    client_writer.abort();
-    tracing::info!("control rooms: viewer detached from tab {target_id}");
+    drop(page_writer);
+    end
 }
 
 #[cfg(test)]
