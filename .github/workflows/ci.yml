@@ -6226,7 +6226,9 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 210
           if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish for the #408 gate (see the ::error:: line above)" }
 
-          $announced = Get-AuditRows "source_stopped_deliberately"
+          # @(): PowerShell 5.1 unrolls a one-row result into a PSCustomObject,
+          # which has no .Count (run 39164865884 missed the one real row).
+          $announced = @(Get-AuditRows "source_stopped_deliberately")
           if ($announced.Count -lt 1) {
             throw "FAILED (#408): no source_stopped_deliberately row: the host never announced the end of the source to the VPS"
           }
@@ -6251,7 +6253,7 @@ jobs:
             throw "FAILED (#408): these endpoints did not resume after OBS published again: $($waiting -join ', ')"
           }
 
-          $rescue = Get-AuditRows "rescue_activated"
+          $rescue = @(Get-AuditRows "rescue_activated")
           if ($rescue.Count -gt 0) {
             $who = @($rescue | ForEach-Object { $_.endpoint } | Sort-Object -Unique) -join ', '
             throw "FAILED (#408): rescue_activated on [$who] around a deliberate OBS stop: the outage clip and the outage alert went out"
