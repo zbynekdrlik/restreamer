@@ -40,8 +40,16 @@ pub fn summarize_delivery(cached: &CachedDeliveryStatus) -> (ComponentStatus, Co
         )
     });
 
+    // #408: every endpoint played the source out after a deliberate OBS stop.
+    let all_ended = cached
+        .endpoints
+        .iter()
+        .all(|e| matches!(e.lifecycle, EndpointLifecycle::Ended));
+
     let endpoint_state = if total == 0 {
         "starting"
+    } else if all_ended {
+        "ended"
     } else if any_attention {
         "attention"
     } else if any_recovering {

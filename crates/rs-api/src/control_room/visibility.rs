@@ -68,22 +68,39 @@ impl Drop for ShownGuard {
 /// relay shows. A popup is the room's business: it is shown in place or
 /// moved into its room, and the room is hidden with it.
 pub fn to_hide(pages: &[TargetInfo], shown: &HashMap<String, u32>) -> Vec<String> {
-    let _ = (pages, shown);
-    Vec::new()
+    pages
+        .iter()
+        .filter(|t| t.url.starts_with("https://") || t.url.starts_with("http://"))
+        .filter(|t| t.opener_id.is_none())
+        .filter(|t| !shown.contains_key(&t.target_id))
+        .map(|t| t.target_id.clone())
+        .collect()
 }
 
 /// The `document.visibilityState` a `Runtime.evaluate` reply reports.
 pub fn visibility(reply: &Value) -> Option<&str> {
-    let _ = reply;
-    None
+    reply.pointer("/result/value").and_then(Value::as_str)
 }
 
 /// Hide `tab` if it is visible: `frozen` hides it, `active` lets its JS run
 /// on. A hidden page is left alone (a freeze would close its WebSockets for
 /// nothing). Returns whether it was hidden now.
 pub async fn hide_if_visible(cdp: &Cdp, tab: &str) -> anyhow::Result<bool> {
-    let _ = (cdp, tab, json!({}));
-    Ok(false)
+    let reply = cdp
+        .page_call(
+            tab,
+            "Runtime.evaluate",
+            json!({ "expression": "document.visibilityState", "returnByValue": true }),
+        )
+        .await?;
+    if visibility(&reply) != Some("visible") {
+        return Ok(false);
+    }
+    for state in ["frozen", "active"] {
+        cdp.page_call(tab, "Page.setWebLifecycleState", json!({ "state": state }))
+            .await?;
+    }
+    Ok(true)
 }
 
 /// Hide every visible web page no relay shows. Failures are logged: a page

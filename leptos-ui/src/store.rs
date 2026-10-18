@@ -123,6 +123,9 @@ pub enum EndpointLifecycle {
     Rescue,
     Recovering,
     Attention,
+    /// #408: OBS stopped on purpose; the endpoint played its buffer out and
+    /// stopped sending. Calm and grey: not an outage.
+    Ended,
 }
 
 impl Default for EndpointLifecycle {

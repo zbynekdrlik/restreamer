@@ -71,10 +71,12 @@ impl ObsState {
             output_state,
             self.stopped_deliberately,
         );
-        self.stopped_at = match (deliberate, self.stopped_at) {
-            (false, _) => None,
-            (true, Some(at)) if self.stopped_deliberately => Some(at),
-            (true, _) => Some(now),
+        // `stopped_at` is `None` whenever the verdict is false, so a kept
+        // instant is always this stop's own.
+        self.stopped_at = if deliberate {
+            self.stopped_at.or(Some(now))
+        } else {
+            None
         };
         self.stopped_deliberately = deliberate;
         self.output_state = output_state.map(str::to_owned);
@@ -386,8 +388,14 @@ pub(crate) fn stopped_deliberately_after(
     new: Option<&str>,
     prev_verdict: bool,
 ) -> bool {
-    let _ = (prev, new, prev_verdict);
-    false
+    if new != Some(OUTPUT_STOPPED) {
+        return false;
+    }
+    match prev {
+        Some(OUTPUT_STOPPING) | Some(OUTPUT_STARTED) | Some(OUTPUT_RECONNECTED) => true,
+        Some(OUTPUT_STOPPED) => prev_verdict,
+        _ => false,
+    }
 }
 
 /// Handle an incoming OBS message (event or request response).

@@ -94,6 +94,8 @@ impl EndpointLifecycle {
             // #192: refused at start (unknown service type) -- it will never
             // start by itself, the operator must fix the endpoint.
             Some(REFUSED_DELIVERY_MODE) => return EndpointLifecycle::Attention,
+            // #408: the source stopped on purpose, nothing to recover.
+            Some(ENDED_DELIVERY_MODE) => return EndpointLifecycle::Ended,
             Some("rescue") => return EndpointLifecycle::Rescue,
             Some("recovering") | Some("warmup") => return EndpointLifecycle::Recovering,
             _ => {}

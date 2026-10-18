@@ -683,6 +683,10 @@ async fn relay_tab(
     // (activation re-shows the window it leaves); focus emulation keeps
     // this one visible while the relay is attached.
     let front_id = seq.load(Ordering::Relaxed);
+    call(
+        "Emulation.setFocusEmulationEnabled",
+        json!({ "enabled": true }),
+    );
     // A tab shown after the first one gets the viewer's size at once.
     let size = view.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(size) = size {

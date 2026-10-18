@@ -65,29 +65,54 @@ impl Tracker {
     /// disconnect, and every chunk of the event is on S3. The end is the last uploaded chunk; it is announced again when
     /// a late chunk raised it. A publisher connecting again starts over.
     pub fn due(&mut self, now: Instant, i: &Inputs) -> Option<i64> {
-        let _ = (
-            now,
-            i,
-            MATCH_WINDOW,
-            &self.event_id,
-            &self.disconnected_since,
-        );
-        None
+        if self.event_id != Some(i.event_id) {
+            *self = Tracker {
+                event_id: Some(i.event_id),
+                ..Tracker::default()
+            };
+        }
+        if i.inpoint_connected {
+            self.disconnected_since = None;
+            self.announced = None;
+            return None;
+        }
+        let since = *self.disconnected_since.get_or_insert(now);
+        if now.duration_since(since) < SETTLE {
+            return None;
+        }
+        let obs_stop_caused_it = i.obs_stopped_at.is_some_and(|at| {
+            at.duration_since(since).max(since.duration_since(at)) <= MATCH_WINDOW
+        });
+        if !(i.obs_connected && obs_stop_caused_it) || i.pending_uploads > 0 {
+            return None;
+        }
+        let last = i.last_sent_chunk?;
+        (self.announced != Some(last)).then_some(last)
     }
 
     /// The VPS accepted `chunk` as the end. Returns whether this is the
     /// first announcement of this stop (the one the audit row records).
     pub fn accepted(&mut self, chunk: i64) -> bool {
-        let _ = (chunk, &self.announced);
-        false
+        self.announced.replace(chunk).is_none()
     }
 }
 
 /// `POST {vps}/api/source {ended_at_chunk_id}`. An old VPS without the route
 /// answers 404: it keeps the pre-#408 behaviour, and the error is logged.
 pub async fn announce(vps_base_url: &str, auth_token: &str, ended_at: i64) -> Result<(), String> {
-    let _ = (vps_base_url, auth_token, ended_at);
-    Ok(())
+    let resp = reqwest::Client::new()
+        .post(format!("{vps_base_url}/api/source"))
+        .bearer_auth(auth_token)
+        .json(&serde_json::json!({ "ended_at_chunk_id": ended_at }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("VPS answered {}", resp.status()))
+    }
 }
 
 /// Everything the watch reads.
@@ -112,16 +137,62 @@ impl SourceEndWatch {
     /// One look: announce the end when it is due. Returns the chunk the VPS
     /// accepted, if any.
     pub async fn tick(&self, tracker: &mut Tracker, now: Instant) -> Option<i64> {
-        let _ = (
-            tracker,
-            now,
-            &self.pool,
-            &self.inpoint,
-            &self.obs,
-            &self.audit_tx,
-            self.vps_port,
+        let event = db::get_streaming_event(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .filter(|e| e.delivering_activated)?;
+        let obs = match self.obs.read().await.clone() {
+            Some(client) => client.get_status().await,
+            None => crate::obs::ObsState::default(),
+        };
+        let inputs = Inputs {
+            event_id: event.id,
+            inpoint_connected: self.inpoint.is_connected(),
+            obs_connected: obs.connected,
+            obs_stopped_at: obs.stopped_at.filter(|_| obs.stopped_deliberately),
+            // A failed read counts as "still uploading": never announce early.
+            pending_uploads: db::get_pending_chunk_count_for_event(&self.pool, event.id)
+                .await
+                .unwrap_or(1),
+            last_sent_chunk: db::get_last_sent_sequence_for_event(&self.pool, event.id)
+                .await
+                .ok()
+                .flatten(),
+        };
+        let ended_at = tracker.due(now, &inputs)?;
+        let instance = db::get_delivery_instance_by_event(&self.pool, event.id)
+            .await
+            .ok()
+            .flatten()?;
+        let base = format!("http://{}:{}", instance.ipv4, self.vps_port);
+        if let Err(e) = announce(&base, &instance.auth_token, ended_at).await {
+            warn!(
+                event = event.id,
+                ended_at, "source end: announcing to the VPS failed: {e}"
+            );
+            return None;
+        }
+        info!(
+            event = event.id,
+            ended_at, "source end: OBS stopped on purpose, endpoints play out to chunk {ended_at}"
         );
-        None
+        if tracker.accepted(ended_at) {
+            rs_core::audit::record(
+                &self.audit_tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event.id),
+                    instance_id: Some(instance.id),
+                    endpoint: None,
+                    action: Action::SourceStoppedDeliberately,
+                    detail: serde_json::json!({ "ended_at_chunk_id": ended_at }),
+                    ts_override: None,
+                },
+            );
+        }
+        Some(ended_at)
     }
 }
 

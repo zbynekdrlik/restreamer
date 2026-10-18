@@ -51,33 +51,39 @@ impl SourceEnd {
     /// (`false`) when a producer already fetched a later chunk: the source
     /// is live again and the announcement is stale.
     pub fn announce(&self, ended_at: i64) -> bool {
-        let _ = (ended_at, self.lock().highest_fetched);
-        false
+        let mut g = self.lock();
+        if g.highest_fetched > ended_at {
+            return false;
+        }
+        g.ended_at = Some(ended_at);
+        true
     }
 
     /// The announced last chunk, while the source is stopped.
     pub fn ended_at(&self) -> Option<i64> {
-        self.lock().ended_at.filter(|_| false)
+        self.lock().ended_at
     }
 
     /// A producer fetched `chunk_id`. A chunk past the end means the source
     /// is live again: the end is cleared.
     pub fn note_fetched(&self, chunk_id: i64) {
-        let _ = chunk_id;
+        let mut g = self.lock();
+        g.highest_fetched = g.highest_fetched.max(chunk_id);
+        if past_end(g.ended_at, chunk_id) {
+            g.ended_at = None;
+        }
     }
 }
 
 /// The end an endpoint that delivered `last_delivered` has played out to.
 pub fn reached(ended_at: Option<i64>, last_delivered: i64) -> Option<i64> {
-    let _ = (ended_at, last_delivered);
-    None
+    ended_at.filter(|&e| last_delivered >= e)
 }
 
 /// Whether `chunk_id` lies past the end of the source: a producer miss there
 /// is the expected end, not a gap.
 pub fn past_end(ended_at: Option<i64>, chunk_id: i64) -> bool {
-    let _ = (ended_at, chunk_id);
-    false
+    ended_at.is_some_and(|e| chunk_id > e)
 }
 
 pub fn ended_row(alias: &str, ended_at: i64) -> RingRowParts {
@@ -114,22 +120,42 @@ pub(crate) async fn idle_until_resume(
     audit_ring: &Option<Arc<AuditRing>>,
     rust_pusher: &mut Option<EndpointPusher>,
 ) -> Option<PrefetchedChunk> {
-    let _ = (
-        target,
+    let alias = target.alias.as_str();
+    if let Some(mut p) = rust_pusher.take() {
+        p.shutdown().await;
+    }
+    stats.lock().await.delivery_mode = ENDED_DELIVERY_MODE.to_string();
+    if let Some(r) = audit_ring {
+        r.push_parts(ended_row(alias, ended_at));
+    }
+    tracing::info!(
+        alias,
         ended_at,
-        rx,
-        stop_rx,
-        stats,
-        audit_ring,
-        rust_pusher,
+        "source ended on purpose: publish closed, waiting for the source"
     );
-    let _ = (
-        ENDED_DELIVERY_MODE,
-        build_endpoint_pusher,
-        ended_row,
-        resumed_row,
+
+    let chunk = loop {
+        tokio::select! {
+            c = rx.recv() => break c,
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    break None;
+                }
+            }
+        }
+    }?;
+
+    *rust_pusher = Some(build_endpoint_pusher(target, stats).await);
+    stats.lock().await.delivery_mode = "normal".to_string();
+    if let Some(r) = audit_ring {
+        r.push_parts(resumed_row(alias, chunk.chunk_id));
+    }
+    tracing::info!(
+        alias,
+        chunk = chunk.chunk_id,
+        "source is back: fresh publish"
     );
-    None
+    Some(chunk)
 }
 
 #[cfg(test)]

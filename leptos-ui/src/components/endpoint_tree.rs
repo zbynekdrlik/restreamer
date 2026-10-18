@@ -171,6 +171,7 @@ pub fn EndpointTree() -> impl IntoView {
                             | EndpointLifecycle::Rescue
                             | EndpointLifecycle::Recovering => "endpoint-node recovering",
                             EndpointLifecycle::Attention => "endpoint-node attention",
+                            EndpointLifecycle::Ended => "endpoint-node ended",
                         }
                     };
 
@@ -182,6 +183,7 @@ pub fn EndpointTree() -> impl IntoView {
                             | EndpointLifecycle::Rescue
                             | EndpointLifecycle::Recovering => "status-dot recovering",
                             EndpointLifecycle::Attention => "status-dot error",
+                            EndpointLifecycle::Ended => "status-dot ended",
                         }
                     };
 
@@ -268,7 +270,13 @@ pub fn EndpointTree() -> impl IntoView {
                                     }}
                                 </span>
                                 {move || {
-                                    ep_data.get().stall_reason.clone().map(|r| view! {
+                                    let ep = ep_data.get();
+                                    // #408: an ended endpoint is not stalled; a
+                                    // stale reason from its last push is noise.
+                                    if ep.lifecycle == EndpointLifecycle::Ended {
+                                        return None;
+                                    }
+                                    ep.stall_reason.clone().map(|r| view! {
                                         <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
                                     })
                                 }}
@@ -286,6 +294,10 @@ pub fn EndpointTree() -> impl IntoView {
                                             // degraded but actively recovering.
                                             "refilling" => {
                                                 ("endpoint-mode-refilling", "REFILLING")
+                                            }
+                                            // #408: OBS stopped on purpose.
+                                            "ended" => {
+                                                ("endpoint-mode-ended", "UKONČENÉ (OBS zastavené)")
                                             }
                                             _ => return None,
                                         };

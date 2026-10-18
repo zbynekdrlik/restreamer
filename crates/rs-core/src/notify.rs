@@ -168,9 +168,10 @@ fn ends_scope(action: Action) -> Option<Scope> {
         Action::DeliveryStopped | Action::VpsDeleted => Some(Scope::Delivery),
         // #408: `EndpointSourceEnded` closed the endpoint's live publish
         // after a deliberate OBS stop: its subject ended, nothing recovered.
-        Action::EndpointAdded | Action::EndpointRemoved | Action::EndpointStartChunkUpdated => {
-            Some(Scope::Endpoint)
-        }
+        Action::EndpointAdded
+        | Action::EndpointRemoved
+        | Action::EndpointStartChunkUpdated
+        | Action::EndpointSourceEnded => Some(Scope::Endpoint),
         Action::RescueActivated => Some(Scope::LivePusher),
         Action::EventStarted | Action::EventStopped => Some(Scope::Event),
         _ => None,
