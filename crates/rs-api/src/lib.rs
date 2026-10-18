@@ -68,6 +68,7 @@ mod router_start_stream_skew_gate_tests;
 #[cfg(test)]
 mod router_tests;
 pub mod s3_handlers;
+pub mod source_end;
 pub mod state;
 pub mod status_summary;
 pub mod stream_handlers;
@@ -185,6 +186,17 @@ pub async fn serve(
         tokio::spawn(async move {
             delivery_broadcast_loop(orch, pool, ws_tx, cached, config, audit_tx).await;
         });
+        // #408: a deliberate OBS stop ends the destinations, not rescue.
+        tokio::spawn(
+            source_end::SourceEndWatch {
+                pool: state.pool.clone(),
+                inpoint: state.inpoint_state.clone(),
+                obs: Arc::clone(&state.obs_client),
+                audit_tx: state.audit_tx.clone(),
+                vps_port: 8000,
+            }
+            .run(),
+        );
     }
 
     // One access gate for the whole process (#273). Built here rather than

@@ -19,7 +19,15 @@ pub enum EndpointLifecycle {
     Rescue,
     Recovering,
     Attention,
+    /// #408: OBS stopped on purpose; the endpoint played its buffer out and
+    /// stopped sending. Not an outage: no banner, no alert.
+    Ended,
 }
+
+/// `delivery_mode` of an endpoint that played the source out after a
+/// deliberate OBS stop and closed its publish (#408). Written by
+/// `rs-delivery`'s `source_end`; `compute` paints it Ended.
+pub const ENDED_DELIVERY_MODE: &str = "ended";
 
 /// Stable, machine-matchable prefix on `LifecycleInput::stall_reason`
 /// identifying the #236 dead-target class: N consecutive Rust-pusher
@@ -291,5 +299,18 @@ mod lifecycle_tests {
             Some("endpoint not started: unknown service type: BOGUS"),
         );
         assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    /// #408: an endpoint that played the source out after a deliberate OBS
+    /// stop is Ended, not an outage state, even with the producer's stall
+    /// reason or a stale error from the last push still on it.
+    #[test]
+    fn an_ended_endpoint_is_ended_not_an_outage() {
+        let i = input(true, Some("ended"), Some("chunk_gap"), Some("timeout"));
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Ended);
+        assert_eq!(
+            serde_json::to_string(&EndpointLifecycle::Ended).unwrap(),
+            "\"ended\""
+        );
     }
 }

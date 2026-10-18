@@ -53,6 +53,10 @@ pub struct BufferState {
     /// Cleared to 0 by the producer when it goes stalled (outage) so no
     /// throttle fires while there is no source to rebuild from.
     pub refill_deficit_secs: AtomicU64,
+    /// #408: the end of the source after a deliberate OBS stop, shared by
+    /// every endpoint of the event (`EndpointHandle::spawn` hands in the
+    /// event `DiskCache`'s). Each test gets its own, never announced.
+    pub source_end: crate::source_end::SourceEnd,
 }
 
 impl BufferState {
@@ -65,6 +69,15 @@ impl BufferState {
             chunks_sent_total: AtomicU64::new(0),
             fast_delay_target_secs: AtomicU64::new(0),
             refill_deficit_secs: AtomicU64::new(0),
+            source_end: crate::source_end::SourceEnd::new(),
+        }
+    }
+
+    /// A buffer state that shares the event's `source_end` (#408).
+    pub fn with_source_end(source_end: crate::source_end::SourceEnd) -> Self {
+        Self {
+            source_end,
+            ..Self::new()
         }
     }
 
@@ -102,6 +115,17 @@ pub fn initial_delivery_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #408: endpoints of one event see the end the host announced to it.
+    #[test]
+    fn with_source_end_shares_the_events_end() {
+        let end = crate::source_end::SourceEnd::new();
+        let bs = BufferState::with_source_end(end.clone());
+        assert!(end.announce(9));
+        assert_eq!(bs.source_end.ended_at(), Some(9));
+        assert!(bs.producer_active.load(Ordering::Relaxed));
+        assert_eq!(BufferState::new().source_end.ended_at(), None);
+    }
 
     #[test]
     fn note_sent_counts_every_send_and_keeps_the_highest_id() {

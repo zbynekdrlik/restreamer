@@ -60,6 +60,7 @@ let oauthSuggestByEndpoint = {}; // #199: { endpointId: {oauth_id, owners, probe
 //   - "rtmp-gate-tick"  — rtmp_stable_secs ticks from 0 upward on each /status poll
 //   - "outage-rescue"   — 1 endpoint lifecycle="rescue" (survivable outage, calm blue UX)
 //   - "outage-attention" — 1 endpoint lifecycle="attention" (auth-reject, red, no calm banner)
+//   - "source-ended"    — 1 endpoint lifecycle="ended" (#408: OBS stopped on purpose, grey, no banner)
 //   - "disk-warn"       — status.disk_pressure="warn" (amber DiskPressureBanner)
 //   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
@@ -985,7 +986,17 @@ function buildOutageDelivery(which) {
     lifecycle: "live",
   };
   let endpoint;
-  if (which === "outage-rescue") {
+  if (which === "source-ended") {
+    // #408: OBS stopped on purpose; the endpoint played its buffer out and
+    // stopped sending. The stale stall reason of its last push must not show.
+    endpoint = {
+      ...base,
+      alive: true,
+      delivery_mode: "ended",
+      stall_reason: "connection refused",
+      lifecycle: "ended",
+    };
+  } else if (which === "outage-rescue") {
     // Survivable outage: rescue video is live, recovering automatically.
     endpoint = {
       ...base,
@@ -1279,8 +1290,12 @@ app.post("/api/v1/_test/scenario", (req, res) => {
         },
       ],
     };
-  } else if (scenario === "outage-rescue" || scenario === "outage-attention") {
-    // Outage-survival UX scenarios (Task T19). Both keep the event active and
+  } else if (
+    scenario === "outage-rescue" ||
+    scenario === "outage-attention" ||
+    scenario === "source-ended"
+  ) {
+    // Outage-survival UX scenarios (Task T19), and #408's deliberate stop. Both keep the event active and
     // delivering so the dashboard renders the endpoint tree. The endpoint's
     // `lifecycle` field drives the calm/blue vs. red semaphore:
     //   - outage-rescue:    lifecycle="rescue" -> blue node + calm banner.
@@ -1612,7 +1627,11 @@ wss.on("connection", (ws) => {
 
   // Choose the initial delivery payload based on the active scenario.
   let deliveryData;
-  if (scenario === "outage-rescue" || scenario === "outage-attention") {
+  if (
+    scenario === "outage-rescue" ||
+    scenario === "outage-attention" ||
+    scenario === "source-ended"
+  ) {
     deliveryData = buildOutageDelivery(scenario);
   } else if (scenario === "fb-health") {
     deliveryData = buildFbHealthDelivery();
@@ -1698,6 +1717,7 @@ wss.on("connection", (ws) => {
     "last-endpoint",
     "outage-rescue",
     "outage-attention",
+    "source-ended",
     "fb-health",
   ];
   const pipelineData = activePipelineScenarios.includes(scenario)

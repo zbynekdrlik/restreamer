@@ -145,6 +145,8 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     break;
                 }
                 buffer_state.note_sent(sent_id);
+                // #408: a chunk past an announced end: the source is back.
+                buffer_state.source_end.note_fetched(sent_id);
 
                 chunk_id += 1;
                 // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
@@ -241,8 +243,13 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 // so an interleaved 404/error pattern doesn't double-count.
                 consecutive_fetch_errors = 0;
 
+                // #408: past the announced end of the source a miss is the
+                // expected end, not a gap: no skip-ahead probe, no
+                // `chunk_gap` stall, just wait for the source to come back.
+                let at_source_end =
+                    crate::source_end::past_end(buffer_state.source_end.ended_at(), chunk_id);
                 // Chunk gap skip-ahead logic
-                if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
+                if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT && !at_source_end {
                     // Captured BEFORE the probe loop mutates chunk_id, so the
                     // controller can measure how far ahead we had to skip
                     // (the read-side deficit) when a gap was crossed.

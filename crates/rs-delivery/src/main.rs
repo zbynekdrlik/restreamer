@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use tracing_subscriber::prelude::*;
 
 mod api;
+mod api_source;
 mod audit_ring;
 pub mod backup_mirror;
 pub mod buffer_state;
@@ -47,6 +48,7 @@ pub mod rtmp_push_telemetry;
 pub mod rust_rescue_push;
 mod s3_fetch;
 pub mod s3_fetch_profile;
+mod source_end;
 mod test_file_sink;
 
 #[cfg(test)]

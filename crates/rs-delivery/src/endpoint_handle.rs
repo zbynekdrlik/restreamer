@@ -55,7 +55,7 @@ impl EndpointHandle {
             start_chunk_id,
             initial_mode,
         )));
-        let buffer_state = Arc::new(BufferState::new());
+        let buffer_state = Arc::new(BufferState::with_source_end(disk_cache.source_end.clone()));
         // Fast endpoints skip the delay entirely.
         let effective_delay = if ep_cfg.is_fast { 0 } else { delivery_delay_ms };
         let window = disk_cache.window_chunks;

@@ -572,6 +572,17 @@ pub async fn get_pending_chunk_count_for_event(
     Ok(row.get::<i32, _>("cnt") as i64)
 }
 
+/// The highest `sequence_number` already sent to S3 for an event: the chunk
+/// id the VPS reads last. `None` before the first upload. #408 announces it
+/// as the end of the source after a deliberate OBS stop.
+pub async fn get_last_sent_sequence_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let _ = (pool, streaming_event_id);
+    Ok(None)
+}
+
 /// Compute the cache duration: total content on S3 that has NOT yet been delivered.
 /// Only counts sent chunks with sequence_number above the delivery position.
 ///

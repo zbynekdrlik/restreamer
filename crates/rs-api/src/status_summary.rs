@@ -183,6 +183,28 @@ mod tests {
         assert_eq!(e.state, "attention");
     }
 
+    /// #408: all endpoints ended after a deliberate OBS stop is its own calm
+    /// state; one still playing its buffer out keeps the normal rollup.
+    #[test]
+    fn all_ended_rolls_up_to_ended() {
+        let (e, _) = summarize_delivery(&cached(
+            "delivering",
+            vec![
+                ep("YT", true, EndpointLifecycle::Ended),
+                ep("FB", true, EndpointLifecycle::Ended),
+            ],
+        ));
+        assert_eq!(e.state, "ended");
+        let (e, _) = summarize_delivery(&cached(
+            "delivering",
+            vec![
+                ep("YT", true, EndpointLifecycle::Live),
+                ep("FB", true, EndpointLifecycle::Ended),
+            ],
+        ));
+        assert_eq!(e.state, "live");
+    }
+
     #[test]
     fn attention_takes_precedence_over_recovering() {
         // Both an Attention and a Recovering endpoint present: red wins so the

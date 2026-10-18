@@ -209,6 +209,7 @@ async fn relay_streams_frames_and_forwards_input() {
             "Runtime.evaluate",
             "Page.setInterceptFileChooserDialog",
             "Page.bringToFront",
+            "Emulation.setFocusEmulationEnabled",
             "Page.startScreencast",
             "Page.screencastFrameAck",
             "Input.dispatchMouseEvent"
@@ -772,3 +773,6 @@ async fn a_frame_is_acked_only_after_the_dashboard_drew_it() {
 
 #[path = "relay_popup_tests.rs"]
 mod popup;
+
+#[path = "relay_visibility_tests.rs"]
+mod visibility;

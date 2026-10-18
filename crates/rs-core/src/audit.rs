@@ -288,6 +288,20 @@ pub enum Action {
     /// Severity::Info.
     BufferRefillEnded,
 
+    /// Host-side (#408): OBS stopped its stream on purpose (obs-websocket
+    /// still connected, the output went STOPPING -> STOPPED) and the last
+    /// chunk of the source was announced to the VPS. Detail JSON:
+    /// `{ended_at_chunk_id}`. Severity::Info. Not an outage.
+    SourceStoppedDeliberately,
+    /// VPS-side (#408): the endpoint played the source out to the announced
+    /// last chunk, closed its publish, and waits for the source. Detail
+    /// JSON: `{ended_at_chunk_id}`. Severity::Info.
+    EndpointSourceEnded,
+    /// VPS-side (#408): a chunk after the end arrived (OBS published again);
+    /// the endpoint opened a fresh publish. Detail JSON: `{chunk_id}`.
+    /// Severity::Info.
+    EndpointSourceResumed,
+
     /// Host-side: YT health probe observed `configurationIssues[0].type`
     /// change for an endpoint. Detail JSON:
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
@@ -836,6 +850,21 @@ mod tests {
         for (a, s) in [
             (Action::AvInvariantViolated, "\"av_invariant_violated\""),
             (Action::AvInvariantRestored, "\"av_invariant_restored\""),
+        ] {
+            assert_eq!(serde_json::to_string(&a).unwrap(), s);
+            assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);
+        }
+    }
+
+    #[test]
+    fn source_end_actions_serdes() {
+        for (a, s) in [
+            (
+                Action::SourceStoppedDeliberately,
+                "\"source_stopped_deliberately\"",
+            ),
+            (Action::EndpointSourceEnded, "\"endpoint_source_ended\""),
+            (Action::EndpointSourceResumed, "\"endpoint_source_resumed\""),
         ] {
             assert_eq!(serde_json::to_string(&a).unwrap(), s);
             assert_eq!(serde_json::from_str::<Action>(s).unwrap(), a);

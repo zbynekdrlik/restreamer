@@ -28,6 +28,7 @@ use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
+use super::visibility::{ShownTabs, hide_if_visible, hide_others};
 
 const MOUSE_FIELDS: &[&str] = &[
     "type",
@@ -424,7 +425,16 @@ pub async fn relay_with(
     on_url: UrlSink,
 ) {
     let uploads = std::env::temp_dir().join("restreamer-room-uploads");
-    relay_room(client, cdp, target_id, start_url, on_url, uploads).await;
+    relay_room(
+        client,
+        cdp,
+        target_id,
+        start_url,
+        on_url,
+        uploads,
+        ShownTabs::default(),
+    )
+    .await;
 }
 
 /// The `{"t":"url"}` message telling the dashboard which page it sees.
@@ -456,6 +466,7 @@ enum TabEnd {
 /// reports back to the tab that opened it (a sign-in, "Overte svoju
 /// totožnosť") is shown instead of that tab until it closes, with the tab
 /// kept alive behind it (#405).
+#[allow(clippy::too_many_arguments)]
 pub async fn relay_room(
     client: WebSocket,
     cdp: Cdp,
@@ -463,6 +474,7 @@ pub async fn relay_room(
     start_url: String,
     on_url: UrlSink,
     uploads: std::path::PathBuf,
+    shown_tabs: ShownTabs,
 ) {
     let (mut client_tx, mut client_rx) = client.split();
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
@@ -499,6 +511,7 @@ pub async fn relay_room(
             },
             uploads: &uploads,
             skip: &done,
+            shown_tabs: &shown_tabs,
         };
         let end = relay_tab(shown, &mut client_rx, navigate_to.take()).await;
         let left = match end {
@@ -581,6 +594,8 @@ struct TabSession<'a> {
     uploads: &'a std::path::Path,
     /// Popups the room is done with.
     skip: &'a std::collections::HashSet<String>,
+    /// The tabs every relay shows now; the others get hidden (#407).
+    shown_tabs: &'a ShownTabs,
 }
 
 /// Relay the viewer to one tab until the viewer leaves, the tab goes away,
@@ -600,6 +615,7 @@ async fn relay_tab(
         on_url,
         uploads,
         skip,
+        shown_tabs,
     } = shown;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(tab)).await {
         Ok((ws, _)) => ws,
@@ -614,6 +630,9 @@ async fn relay_tab(
         }
     };
     tracing::info!("control rooms: viewer attached to tab {tab}");
+    // #407: counted as shown, so no other relay hides it.
+    let shown_guard = shown_tabs.show(tab);
+    let leaving = tab.to_string();
     let (mut page_tx, mut page_rx) = page.split();
     let seq = Arc::new(AtomicU64::new(0));
     // The <input type=file> of a file chooser the page opened that no file
@@ -660,6 +679,10 @@ async fn relay_tab(
         json!({ "enabled": true }),
     );
     call("Page.bringToFront", json!({}));
+    // #407: the other rooms are hidden once Chrome activated this window
+    // (activation re-shows the window it leaves); focus emulation keeps
+    // this one visible while the relay is attached.
+    let front_id = seq.load(Ordering::Relaxed);
     // A tab shown after the first one gets the viewer's size at once.
     let size = view.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(size) = size {
@@ -677,6 +700,7 @@ async fn relay_tab(
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
         let main_frame = tab.to_string();
+        let (hide_cdp, hide_shown) = (cdp.clone(), shown_tabs.clone());
         async move {
             let mut last = (0, 0);
             while let Some(Ok(msg)) = page_rx.next().await {
@@ -684,6 +708,11 @@ async fn relay_tab(
                 let Ok(v) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
+                if v.get("id").and_then(Value::as_u64) == Some(front_id) {
+                    let (cdp, shown) = (hide_cdp.clone(), hide_shown.clone());
+                    tokio::spawn(async move { hide_others(&cdp, &shown).await });
+                    continue;
+                }
                 if let Some(u) = same_document_url(&v, &main_frame) {
                     on_url(u.clone());
                     let m = json!({ "t": "url", "url": u }).to_string();
@@ -903,6 +932,18 @@ async fn relay_tab(
         uploading_left.load(Ordering::Relaxed),
     ) {
         let _ = to_client.send(text_message(&n));
+    }
+    // #407: a room the viewer left stops rendering, unless another relay
+    // still shows it. A switch to or from a popup needs nothing here: the
+    // next session hides the tab it leaves.
+    drop(shown_guard);
+    if matches!(end, TabEnd::Over) && !shown_tabs.is_shown(&leaving) {
+        let cdp = cdp.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hide_if_visible(&cdp, &leaving).await {
+                tracing::warn!("control rooms: hiding tab {leaving} failed: {e:#}");
+            }
+        });
     }
     // The writer sends what is still queued (a file's last commands), then
     // ends with the last sender.

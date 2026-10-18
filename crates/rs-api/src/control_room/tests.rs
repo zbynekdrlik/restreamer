@@ -852,3 +852,13 @@ fn uploads_live_in_the_browser_profiles_dir() {
         dir.path().join("browser-profiles").join("uploads")
     );
 }
+
+/// #407: every room relay gets the SAME shown-tabs set, so a room one viewer
+/// watches is never hidden by another viewer's relay.
+#[test]
+fn every_relay_shares_one_shown_tabs_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let rooms = ControlRooms::new(dir.path());
+    let _viewer = rooms.shown_tabs().show("T1");
+    assert!(rooms.shown_tabs().is_shown("T1"));
+}
