@@ -310,6 +310,8 @@ def check(root: Path) -> list[str]:
 # ---------------------------------------------------------------- self-test --
 
 YT_SUSTAINED = '      - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"'
+YT_LAST_GATE_END = ('          Write-Host "=== #408 GATE PASSED: deliberate stop -> every endpoint ended, '
+                    '0 rescue, every endpoint resumed ==="\n\n')
 CHECK_STEP = ('      - name: "Program-audio breach check (#379)"\n        shell: powershell\n        timeout-minutes: 1\n'
               '        run: |\n          . scripts/ci/program-audio-guard.ps1\n          Assert-NoProgramAudioBreach\n\n')
 WD_IF = "      - name: \"Program-audio watchdog: start (#379)\"\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
@@ -343,8 +345,10 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "has no program-audio breach check before"),
     ("the breach check after the FB soak is dropped",
      CHECK_STEP + '      - name: "GATE: FB-side', '      - name: "GATE: FB-side', "STRICT: 30-min sustained soak"),
+    # #408: the deliberate-stop gate is the YT job's last long step, so its
+    # breach check is the last one before the OBS stop.
     ("the last breach check before the YT stop is dropped",
-     CHECK_STEP + '      - name: "GATE: Second YouTube health check', '      - name: "GATE: Second YouTube health check',
+     YT_LAST_GATE_END + CHECK_STEP, YT_LAST_GATE_END,
      "before the OBS stop"),
     ("a new 30-min streaming step without a breach check", YT_SUSTAINED,
      "      - name: evil long soak\n        timeout-minutes: 30\n        run: echo soak\n\n" + YT_SUSTAINED,
