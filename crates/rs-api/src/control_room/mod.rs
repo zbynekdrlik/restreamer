@@ -427,11 +427,13 @@ impl ControlRooms {
         }
     }
 
-    /// Point each destination at the room page it showed last.
+    /// Point each destination at the room page it showed last. A page an
+    /// older release saved that is no room page any more (a `/reauth`
+    /// hand-back, #405) is skipped: the room opens at its default page.
     pub fn apply_saved_urls(&self, dests: &mut [Destination]) {
         let map = lock(&self.tabs);
         for d in dests.iter_mut() {
-            if let Some(u) = map.url.get(&d.endpoint_id) {
+            if let Some(u) = map.url.get(&d.endpoint_id).filter(|u| remember_url(u)) {
                 d.url = u.clone();
             }
         }
