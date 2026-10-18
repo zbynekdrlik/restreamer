@@ -175,18 +175,25 @@ async fn without_an_end_a_stall_escalates_as_before() {
 // The real endpoint_loop.
 // ---------------------------------------------------------------------------
 
-/// Serves chunks `1..=available`, 404 past it; `available` can grow (OBS
-/// publishes again).
+/// Serves chunks `1..=available` except `hole` (a chunk that was never
+/// uploaded), 404 past it; `available` can grow (OBS publishes again).
 struct GrowingFetcher {
     available: Arc<AtomicI64>,
+    hole: Option<i64>,
+}
+
+impl GrowingFetcher {
+    fn has(&self, chunk_id: i64) -> bool {
+        chunk_id <= self.available.load(Ordering::Relaxed) && self.hole != Some(chunk_id)
+    }
 }
 
 impl crate::endpoint_task::ChunkFetcher for GrowingFetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
-        Ok((chunk_id <= self.available.load(Ordering::Relaxed)).then(|| (vec![0u8; 64], 2000)))
+        Ok(self.has(chunk_id).then(|| (vec![0u8; 64], 2000)))
     }
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        Ok((chunk_id <= self.available.load(Ordering::Relaxed)).then_some(2000))
+        Ok(self.has(chunk_id).then_some(2000))
     }
 }
 
@@ -215,7 +222,7 @@ async fn until(mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-async fn ended_then_resumed(is_fast: bool) {
+async fn ended_then_resumed(is_fast: bool, hole: Option<i64>) {
     tokio::time::pause();
     let ring = AuditRing::new(2000);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -227,6 +234,7 @@ async fn ended_then_resumed(is_fast: bool) {
     let handle = tokio::spawn(endpoint_loop(
         GrowingFetcher {
             available: Arc::clone(&available),
+            hole,
         },
         MockProcessFactory::new(),
         rust_endpoint(if is_fast { "fast" } else { "buffered" }, is_fast),
@@ -264,7 +272,7 @@ async fn ended_then_resumed(is_fast: bool) {
     }
     assert!(!actions(&ring).contains(&Action::RescueActivated));
 
-    // OBS publishes again: chunk 4 resumes the endpoint.
+    // OBS publishes again: the next chunk (4, or 5 past a hole) resumes it.
     available.store(6, Ordering::Relaxed);
     assert!(
         until(|| actions(&ring).contains(&Action::EndpointSourceResumed)).await,
@@ -281,10 +289,18 @@ async fn ended_then_resumed(is_fast: bool) {
 
 #[tokio::test]
 async fn a_buffered_endpoint_plays_out_ends_and_resumes_without_rescue() {
-    ended_then_resumed(false).await;
+    ended_then_resumed(false, None).await;
 }
 
 #[tokio::test]
 async fn a_fast_endpoint_plays_out_ends_and_resumes_without_rescue() {
-    ended_then_resumed(true).await;
+    ended_then_resumed(true, None).await;
+}
+
+/// The chunk after the end never reached S3 (an abandoned upload): the
+/// producer's probe finds the chunks after it, so the endpoints still come
+/// back when OBS publishes again (review of #408).
+#[tokio::test]
+async fn a_lost_chunk_after_the_end_never_strands_the_endpoints() {
+    ended_then_resumed(false, Some(4)).await;
 }

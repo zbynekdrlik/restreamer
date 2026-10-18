@@ -11,7 +11,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn stopped_at(at: Instant) -> Inputs {
     Inputs {
         event_id: 7,
-        inpoint_connected: false,
         obs_connected: true,
         obs_stopped_at: Some(at),
         pending_uploads: 0,
@@ -69,9 +68,24 @@ fn nothing_is_due_unless_obs_is_connected_and_stopped_on_purpose() {
             ..stopped()
         },
     ] {
-        let mut t = settled(t0);
+        let mut t = Tracker::default();
+        assert_eq!(t.due(t0, &inputs), None);
         assert_eq!(t.due(later, &inputs), None, "{inputs:?}");
     }
+}
+
+/// The operator stops the stream and quits OBS within seconds: the
+/// websocket is gone by the announcing tick, but the stop was seen.
+#[test]
+fn obs_quitting_right_after_a_deliberate_stop_still_ends_the_source() {
+    let t0 = epoch();
+    let mut t = settled(t0);
+    let obs_gone = Inputs {
+        obs_connected: false,
+        obs_stopped_at: None,
+        ..stopped()
+    };
+    assert_eq!(t.due(t0 + SETTLE, &obs_gone), Some(41));
 }
 
 /// An OBS stop is the cause only of a disconnect at about the same time:
@@ -102,13 +116,19 @@ fn the_obs_stop_must_match_the_disconnect() {
 fn a_connected_ingest_is_never_an_end_and_starts_over() {
     let t0 = epoch();
     let mut t = settled(t0);
-    let live = Inputs {
-        inpoint_connected: true,
+    t.publisher_connected();
+    // The gone-since clock restarted at the next disconnect, and what OBS
+    // reported at the old one no longer counts.
+    let t1 = t0 + SETTLE * 3;
+    let obs_gone = Inputs {
+        obs_connected: false,
+        obs_stopped_at: None,
         ..stopped()
     };
-    assert_eq!(t.due(t0 + SETTLE, &live), None);
-    // The gone-since clock restarted at the next disconnect.
-    let t1 = t0 + SETTLE * 3;
+    assert_eq!(t.due(t1, &obs_gone), None);
+    assert_eq!(t.due(t1 + SETTLE, &obs_gone), None);
+    let mut t = settled(t0);
+    t.publisher_connected();
     assert_eq!(t.due(t1, &stopped()), None);
     assert_eq!(t.due(t1 + SETTLE, &stopped()), Some(41));
 }
@@ -136,11 +156,7 @@ fn a_restart_after_an_announced_stop_announces_the_next_stop_again() {
     let mut t = settled(t0);
     assert_eq!(t.due(t0 + SETTLE, &stopped()), Some(41));
     assert!(t.accepted(41));
-    let live = Inputs {
-        inpoint_connected: true,
-        ..stopped()
-    };
-    assert_eq!(t.due(t0 + SETTLE, &live), None);
+    t.publisher_connected();
     let t1 = t0 + SETTLE * 4;
     assert_eq!(t.due(t1, &stopped()), None);
     assert_eq!(t.due(t1 + SETTLE, &stopped()), Some(41));
@@ -333,4 +349,28 @@ async fn a_refused_announcement_is_retried_and_not_recorded() {
         r.audit_rx.try_recv().unwrap().action,
         Action::SourceStoppedDeliberately
     );
+}
+
+/// While a publisher is connected nothing is announced (and the DB is not
+/// read); a stop after it settles anew.
+#[tokio::test]
+async fn a_live_publisher_is_never_an_end() {
+    let mut r = rig(Some(deliberately_stopped())).await;
+    Mock::given(method("POST"))
+        .and(path("/api/source"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&r.vps)
+        .await;
+    let mut tracker = Tracker::default();
+    let t0 = Instant::now();
+    r.watch.inpoint.set_connected(true);
+    assert_eq!(r.watch.tick(&mut tracker, t0).await, None);
+    assert_eq!(r.watch.tick(&mut tracker, t0 + SETTLE * 2).await, None);
+    assert!(r.audit_rx.try_recv().is_err());
+
+    r.watch.inpoint.set_connected(false);
+    let t1 = Instant::now();
+    assert_eq!(r.watch.tick(&mut tracker, t1).await, None, "settling");
+    assert_eq!(r.watch.tick(&mut tracker, t1 + SETTLE).await, Some(3));
 }

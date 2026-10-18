@@ -114,6 +114,10 @@ pub async fn hide_others(cdp: &Cdp, shown: &ShownTabs) {
         }
     };
     for tab in to_hide(&pages, &shown.snapshot()) {
+        // A viewer may have opened it since the snapshot.
+        if shown.is_shown(&tab) {
+            continue;
+        }
         match hide_if_visible(cdp, &tab).await {
             Ok(true) => tracing::info!("control rooms: tab {tab} hidden (nobody views it)"),
             Ok(false) => {}

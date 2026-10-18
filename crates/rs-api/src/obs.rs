@@ -373,16 +373,20 @@ pub fn compute_obs_auth(password: &str, salt: &str, challenge: &str) -> String {
 /// obs-websocket `outputState` values of the stream output (#408).
 const OUTPUT_STOPPED: &str = "OBS_WEBSOCKET_OUTPUT_STOPPED";
 const OUTPUT_STOPPING: &str = "OBS_WEBSOCKET_OUTPUT_STOPPING";
+#[cfg(test)]
 const OUTPUT_STARTED: &str = "OBS_WEBSOCKET_OUTPUT_STARTED";
+#[cfg(test)]
 const OUTPUT_RECONNECTED: &str = "OBS_WEBSOCKET_OUTPUT_RECONNECTED";
 
 /// Whether the stream output is now stopped ON PURPOSE (#408), from its
 /// previous `outputState`, the new one, and the previous verdict.
 ///
-/// A user or API stop goes STARTED (or RECONNECTED) -> STOPPING -> STOPPED.
-/// OBS running out of reconnect attempts goes RECONNECTING -> STOPPED: that
-/// is an outage. A repeated STOPPED keeps the verdict; any other state means
-/// the output is not stopped.
+/// Only a user or API stop goes through STOPPING: libobs `obs_output_stop`
+/// and `obs_output_force_stop` signal "stopping" first. STOPPED straight
+/// from STARTED, RECONNECTED or RECONNECTING is `obs_output_signal_stop`
+/// with an error (an encoder failure, a dropped link OBS will not or can
+/// no longer reconnect): an outage. A repeated STOPPED keeps the verdict;
+/// any other state means the output is not stopped.
 pub(crate) fn stopped_deliberately_after(
     prev: Option<&str>,
     new: Option<&str>,
@@ -392,7 +396,7 @@ pub(crate) fn stopped_deliberately_after(
         return false;
     }
     match prev {
-        Some(OUTPUT_STOPPING) | Some(OUTPUT_STARTED) | Some(OUTPUT_RECONNECTED) => true,
+        Some(OUTPUT_STOPPING) => true,
         Some(OUTPUT_STOPPED) => prev_verdict,
         _ => false,
     }
@@ -678,16 +682,17 @@ mod tests {
     #[test]
     fn a_stop_is_deliberate_only_after_stopping_started_or_reconnected() {
         let f = stopped_deliberately_after;
-        // A user / API stop.
+        // A user / API stop: always through STOPPING.
         assert!(f(Some(OUTPUT_STOPPING), Some(OUTPUT_STOPPED), false));
-        assert!(f(Some(OUTPUT_STARTED), Some(OUTPUT_STOPPED), false));
-        assert!(f(Some(OUTPUT_RECONNECTED), Some(OUTPUT_STOPPED), false));
-        // OBS gave up reconnecting: an outage.
-        assert!(!f(
-            Some("OBS_WEBSOCKET_OUTPUT_RECONNECTING"),
-            Some(OUTPUT_STOPPED),
-            false
-        ));
+        // STOPPED with no STOPPING is OBS stopping on an error (an encoder
+        // failure, no reconnect), or giving up its reconnects: an outage.
+        for prev in [
+            OUTPUT_STARTED,
+            OUTPUT_RECONNECTED,
+            "OBS_WEBSOCKET_OUTPUT_RECONNECTING",
+        ] {
+            assert!(!f(Some(prev), Some(OUTPUT_STOPPED), false), "{prev}");
+        }
         // Nothing known before (fresh connection) or a failed start.
         assert!(!f(None, Some(OUTPUT_STOPPED), false));
         assert!(!f(

@@ -41,7 +41,6 @@ pub const MATCH_WINDOW: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Inputs {
     pub event_id: i64,
-    pub inpoint_connected: bool,
     pub obs_connected: bool,
     /// When OBS stopped on purpose, if it did (`ObsState::stopped_at`).
     pub obs_stopped_at: Option<Instant>,
@@ -54,16 +53,29 @@ pub struct Inputs {
 pub struct Tracker {
     event_id: Option<i64>,
     disconnected_since: Option<Instant>,
+    /// OBS was seen connected and stopped on purpose at this disconnect.
+    /// Latched: an operator who stops and then quits OBS within seconds
+    /// (the websocket is gone at the announcing tick) still stopped on purpose.
+    deliberate_seen: bool,
     announced: Option<i64>,
 }
 
 impl Tracker {
-    /// The chunk to announce as the end of the source now, if any.
+    /// A publisher is connected: no end, and the next disconnect settles anew.
+    pub fn publisher_connected(&mut self) {
+        self.disconnected_since = None;
+        self.deliberate_seen = false;
+        self.announced = None;
+    }
+
+    /// The chunk to announce as the end of the source now, if any, while
+    /// no publisher is connected.
     ///
     /// The source has ended when the ingest has been gone for `SETTLE`, OBS
-    /// is connected and stopped on purpose within `MATCH_WINDOW` of that
-    /// disconnect, and every chunk of the event is on S3. The end is the last uploaded chunk; it is announced again when
-    /// a late chunk raised it. A publisher connecting again starts over.
+    /// was seen connected and stopped on purpose within `MATCH_WINDOW` of
+    /// that disconnect, and every chunk of the event is on S3. The end is
+    /// the last uploaded chunk; it is announced again when a late chunk
+    /// raised it.
     pub fn due(&mut self, now: Instant, i: &Inputs) -> Option<i64> {
         if self.event_id != Some(i.event_id) {
             *self = Tracker {
@@ -71,19 +83,17 @@ impl Tracker {
                 ..Tracker::default()
             };
         }
-        if i.inpoint_connected {
-            self.disconnected_since = None;
-            self.announced = None;
-            return None;
-        }
         let since = *self.disconnected_since.get_or_insert(now);
-        if now.duration_since(since) < SETTLE {
-            return None;
-        }
         let obs_stop_caused_it = i.obs_stopped_at.is_some_and(|at| {
-            at.duration_since(since).max(since.duration_since(at)) <= MATCH_WINDOW
+            at.saturating_duration_since(since)
+                .max(since.saturating_duration_since(at))
+                <= MATCH_WINDOW
         });
-        if !(i.obs_connected && obs_stop_caused_it) || i.pending_uploads > 0 {
+        self.deliberate_seen |= i.obs_connected && obs_stop_caused_it;
+        if now.saturating_duration_since(since) < SETTLE
+            || !self.deliberate_seen
+            || i.pending_uploads > 0
+        {
             return None;
         }
         let last = i.last_sent_chunk?;
@@ -137,6 +147,11 @@ impl SourceEndWatch {
     /// One look: announce the end when it is due. Returns the chunk the VPS
     /// accepted, if any.
     pub async fn tick(&self, tracker: &mut Tracker, now: Instant) -> Option<i64> {
+        // The common case, every 2 s of a live event: no DB read at all.
+        if self.inpoint.is_connected() {
+            tracker.publisher_connected();
+            return None;
+        }
         let event = db::get_streaming_event(&self.pool)
             .await
             .ok()
@@ -148,7 +163,6 @@ impl SourceEndWatch {
         };
         let inputs = Inputs {
             event_id: event.id,
-            inpoint_connected: self.inpoint.is_connected(),
             obs_connected: obs.connected,
             obs_stopped_at: obs.stopped_at.filter(|_| obs.stopped_deliberately),
             // A failed read counts as "still uploading": never announce early.

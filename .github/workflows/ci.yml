@@ -3275,7 +3275,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 145 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + up to 60min #349 rig-lease wait + margin
+    timeout-minutes: 157 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + #408 deliberate-stop gate up to 12min + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"

@@ -90,11 +90,15 @@ fn log_on(c: &FakeChrome, tab: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// The lifecycle calls of the hides of `tab`: from its first `frozen` on.
+/// An attach sends `active` alone (never leave a viewed room frozen), which
+/// is not a hide.
 fn hides(c: &FakeChrome, tab: &str) -> Vec<String> {
     log_on(c, tab)
         .into_iter()
         .map(|(_, m)| m)
         .filter(|m| m.starts_with("Page.setWebLifecycleState"))
+        .skip_while(|m| m != HIDDEN[0])
         .collect()
 }
 
@@ -133,6 +137,8 @@ async fn showing_a_room_hides_every_other_visible_room_after_bringing_it_to_fron
     let shown = log_on(&c, "T1");
     let pos = |m: &str| shown.iter().find(|(_, x)| x == m).map(|(i, _)| *i);
     let front = pos("Page.bringToFront").expect("the shown room is brought to front");
+    let unfreeze = pos("Page.setWebLifecycleState active").expect("and never left frozen");
+    assert!(unfreeze < front);
     let focus = pos("Emulation.setFocusEmulationEnabled").expect("and kept visible");
     assert!(front < focus);
     let focus_params = c

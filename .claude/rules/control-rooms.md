@@ -122,8 +122,13 @@ paths:
     - `hide_if_visible` runs `Runtime.evaluate document.visibilityState`; a
       `visible` page gets `Page.setWebLifecycleState frozen` then `active`. Hidden,
       but its JS runs on, so a sign-in popup can still `postMessage` its opener.
-  - The relay sends `Page.bringToFront` and `Emulation.setFocusEmulationEnabled
-    {enabled:true}` on attach.
+  - The relay sends `Page.setWebLifecycleState active` (idempotent),
+    `Page.bringToFront` and `Emulation.setFocusEmulationEnabled {enabled:true}`
+    on attach.
+    - The `active` covers a hide that froze the page but failed its `active`;
+      without it the room would stay dead for the next viewer.
+    - `hide_others` and the leave-hide re-check `is_shown` right before freezing.
+      A viewer may open the room meanwhile.
     - It hides the others only when the bringToFront REPLY arrives (`front_id` in
       the page reader), because activation re-shows the window it leaves.
     - A viewer leaving (`TabEnd::Over`) hides its room unless another relay still

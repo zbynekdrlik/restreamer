@@ -24,9 +24,12 @@ reconnect keeps the outage path (keepalive, rescue, alerts).
   - `outputActive` alone is false for STOPPED and for RECONNECTING alike: only
     STARTED/RESUMED/RECONNECTED are active (obs-websocket
     `GetOutputStateActive`).
-  - `obs::stopped_deliberately_after` sets the verdict on STOPPED that follows
-    STOPPING, STARTED or RECONNECTED. STOPPED right after RECONNECTING is OBS
-    giving up its reconnects: an outage.
+  - `obs::stopped_deliberately_after` sets the verdict only on STOPPED right
+    after STOPPING. libobs signals "stopping" only for a user/API stop
+    (`obs_output_stop`, `obs_output_force_stop`).
+  - STOPPED straight from STARTED, RECONNECTED or RECONNECTING is
+    `obs_output_signal_stop` with an error: an encoder failure, a link OBS will
+    not reconnect, or reconnects given up. That is an outage (review of #408).
   - `ObsState::mark_disconnected` (websocket lost, `ExitStarted`) clears it.
 - **The OBS stop must coincide with the ingest disconnect** (`MATCH_WINDOW`,
   10 s; `ObsState::stopped_at`). The verdict alone would stay true for hours
@@ -41,6 +44,10 @@ reconnect keeps the outage path (keepalive, rescue, alerts).
    delivering; the ingest has been gone for `SETTLE` (2 s); OBS is connected and
    stopped on purpose within `MATCH_WINDOW` of that disconnect; and the event has
    no pending upload.
+   - The deliberate stop is LATCHED at the first tick of the disconnect: an
+     operator who stops the stream and quits OBS within seconds still gets an end.
+   - While a publisher is connected, the tick reads no DB at all; it only calls
+     `Tracker::publisher_connected`.
    - The end is `get_last_sent_sequence_for_event`, the last chunk on S3.
    - A late chunk re-announces it. A reconnecting publisher resets the tracker.
    - A refused POST is retried next tick and writes no audit row.
@@ -61,10 +68,15 @@ reconnect keeps the outage path (keepalive, rescue, alerts).
 
    The next chunk rebuilds the pusher (`build_endpoint_pusher`), writes
    `endpoint_source_resumed`, and runs `reset_after_rescue` (a new session).
-4. **Producer.** A miss past the end skips the skip-ahead probe and the
-   `chunk_gap` stall. `note_fetched` on every sent chunk clears the end when a
-   chunk past it arrives. The sequence is contiguous per event, so OBS
-   publishing again yields `end + 1`.
+4. **Producer.** A miss past the end sets no `chunk_gap` stall and no fast
+   read-delay growth.
+   - The skip-ahead probe still runs. If the end's next chunk was abandoned
+     (`upload_failed_permanently`), the probe finds the chunks after it.
+     Without the probe, every endpoint would wait forever (review of #408).
+   - `note_fetched` on every sent chunk clears the end when a chunk past it
+     arrives.
+   - A buffered endpoint resumes at the live edge with no cushion, and the #296
+     slow refill rebuilds it. Rescue used to hold it about 120 s first.
 
 ## Mapping and alerts
 

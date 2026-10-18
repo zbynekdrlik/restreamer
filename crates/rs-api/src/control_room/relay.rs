@@ -678,6 +678,9 @@ async fn relay_tab(
         "Page.setInterceptFileChooserDialog",
         json!({ "enabled": true }),
     );
+    // #407: a room a viewer opens is never left frozen, even when an earlier
+    // hide got its `frozen` through but not its `active` (idempotent).
+    call("Page.setWebLifecycleState", json!({ "state": "active" }));
     call("Page.bringToFront", json!({}));
     // #407: the other rooms are hidden once Chrome activated this window
     // (activation re-shows the window it leaves); focus emulation keeps
@@ -941,9 +944,13 @@ async fn relay_tab(
     // still shows it. A switch to or from a popup needs nothing here: the
     // next session hides the tab it leaves.
     drop(shown_guard);
-    if matches!(end, TabEnd::Over) && !shown_tabs.is_shown(&leaving) {
-        let cdp = cdp.clone();
+    if matches!(end, TabEnd::Over) {
+        let (cdp, shown) = (cdp.clone(), shown_tabs.clone());
         tokio::spawn(async move {
+            // Another viewer still watches it, or opened it again meanwhile.
+            if shown.is_shown(&leaving) {
+                return;
+            }
             if let Err(e) = hide_if_visible(&cdp, &leaving).await {
                 tracing::warn!("control rooms: hiding tab {leaving} failed: {e:#}");
             }

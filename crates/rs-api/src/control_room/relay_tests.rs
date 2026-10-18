@@ -208,6 +208,7 @@ async fn relay_streams_frames_and_forwards_input() {
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.evaluate",
             "Page.setInterceptFileChooserDialog",
+            "Page.setWebLifecycleState",
             "Page.bringToFront",
             "Emulation.setFocusEmulationEnabled",
             "Page.startScreencast",
