@@ -364,9 +364,9 @@ fn ControlRoomView(dest: RoomDestination) -> impl IntoView {
                     Some("popup") => {
                         let open = m.get("open").and_then(|o| o.as_bool()).unwrap_or(false);
                         in_popup.try_set(open);
-                        if open {
-                            status.try_set("vyskakovacie okno stránky".into());
-                        }
+                        status.try_set(
+                            if open { "vyskakovacie okno stránky" } else { "pripojené" }.into(),
+                        );
                     }
                     Some("file-done") => {
                         let name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
