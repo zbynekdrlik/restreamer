@@ -42,6 +42,13 @@ paths:
   target's id is its main frame id). `remember_url` keeps only `https://studio.youtube.com/*`
   and `facebook.com/live/producer*`, never sign-in or picker pages. The URL is stored in
   `control-room-tabs.json` (`url`) and dropped when the account is edited.
+  - A page's Live Producer runs on `business.facebook.com/live/producer/<id>`. Until
+    0.29.50 it was never stored, so a reopen loaded a stale `www` producer URL and
+    showed the profile's timeline target, not the page (FB-Poprad, 2026-10-19).
+  - A reopen happens more often than it seems: a Chrome restart (a new launch flag
+    needs one), an OOM, a reboot. Before restarting the room Chrome, record each open
+    room's live URL from `:9231/json/list`. Compare after reopening it with
+    `POST /api/v1/control-rooms/{id}/open`.
 - **One Google profile = ONE active YouTube channel identity.** A second brand channel
   in the same profile gets "Select a channel" or "Oops, you don't have permission"
   (probed 2026-10-13).
