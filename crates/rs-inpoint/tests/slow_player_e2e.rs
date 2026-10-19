@@ -265,14 +265,16 @@ async fn read_to_eof(player: &mut tokio::net::TcpStream, chunk: usize, pause: Du
     }
 }
 
-/// A player reading ~80 KB/s of a ~2 MB/s stream falls behind on every
-/// frame. Once more than `limit` frames wait for it, it is cut.
+/// A player reading ~1 MB/s of a ~2 MB/s stream falls behind on every
+/// frame, yet every write to it still completes (a ~1 MB keyframe in ~1 s,
+/// far below xiu's 10 s write stall). Once more than `limit` frames wait
+/// for it, it is cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_that_reads_too_slowly_is_cut_by_the_queue_limit() {
     let mut rig = Rig::start(Some(50), 45).await;
     let mut player = start_player(rig.port).await;
     let reader = tokio::spawn(async move {
-        read_to_eof(&mut player, 4096, Duration::from_millis(50)).await;
+        read_to_eof(&mut player, 32 * 1024, Duration::from_millis(30)).await;
     });
 
     let cut = session_ended_with("player fell behind", Duration::from_secs(25)).await;
