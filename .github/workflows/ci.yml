@@ -2438,7 +2438,10 @@ jobs:
         timeout-minutes: 14
         run: |
           $ErrorActionPreference = 'Continue'
-          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
+          if (-not (Test-Path $ffmpegPath)) {
+            throw "FAILED: ffmpeg not found at $ffmpegPath"
+          }
           $streamDuration = 600  # 10 minutes
 
           # Clear any stale snapshot from a prior run -- self-hosted runner
@@ -2594,8 +2597,8 @@ jobs:
           # cadence dynamically. We assert median delta is within +/-1 ms
           # of the AAC frame duration and no individual gap exceeds 50 ms.
           $ErrorActionPreference = 'Stop'
-          # ffprobe is installed next to ffmpeg on the stream-lan runner.
-          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          # ffprobe is installed next to ffmpeg on the stream-lan runner (#366: C:\ProgramData\Restreamer\ci-tools, copied from the deleted legacy Python client).
+          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
           $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
           if (-not (Test-Path $ffprobe)) {
             throw "FAILED: ffprobe not found at $ffprobe"
@@ -2707,7 +2710,7 @@ jobs:
           # force-cancel (which skips both). The YouTube VOD-measured gate stays
           # camera-box #357. Never touches OBS.
           $ErrorActionPreference = 'Stop'
-          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
           $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
           if (-not (Test-Path $ffprobe)) { throw "FAILED: ffprobe not found at $ffprobe" }
           $chunkDir = "C:\ProgramData\Restreamer\chunks"
@@ -7309,7 +7312,7 @@ jobs:
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
           $sawDash = $false
-          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
           $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
           if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobe)) { throw "FAILED: ffmpeg/ffprobe not found next to $ffmpegPath" }
           $poll = 0

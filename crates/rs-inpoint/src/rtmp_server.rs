@@ -12,6 +12,15 @@ use rs_core::models::InpointState;
 use crate::flv_chunker::FlvChunkSink;
 use crate::media_receiver::MediaReceiver;
 
+/// Most frames a local player (VLC, a headphone probe) may fall behind
+/// before its play session is ended (#368): ~18 s at 4K60 (~107 frames/s
+/// with audio), ~100-200 MB at 40 Mbit/s. The GOP the hub replays at
+/// subscribe counts on top (vendor/rtmp `play_replayed`). Unbounded, a
+/// player slower than real time grew xiu's queue to 8 GB on stream.lan. A
+/// player that stops reading entirely is cut by xiu's write stall instead
+/// (vendor/rtmp `PLAY_WRITE_STALL`, 10 s).
+pub const PLAY_QUEUE_LIMIT_FRAMES: usize = 2000;
+
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
 ///
 /// Uses the xiu RTMP implementation for proper protocol handling including
@@ -25,6 +34,8 @@ pub struct RtmpServer {
     /// server task runs on the ingest runtime, after its bind) is buffered,
     /// never dropped for lack of a receiver (#368).
     shutdown_rx: broadcast::Receiver<()>,
+    /// Set on every accepted session: see [`PLAY_QUEUE_LIMIT_FRAMES`].
+    play_queue_limit: usize,
 }
 
 impl RtmpServer {
@@ -34,7 +45,14 @@ impl RtmpServer {
             address: format!("{bind}:{port}"),
             shutdown_tx,
             shutdown_rx,
+            play_queue_limit: PLAY_QUEUE_LIMIT_FRAMES,
         }
+    }
+
+    /// Overrides [`PLAY_QUEUE_LIMIT_FRAMES`] (tests use a small one).
+    pub fn with_play_queue_limit(mut self, frames: usize) -> Self {
+        self.play_queue_limit = frames;
+        self
     }
 
     /// Returns a shutdown handle that can be used to stop the server.
@@ -126,7 +144,7 @@ impl RtmpServer {
                 ))
             }
             // Run the RTMP accept loop (uses xiu's ServerSession per connection)
-            result = Self::accept_loop(&listener, event_sender) => {
+            result = Self::accept_loop(&listener, event_sender, self.play_queue_limit) => {
                 match result {
                     Ok(()) => {
                         info!("RTMP server stopped");
@@ -176,6 +194,7 @@ impl RtmpServer {
     async fn accept_loop(
         listener: &TcpListener,
         event_sender: StreamHubEventSender,
+        play_queue_limit: usize,
     ) -> Result<(), crate::InpointError> {
         loop {
             let (tcp_stream, _peer) = match listener.accept().await {
@@ -199,6 +218,7 @@ impl RtmpServer {
                 1, // GOP cache size (matches the previous xiu server config)
                 None,
             );
+            session.common.play_queue_limit = Some(play_queue_limit);
             tokio::spawn(async move {
                 if let Err(err) = session.run().await {
                     info!(
@@ -206,9 +226,20 @@ impl RtmpServer {
                         session.app_name, session.stream_name
                     );
                 }
+                retire_session(session);
             });
         }
     }
+}
+
+/// Drop a finished session on the runtime's blocking pool, never on the
+/// ingest thread (#368). Dropping it drains and frees every frame still
+/// queued for it: up to 8 GB and 7 s for a player that fell behind, while
+/// OBS's socket went unread. Only a drop still queued when the runtime shuts
+/// down runs on the thread that drops the runtime; no publisher is served
+/// then.
+fn retire_session<S: Send + 'static>(session: S) {
+    drop(tokio::task::spawn_blocking(move || drop(session)));
 }
 
 #[cfg(test)]
@@ -218,6 +249,43 @@ impl RtmpServer {
 )]
 mod tests {
     use super::*;
+
+    /// Records the thread its drop runs on.
+    struct DropProbe(std::sync::mpsc::Sender<Option<String>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let _ = self
+                .0
+                .send(std::thread::current().name().map(str::to_string));
+        }
+    }
+
+    /// #368: a session that ended is never dropped on the ingest thread.
+    /// Dropping a player's session freed its whole queue there (8 GB, 7 s
+    /// on stream.lan), and OBS's socket went unread the whole time.
+    #[test]
+    fn a_finished_session_is_dropped_off_the_ingest_thread() {
+        let dropped_on = std::thread::Builder::new()
+            .name("ingest-under-test".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .thread_name("ingest-io-under-test")
+                    .build()
+                    .expect("runtime");
+                let (tx, rx) = std::sync::mpsc::channel();
+                runtime.block_on(async move { retire_session(DropProbe(tx)) });
+                // Wait while the runtime is alive: its shutdown would run a
+                // still-queued drop on this thread.
+                rx.recv_timeout(std::time::Duration::from_secs(5))
+            })
+            .expect("spawn")
+            .join()
+            .expect("join")
+            .expect("the session must be dropped");
+        assert_eq!(dropped_on.as_deref(), Some("ingest-io-under-test"));
+    }
 
     #[tokio::test]
     async fn server_binds_and_shuts_down() {

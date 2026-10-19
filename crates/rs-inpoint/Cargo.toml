@@ -32,4 +32,6 @@ tempfile = "3"
 md-5 = { workspace = true }
 bytes = { workspace = true }
 env_logger = "0.11"
+# slow_player_e2e.rs drives a raw RTMP player with xiu's client writers.
+bytesio = "0.3"
 tracing-subscriber = { workspace = true }

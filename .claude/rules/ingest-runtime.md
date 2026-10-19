@@ -74,6 +74,62 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   server on the app runtime and logs an error. The service stays up
   (#106: degraded beats dead).
 
+## Local players: the session drop and the queue limit (#368, 0.29.51)
+
+- **xiu gives every RTMP subscriber an UNBOUNDED queue.**
+  - The operator's VLC on stream.lan (`rtmp://127.0.0.1:1234/live`) read slower
+    than real time, and its queue grew to 8 GB.
+  - Closing VLC dropped the finished `ServerSession` ON `restreamer-ingest`, and
+    tokio's `Rx::drop` frees every queued frame. That stalled the ingest for up
+    to 7 s, so OBS dropped 117 frames (2026-10-18).
+  - Signature: a `ProcessStall` on the ingest runtime only, starting at
+    `RTMP session ended … bytes writer error` and ending at the hub's
+    `unsubscribe`, with Restreamer's private memory collapsing across it.
+- `accept_loop` hands every finished session to `retire_session` (a
+  `spawn_blocking` drop). Never let a session or a frame receiver drop on the
+  ingest thread.
+- `vendor/rtmp` is xiu rtmp 0.6.5 with `Common::play_queue_limit`, patched in
+  through `[patch.crates-io]` in BOTH the workspace root and
+  `src-tauri/Cargo.toml`. A `[patch]` applies only in the root of a build, and
+  the exe/.deb are built from src-tauri.
+  - `RtmpServer` sets `PLAY_QUEUE_LIMIT_FRAMES` (2000) on every session. A
+    player past it ends with `PlayQueueOverflow`; it is logged on the
+    `RTMP session ended` line.
+  - The hub replays the GOP so far into a new player's queue BEFORE it
+    answers the subscription. xiu records that count (`play_replayed`), and
+    those frames count on top of the limit. Without that, a long keyframe
+    interval cut every new player on its first frame.
+  - **The queue check alone does not catch a player that stops reading.**
+    The write to it blocks forever, so the loop never returns to the check
+    while the hub keeps queueing. Every play write is bounded by
+    `PLAY_WRITE_STALL` (10 s, vendor), and the session ends with
+    `PlayerStalled`.
+  - A very slow reader (~80 KB/s against 16 Mbit/s) hits the stall too: one
+    ~1 MB keyframe write takes longer than 10 s.
+  - `with_play_queue_limit` exists for tests.
+  - See `vendor/rtmp/VENDORED.md`. The vendor dir is excluded from the
+    workspace, and its `Cargo.toml` allows `non_local_definitions`.
+- Test: `crates/rs-inpoint/tests/slow_player_e2e.rs`.
+  - A real CBR ffmpeg publisher, and an in-process player (xiu
+    `SimpleHandshakeClient` + `NetConnection`/`NetStreamWriter`) that plays
+    and never reads, with a 4 KB receive buffer.
+  - Its socket is `try_clone`d BEFORE `TcpIO` takes it, so the test can read
+    it later.
+  - The verdict is read from the server's own `RTMP session ended … <reason>`
+    log line (a tracing writer captured once per test binary), NEVER by
+    reading the player's socket. Reading unblocks a stalled write, which is
+    how the first version passed while the stall case was still broken.
+  - The queue-limit test paces its reader at ~1 MB/s (half the stream), so
+    no write stalls, and it asserts the player read >= 2 MB before the cut.
+    The stall test never reads before the verdict. Only it uses a 4 KB
+    receive buffer: a tiny buffer also slows a "slow" reader to ~200 KB/s.
+  - Every test publishes its own stream name, and a verdict counts only with
+    `stream=<name>,` in the line. The captured log is global to the binary,
+    and tests run in parallel.
+  - The mid-GOP test (10 s GOP, joins 6 s in, limit 50) must NOT be cut.
+  - The whole-function mutants of `serve`/`accept_loop` are killed only by
+    these integration tests: never run that crate's mutants with `-- --lib`.
+
 ## Priorities (Windows)
 
 - The task runs at `-Priority 4` (Normal) from `install.ps1` AND from the CI
