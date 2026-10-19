@@ -39,9 +39,7 @@ fn the_no_publisher_refusal_is_dropped_and_counted() {
     );
     assert_eq!(
         refused.take_summary().as_deref(),
-        Some(
-            "1 RTMP subscribes refused since the last report: nothing publishes the stream (#404)"
-        )
+        Some("1 RTMP subscribes refused since the last report: the stream had no publisher (#404)")
     );
 }
 
@@ -91,6 +89,21 @@ fn a_native_tracing_event_with_the_streamhub_target_is_dropped_too() {
 }
 
 #[test]
+fn a_refusal_whose_message_is_a_plain_string_is_dropped_too() {
+    // `message = ".."` is recorded through `record_str`, not `record_debug`.
+    let refused = RefusedSubscribes::default();
+    let buffer = LogBuffer::new(100);
+    let subscriber = tracing_subscriber::registry()
+        .with(refused.clone())
+        .with(LogCaptureLayer::new(buffer.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::error!(target: "streamhub", message = REFUSAL);
+    });
+    assert_eq!(buffer.recent("", 100).len(), 0);
+    assert!(refused.take_summary().is_some(), "the refusal was counted");
+}
+
+#[test]
 fn the_summary_counts_since_the_last_report_and_resets() {
     let refused = RefusedSubscribes::default();
     assert_eq!(refused.take_summary(), None, "no refusal yet");
@@ -99,9 +112,7 @@ fn the_summary_counts_since_the_last_report_and_resets() {
     }
     assert_eq!(
         refused.take_summary().as_deref(),
-        Some(
-            "3 RTMP subscribes refused since the last report: nothing publishes the stream (#404)"
-        )
+        Some("3 RTMP subscribes refused since the last report: the stream had no publisher (#404)")
     );
     assert_eq!(refused.take_summary(), None, "the report resets the count");
 }
@@ -123,7 +134,7 @@ fn the_summary_thread_reports_on_its_interval() {
         .expect("the summary thread reports the counted refusals");
     assert_eq!(
         line,
-        "2 RTMP subscribes refused since the last report: nothing publishes the stream (#404)"
+        "2 RTMP subscribes refused since the last report: the stream had no publisher (#404)"
     );
     // Bounded: a bare `join()` would hang the test, not fail it, if the
     // thread kept running.

@@ -20,6 +20,8 @@ use tracing_subscriber::layer::Context;
 
 /// The `log` target xiu's streamhub crate logs under.
 const STREAMHUB_TARGET: &str = "streamhub";
+/// The metadata target tracing-log gives every bridged `log` record.
+const LOG_BRIDGE_TARGET: &str = "log";
 /// streamhub's message for a subscribe to a stream nobody publishes.
 const REFUSAL_MESSAGE: &str = "event_loop Subscribe error: no app or stream name";
 
@@ -41,13 +43,12 @@ impl RefusedSubscribes {
         (refused > 0).then(|| {
             format!(
                 "{refused} RTMP subscribes refused since the last report: \
-                 nothing publishes the stream (#404)"
+                 the stream had no publisher (#404)"
             )
         })
     }
 
-    /// Starts the thread that logs the summary at INFO every
-    /// [`SUMMARY_INTERVAL`].
+    /// Starts the thread that logs the summary at INFO every 60 s.
     pub fn start_summary(&self) -> std::io::Result<JoinHandle<()>> {
         self.spawn_summary(SUMMARY_INTERVAL, |line| {
             tracing::info!("{line}");
@@ -82,17 +83,17 @@ impl<S: Subscriber> Layer<S> for RefusedSubscribes {
     /// Returning false here drops the event for the WHOLE stack (stdout, the
     /// log file, the dashboard capture), not just for this layer.
     fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
-        if *event.metadata().level() != Level::ERROR {
+        let meta_target = event.metadata().target();
+        if *event.metadata().level() != Level::ERROR
+            || (meta_target != LOG_BRIDGE_TARGET && meta_target != STREAMHUB_TARGET)
+        {
             return true;
         }
         let mut fields = RefusalFields::default();
         event.record(&mut fields);
         // A `log` record arrives with the metadata target "log" and its real
         // target in the `log.target` field (tracing-log).
-        let target = fields
-            .log_target
-            .as_deref()
-            .unwrap_or(event.metadata().target());
+        let target = fields.log_target.as_deref().unwrap_or(meta_target);
         if target == STREAMHUB_TARGET && fields.message == REFUSAL_MESSAGE {
             self.refused.fetch_add(1, Ordering::Relaxed);
             return false;
@@ -110,8 +111,10 @@ struct RefusalFields {
 
 impl Visit for RefusalFields {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "log.target" {
-            self.log_target = Some(value.to_owned());
+        match field.name() {
+            "message" => self.message = value.to_owned(),
+            "log.target" => self.log_target = Some(value.to_owned()),
+            _ => {}
         }
     }
 

@@ -135,7 +135,8 @@ async fn drain_chunks(
         .collect()
 }
 
-/// Every chunk the sink has broadcast so far, in order. It waits for the
+/// Every chunk the sink has broadcast so far, in broadcast order (a
+/// spawned write can finish after a later `flush()`). It waits for the
 /// background writes first, so a slow disk never ends the drain early
 /// (#382): a quiet-time window did, on a starved runner.
 async fn emitted(sink: &FlvChunkSink, rx: &mut broadcast::Receiver<ChunkInfo>) -> Vec<ChunkInfo> {
