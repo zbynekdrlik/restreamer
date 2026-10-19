@@ -74,6 +74,41 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   server on the app runtime and logs an error. The service stays up
   (#106: degraded beats dead).
 
+## Local players: the session drop and the queue limit (#368, 0.29.51)
+
+- **xiu gives every RTMP subscriber an UNBOUNDED queue.**
+  - The operator's VLC on stream.lan (`rtmp://127.0.0.1:1234/live`) read slower
+    than real time, and its queue grew to 8 GB.
+  - Closing VLC dropped the finished `ServerSession` ON `restreamer-ingest`, and
+    tokio's `Rx::drop` frees every queued frame. That stalled the ingest for up
+    to 7 s, so OBS dropped 117 frames (2026-10-18).
+  - Signature: a `ProcessStall` on the ingest runtime only, starting at
+    `RTMP session ended … bytes writer error` and ending at the hub's
+    `unsubscribe`, with Restreamer's private memory collapsing across it.
+- `accept_loop` hands every finished session to `retire_session` (a
+  `spawn_blocking` drop). Never let a session or a frame receiver drop on the
+  ingest thread.
+- `vendor/rtmp` is xiu rtmp 0.6.5 with `Common::play_queue_limit`, patched in
+  through `[patch.crates-io]` in BOTH the workspace root and
+  `src-tauri/Cargo.toml`. A `[patch]` applies only in the root of a build, and
+  the exe/.deb are built from src-tauri.
+  - `RtmpServer` sets `PLAY_QUEUE_LIMIT_FRAMES` (1000) on every session. A
+    player past it ends with `PlayQueueOverflow`; it is logged on the
+    `RTMP session ended` line.
+  - `with_play_queue_limit` exists for tests.
+  - See `vendor/rtmp/VENDORED.md`. The vendor dir is excluded from the
+    workspace, and its `Cargo.toml` allows `non_local_definitions`.
+- Test: `crates/rs-inpoint/tests/slow_player_e2e.rs`.
+  - A real CBR ffmpeg publisher, and an in-process player (xiu
+    `SimpleHandshakeClient` + `NetConnection`/`NetStreamWriter`) that plays
+    and never reads, with a 4 KB receive buffer.
+  - Its socket is `try_clone`d BEFORE `TcpIO` takes it, so the test can read
+    it later.
+  - Disconnected = read to EOF within 15 s. A subscribed player keeps getting
+    the live stream instead.
+  - The whole-function mutants of `serve`/`accept_loop` are killed only by
+    these integration tests: never run that crate's mutants with `-- --lib`.
+
 ## Priorities (Windows)
 
 - The task runs at `-Priority 4` (Normal) from `install.ps1` AND from the CI
