@@ -39,3 +39,8 @@ local-ip-address = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Same patch as the workspace root (#368): Restreamer.exe and the .deb are
+# built from here, and a [patch] applies only in the root of a build.
+[patch.crates-io]
+rtmp = { path = "../vendor/rtmp" }

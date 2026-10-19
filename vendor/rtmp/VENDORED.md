@@ -1,0 +1,30 @@
+# Vendored xiu `rtmp` 0.6.5
+
+This is a copy of crates.io `rtmp` 0.6.5 (xiu, https://github.com/harlanc/xiu).
+It is licensed MIT, as its `Cargo.toml` states. The workspace root and
+`src-tauri/Cargo.toml` both pull it in through `[patch.crates-io]`. It is
+excluded from the workspace, so `cargo clippy --workspace` does not lint it.
+
+## Why (#368)
+
+xiu gives every RTMP subscriber an unbounded frame queue. A local player that
+reads slower than real time made that queue grow to 8 GB on stream.lan; the
+player in question was the operator's VLC on `rtmp://127.0.0.1:1234/live`.
+Freeing the queue when the player closed stalled the ingest for up to 7 s,
+and OBS dropped 117 frames on 2026-10-18. The queue sits in `Common`'s private
+`data_receiver`, so there is no way to bound it from outside the crate.
+
+## The only changes from 0.6.5
+
+- `session/common.rs`: `Common` gets `pub play_queue_limit: Option<usize>`,
+  which defaults to `None` (upstream behaviour). In `send_channel_data`, a
+  play session with more frames than that still queued ends with
+  `SessionErrorValue::PlayQueueOverflow`. It then takes xiu's own error path:
+  unsubscribe, then the session ends.
+- `session/errors.rs`: the `PlayQueueOverflow { queued, limit }` variant.
+- The crate's `rtmp_specification_1.0.pdf` is left out.
+
+Restreamer's `RtmpServer` sets the limit on every session it accepts
+(`crates/rs-inpoint/src/rtmp_server.rs`). Search for `restreamer #368` to
+find every changed line. To upgrade xiu, re-apply these lines on the new
+version, or drop the vendor copy if upstream bounds the queue itself.

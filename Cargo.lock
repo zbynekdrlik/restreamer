@@ -2762,6 +2762,7 @@ name = "rs-inpoint"
 version = "0.29.51"
 dependencies = [
  "bytes",
+ "bytesio",
  "env_logger 0.11.10",
  "log",
  "md-5",
@@ -2885,8 +2886,6 @@ dependencies = [
 [[package]]
 name = "rtmp"
 version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "285a1d62ed078c73c772d777d505eddba7830ce7c701f2dda1398abfcefa7dc5"
 dependencies = [
  "async-trait",
  "byteorder",
