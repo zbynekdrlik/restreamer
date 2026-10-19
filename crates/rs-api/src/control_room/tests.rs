@@ -100,6 +100,8 @@ fn remember_url_keeps_only_room_pages() {
         "https://studio.youtube.com/video/abc/livestreaming",
         "https://www.facebook.com/live/producer/v2/?target_id=100050795320744",
         "https://www.facebook.com/live/producer/",
+        // A page's Live Producer lives on business.facebook.com.
+        "https://business.facebook.com/live/producer/1128503152973089",
     ] {
         assert!(remember_url(yes), "{yes}");
     }
@@ -110,6 +112,7 @@ fn remember_url_keeps_only_room_pages() {
         "https://studio.youtube.com/reauth?rapt=x",
         "https://www.facebook.com/login/",
         "https://www.facebook.com/checkpoint/",
+        "https://business.facebook.com/latest/?asset_id=137189056327938",
         "http://studio.youtube.com/",
         "https://studio.youtube.com.evil.example/",
         "about:blank",

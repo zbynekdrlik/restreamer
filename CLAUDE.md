@@ -40,6 +40,7 @@ auto-load on their `paths:` — you do not invoke those.
 - Linux build for stream-pp (.deb, systemd --user GUI unit (#393 operator window), XDG paths via `rs_core::paths`) → `.claude/rules/linux-build.md` (auto)
 - VPS `delivery_mode` in CI gates (`refilling` is normal delivery, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
 - frontend E2E WebSocket pushes (`waitForWsClient` + `broadcast`, the #377 guard) → `.claude/rules/e2e-ws-broadcast.md` (auto)
+- Chrome warnings outside `console` (CDP Log, raw Chrome over CDP, `--password-store=basic`) → `.claude/rules/e2e-browser-log.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
 - YouTube A/V-gate session API (`/api/v1/av-gate/session`, manage-scope client, cleanup paths) + the hand recipe → `.claude/rules/youtube-av-measurement.md` (auto)
 - YouTube-measured A/V + frame-continuity session (manage-scope OAuth on stream.lan, Thursday trigger, camera-box roles, pass criteria) → `.claude/rules/youtube-av-measurement.md` (auto)
