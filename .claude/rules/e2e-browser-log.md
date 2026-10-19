@@ -28,5 +28,17 @@ paths:
   `proc.kill()` leaves child processes writing the profile, and `rmSync` fails
   with `ENOTEMPTY`. `browser.close()` on a `connectOverCDP` browser only
   disconnects.
+  - Arm a SIGKILL timer before sending `Browser.close`: a hung Chrome never
+    answers it.
+  - Check `exitCode`/`signalCode` first: an `exit` listener added after the exit
+    never fires.
+  - Stop Chrome in `test.afterEach`, not in a `finally` in the test body. On a
+    test timeout Playwright abandons the body, and its `finally` never runs.
+  - `startChrome` cleans up after itself when the connect fails.
+- **Canaries keep the assertion honest.** After the observation window (`networkidle`
+  on every route), the spec fires a `console.warn` and an image load from
+  `127.0.0.1:9`, which Chrome logs as a network error. It asserts that both
+  arrived before it asserts the window was empty. Unknown paths on the mock
+  return `index.html` with 200, so a 404 is no use as a canary.
 - Chrome's Issues panel items (`Audits.issueAdded`, e.g. a form field without
   id/name) are not console output and are not asserted.
