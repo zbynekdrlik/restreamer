@@ -55,8 +55,9 @@ works per target only, so `streamhub=off` would hide every streamhub error.
 To drop one specific line everywhere (stdout, the file, the dashboard
 capture), use a layer whose `event_enabled` returns false for it:
 `rs_runtime::RefusedSubscribes` is the example. It drops streamhub's
-`event_loop Subscribe error: no app or stream name` (camera-box's headphone
-monitor probing an unpublished stream every ~3 s) and logs a count at INFO
+`event_loop Subscribe error: no app or stream name` (a subscribe to an
+unpublished stream: camera-box's headphone monitor every ~3 s, and the
+inpoint's own `local-chunker` probes) and logs a count at INFO
 every 60 s. It is wired into src-tauri's `init_tracing` only: that is the
 shipped binary on both boxes. `rs-service`'s `restreamer-service` binary is
 not shipped (install.ps1 and CI only remove old copies), and its untested

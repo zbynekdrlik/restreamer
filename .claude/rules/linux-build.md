@@ -42,8 +42,9 @@ paths:
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
 - **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
-  sudo there. The owner provided the sudo password on 2026-10-19 (#323: the streampp
-  box drifts behind releases). It is the dev1 key file `stream-pp-sudo` in the secrets store, and it is used only through
+  sudo there. The owner provided the sudo password on 2026-10-19 (#323: the
+  streampp box drifts behind releases). It is the dev1 key file `stream-pp-sudo`
+  in the secrets store, and it is used only through
   `airuleset.py secret exec --file <it> --env PPPW -- bash <script>`. The script pipes
   `${PPPW%$'\n'}` into `ssh newlevel@10.76.8.204 "sudo -S -k -p '' dpkg -i /tmp/<deb>"`
   (the file ends in a newline, so strip it). Never read the file inline; a hook blocks

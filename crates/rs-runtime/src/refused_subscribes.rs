@@ -1,10 +1,11 @@
 //! #404: drop xiu's ERROR for a subscribe to a stream nobody publishes.
 //!
-//! streamhub 0.2.4 logs every refused subscribe as `log::error!("event_loop
-//! Subscribe error: no app or stream name")`. On stream-pp, camera-box's
-//! headphone monitor plays `live/stream-pp` every ~3 s on purpose while OBS
-//! is not publishing, so that line came 7203 times in 6 h and buried the
-//! real errors. This layer drops exactly that event (every other streamhub
+//! streamhub 0.2.4 logs a subscribe to an unpublished stream as
+//! `log::error!("event_loop Subscribe error: no app or stream name")`. Two
+//! sources hit it while OBS is not publishing: camera-box's headphone monitor,
+//! which plays `live/stream-pp` every ~3 s on purpose, and the inpoint's own
+//! probe subscribes (`local-chunker`). On stream-pp that line came 7203 times
+//! in 6 h and buried the real errors. This layer drops exactly that event (every other streamhub
 //! error keeps ERROR) and counts it; the summary thread reports the count at
 //! INFO, so the fact stays visible.
 
@@ -48,7 +49,8 @@ impl RefusedSubscribes {
         })
     }
 
-    /// Starts the thread that logs the summary at INFO every 60 s.
+    /// Starts the thread that logs the summary at INFO every
+    /// `SUMMARY_INTERVAL` (60 s).
     pub fn start_summary(&self) -> std::io::Result<JoinHandle<()>> {
         self.spawn_summary(SUMMARY_INTERVAL, |line| {
             tracing::info!("{line}");

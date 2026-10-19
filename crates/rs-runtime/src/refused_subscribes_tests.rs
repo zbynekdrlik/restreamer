@@ -100,7 +100,11 @@ fn a_refusal_whose_message_is_a_plain_string_is_dropped_too() {
         tracing::error!(target: "streamhub", message = REFUSAL);
     });
     assert_eq!(buffer.recent("", 100).len(), 0);
-    assert!(refused.take_summary().is_some(), "the refusal was counted");
+    assert_eq!(
+        refused.take_summary().as_deref(),
+        Some("1 RTMP subscribes refused since the last report: the stream had no publisher (#404)"),
+        "the refusal was counted once"
+    );
 }
 
 #[test]
