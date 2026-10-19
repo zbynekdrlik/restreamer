@@ -23,6 +23,9 @@ and OBS dropped 117 frames on 2026-10-18. The queue sits in `Common`'s private
   unsubscribe, then the session ends.
 - `session/errors.rs`: the `PlayQueueOverflow { queued, limit }` variant.
 - The crate's `rtmp_specification_1.0.pdf` is left out.
+- `Cargo.toml`: `[lints.rust] non_local_definitions = "allow"`. failure's derive
+  trips that lint, and cargo shows a path dependency's warnings, unlike a
+  registry one's.
 
 Restreamer's `RtmpServer` sets the limit on every session it accepts
 (`crates/rs-inpoint/src/rtmp_server.rs`). Search for `restreamer #368` to

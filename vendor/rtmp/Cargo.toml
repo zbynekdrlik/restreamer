@@ -106,3 +106,8 @@ default-features = false
 
 [dependencies.xflv]
 version = "0.4.4"
+
+# restreamer #368: failure's derive trips rustc's non_local_definitions lint.
+# Cargo caps the lints of a registry dependency, never of a path one.
+[lints.rust]
+non_local_definitions = "allow"

@@ -91,6 +91,16 @@ impl Common {
         let mut retry_times = 0;
         loop {
             if let Some(data) = self.data_receiver.recv().await {
+                // restreamer #368: a player this far behind is cut, so its
+                // queue cannot grow without bound.
+                if let Some(limit) = self.play_queue_limit {
+                    let queued = self.data_receiver.len();
+                    if queued > limit {
+                        return Err(SessionError {
+                            value: SessionErrorValue::PlayQueueOverflow { queued, limit },
+                        });
+                    }
+                }
                 match data {
                     FrameData::Audio { timestamp, data } => {
                         let data_size = data.len();

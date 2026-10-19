@@ -229,10 +229,12 @@ impl RtmpServer {
     }
 }
 
-/// Drop a finished session. Dropping it drains and frees every frame still
-/// queued for it, and a player that fell behind can leave GBs there.
+/// Drop a finished session on the runtime's blocking pool, never on the
+/// ingest thread (#368). Dropping it drains and frees every frame still
+/// queued for it: up to 8 GB and 7 s for a player that fell behind, while
+/// OBS's socket went unread.
 fn retire_session<S: Send + 'static>(session: S) {
-    drop(session);
+    drop(tokio::task::spawn_blocking(move || drop(session)));
 }
 
 #[cfg(test)]
