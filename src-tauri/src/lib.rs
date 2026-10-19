@@ -17,7 +17,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
-use rs_runtime::{LogCaptureLayer, ServiceCore};
+use rs_runtime::{LogCaptureLayer, RefusedSubscribes, ServiceCore};
 
 use crate::state::AppState;
 
@@ -67,12 +67,19 @@ fn init_tracing(log_buffer: &LogBuffer) -> Option<tracing_appender::non_blocking
         }
     };
 
+    // #404: streamhub's refused subscribe for an unpublished stream is not
+    // an error; it is dropped for every layer and summarized at INFO.
+    let refused_subscribes = RefusedSubscribes::default();
     tracing_subscriber::registry()
         .with(env_filter)
+        .with(refused_subscribes.clone())
         .with(tracing_subscriber::fmt::layer())
         .with(LogCaptureLayer::new(log_buffer.clone()))
         .with(file_layer)
         .init();
+    if let Err(e) = refused_subscribes.start_summary() {
+        tracing::warn!("refused-subscribe summary thread not started: {e}");
+    }
 
     guard
 }

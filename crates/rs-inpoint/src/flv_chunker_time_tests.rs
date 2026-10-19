@@ -10,7 +10,7 @@
 //! module, `super` the FLV tag readers.
 
 use super::super::{ChunkInfo, FLV_TAG_AUDIO, FLV_TAG_VIDEO, FlvChunkSink};
-use super::first_flv_tag_timestamp;
+use super::{CHUNK_ARRIVAL_LIVENESS, first_flv_tag_timestamp};
 use crate::wall_clock::WallClock;
 use bytes::BytesMut;
 use std::sync::Arc;
@@ -128,11 +128,28 @@ async fn drain_chunks(
     rx: &mut broadcast::Receiver<ChunkInfo>,
 ) -> Vec<Vec<u8>> {
     sink.flush().await;
-    let mut chunks = Vec::new();
-    while let Ok(Ok(info)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
-        chunks.push(std::fs::read(&info.path).expect("chunk file readable"));
+    emitted(sink, rx)
+        .await
+        .iter()
+        .map(|info| std::fs::read(&info.path).expect("chunk file readable"))
+        .collect()
+}
+
+/// Every chunk the sink has broadcast so far, in broadcast order (a
+/// spawned write can finish after a later `flush()`). It waits for the
+/// background writes first, so a slow disk never ends the drain early
+/// (#382): a quiet-time window did, on a starved runner.
+async fn emitted(sink: &FlvChunkSink, rx: &mut broadcast::Receiver<ChunkInfo>) -> Vec<ChunkInfo> {
+    assert_eq!(
+        sink.wait_for_writes(CHUNK_ARRIVAL_LIVENESS).await,
+        0,
+        "a chunk write was still pending after {CHUNK_ARRIVAL_LIVENESS:?}"
+    );
+    let mut infos = Vec::new();
+    while let Ok(info) = rx.try_recv() {
+        infos.push(info);
     }
-    chunks
+    infos
 }
 
 /// Output (chunk) ts of the tag carrying `kind`/`src_ts`, across all chunks.
@@ -708,7 +725,7 @@ async fn a_forward_glitch_does_not_stretch_the_chunk_duration() {
     sink.write_video(1_040 + 40_000, &body(Kind::InterFrame, 1_040))
         .await;
     sink.flush().await;
-    let info = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let info = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("the flushed chunk")
         .expect("chunk info");
@@ -743,10 +760,11 @@ async fn a_forward_glitch_opening_a_chunk_does_not_zero_its_duration() {
     }
     sink.flush().await;
 
-    let mut durations = Vec::new();
-    while let Ok(Ok(info)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
-        durations.push((info.index, info.duration_ms));
-    }
+    let mut durations: Vec<_> = emitted(&sink, &mut rx)
+        .await
+        .iter()
+        .map(|info| (info.index, info.duration_ms))
+        .collect();
     durations.sort_unstable();
     assert_eq!(
         durations,

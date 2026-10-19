@@ -31,3 +31,23 @@ counts work inside a fixed wall-clock window (`claim for 4 s, then require
 - **Prove the rewrite with temporary injections, never committed**: a per-write
   delay (old shape fails, new passes), a never-returning await (the cap
   fails), and the old buggy implementation (the real assertion still fails).
+
+## Waiting for ONE event (a chunk, a report): a hang bound, never a quiet window
+
+The chunker tests waited 500 ms for a keyframe-closed chunk, and their drains
+stopped at the first 500 ms with no chunk. Such a chunk is broadcast only after
+a spawned disk write, and a starved Windows runner took longer than that (#382,
+main run 39270735842). A drain then silently left a chunk out.
+
+- **Expecting one event:** wait with ONE named liveness bound
+  (`CHUNK_ARRIVAL_LIVENESS`, 10 s, `flv_chunker_tests.rs`). It only catches a
+  hang; no assertion depends on the latency.
+- **Collecting "everything so far":** first wait for the producer to be idle
+  (`FlvChunkSink::wait_for_writes`, and assert 0 still pending with its own
+  message), then take what is queued with `try_recv`. A "stop after N ms of
+  silence" loop is a speed assertion in disguise.
+- A chunk from `flush()` is already in the channel when `flush` returns
+  (`write_and_notify` is awaited), so only `spawn_write` chunks were racy.
+- Proof recipe (dev2, never committed): a sleep before the spawned write fails
+  the old tests and passes the new ones; a `pending()` write fails the new ones
+  at the bound.

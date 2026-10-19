@@ -4,6 +4,13 @@
 use super::*;
 use std::sync::Arc;
 
+/// How long a test waits for a chunk it produced. A keyframe-closed chunk
+/// is written on a spawned task (`spawn_write`) and broadcast only after the
+/// write, and a starved Windows CI runner once took more than 500 ms for
+/// that (#382, main run 39270735842). This bound only catches a hang: no
+/// assertion depends on how fast a chunk arrives.
+const CHUNK_ARRIVAL_LIVENESS: Duration = Duration::from_secs(10);
+
 /// Find the first FLV audio tag whose body begins with `marker` and return
 /// its 32-bit timestamp (24-bit low + 8-bit high per the FLV spec). Returns
 /// None if no such tag is found in the stream.
@@ -119,7 +126,7 @@ async fn produces_chunk_after_duration() {
     let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
     sink.write_video(1000, &keyframe2).await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -151,7 +158,7 @@ async fn flush_produces_final_chunk() {
 
     sink.flush().await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -249,7 +256,7 @@ async fn flv_tag_structure_is_correct() {
 
     sink.flush().await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("chunk should flush")
         .unwrap();
@@ -412,7 +419,7 @@ async fn chunk_duration_tracks_video_span_not_audio_ts() {
     let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
     sink.write_video(233, &keyframe2).await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("chunk should be emitted within timeout")
         .expect("recv should succeed");
@@ -463,7 +470,7 @@ async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
 
     sink.flush().await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("chunk should flush")
         .expect("recv should succeed");
@@ -532,7 +539,7 @@ async fn republish_keeps_audio_and_video_aligned() {
     sink.flush().await;
 
     // Drain the session-1 chunk so the next recv() is the session-2 chunk.
-    let _ = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let _ = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("session-1 chunk should flush")
         .expect("recv should succeed");
@@ -554,7 +561,7 @@ async fn republish_keeps_audio_and_video_aligned() {
 
     sink.flush().await;
 
-    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+    let chunk = tokio::time::timeout(CHUNK_ARRIVAL_LIVENESS, rx.recv())
         .await
         .expect("session-2 chunk should flush")
         .expect("recv should succeed");
