@@ -35,6 +35,9 @@ paths:
       writing the profile.
     - Verified on dev2 by SIGSTOPing Chrome: everything was gone and the profile
       removed after 2.6 s.
+    - After the wait, the group is killed in any case, since a child may outlive
+      the main process. A `process.once("exit")` hook in the worker reaps the
+      detached group if `afterEach` never runs.
     - `afterEach` shares the test's budget, so the describe sets a 60 s timeout:
       ~5 s of test plus at most ~6 s of stop and rm retries.
   - Skip the exit wait when `pid` is undefined (spawn failed) or
@@ -45,8 +48,12 @@ paths:
     in the test body: on a test timeout Playwright abandons the body, and only a
     handle `afterEach` can already see gets cleaned.
 - **The observation window:** `networkidle` on every route.
-  - On `/` the spec also waits for the ControlBar's next `/status` poll response
-    and `networkidle` again, so a poll-driven render lands inside the window.
+  - On `/` the spec also waits for BOTH responses of the ControlBar's next poll
+    (`/status` and `/chunks/stats`, fetched together), then one
+    `requestAnimationFrame`, so the render the poll drives lands inside the
+    window.
+  - A second `waitForLoadState("networkidle")` is a no-op: it resolves at once
+    once the event has fired for the document.
   - `/settings` has no periodic fetch. Waiting for `/status` there times out
     (#360: the poll lives on the operator route only).
 - **Three canaries keep the assertion honest**, each marked `browser-log-canary` in

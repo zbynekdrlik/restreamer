@@ -31,6 +31,15 @@ interface Chrome {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function killGroup(pid: number | undefined): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // The group is already gone.
+  }
+}
+
 // Synchronous, so the caller holds the handle before anything can time out.
 function launchChrome(): Chrome {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-log-"));
@@ -46,9 +55,14 @@ function launchChrome(): Chrome {
       "--password-store=basic",
       "about:blank",
     ],
-    // Its own process group, so a hung Chrome dies with all its children.
+    // Its own process group, so Chrome dies with all its children.
     { stdio: "ignore", detached: true },
   );
+  // A detached group outlives its parent: reap it if the worker exits
+  // before afterEach runs.
+  const reap = () => killGroup(proc.pid);
+  process.once("exit", reap);
+  proc.once("exit", () => process.off("exit", reap));
   return { proc, dir };
 }
 
@@ -78,8 +92,9 @@ async function connectChrome(chrome: Chrome): Promise<Browser> {
 
 // Browser.close lets every Chrome process finish writing the profile. A
 // Chrome that is not gone within 2 s (hung, or never connected: at once)
-// is killed with its whole process group. The stop takes at most ~6 s
-// (4 s wait + rm retries); the describe's timeout reserves room for it.
+// is killed. The group is killed in any case afterwards, since a child may
+// outlive the main process. The stop takes at most ~6 s (4 s wait + rm
+// retries); the describe's timeout reserves room for it.
 async function stopChrome(chrome: Chrome): Promise<void> {
   const { proc, dir, browser } = chrome;
   try {
@@ -87,13 +102,7 @@ async function stopChrome(chrome: Chrome): Promise<void> {
       proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null;
     if (running) {
       const exited = new Promise<void>((r) => proc.once("exit", () => r()));
-      const kill = setTimeout(() => {
-        try {
-          process.kill(-proc.pid!, "SIGKILL");
-        } catch {
-          // The group is already gone.
-        }
-      }, browser ? 2000 : 0);
+      const kill = setTimeout(() => killGroup(proc.pid), browser ? 2000 : 0);
       void browser
         ?.newBrowserCDPSession()
         .then((s) => s.send("Browser.close"))
@@ -101,6 +110,7 @@ async function stopChrome(chrome: Chrome): Promise<void> {
       await Promise.race([exited, sleep(4000)]);
       clearTimeout(kill);
     }
+    killGroup(proc.pid);
   } finally {
     fs.rmSync(dir, {
       recursive: true,
@@ -158,12 +168,17 @@ test.describe("Browser log", () => {
       await expect(page.locator('[data-testid="version"]')).toBeVisible();
       await page.waitForLoadState("networkidle");
       if (polls) {
-        // Observation window past the first render: the next /status poll
-        // and the render it drives land inside it.
-        await page.waitForResponse((r) => r.url() === `${BASE}/api/v1/status`, {
-          timeout: 5000,
-        });
-        await page.waitForLoadState("networkidle");
+        // Observation window past the first render: both responses of the
+        // next poll (it fetches /status and /chunks/stats together) and the
+        // frame that renders them land inside it.
+        const poll = (suffix: string) =>
+          page.waitForResponse((r) => r.url() === `${BASE}/api/v1/${suffix}`, {
+            timeout: 5000,
+          });
+        await Promise.all([poll("status"), poll("chunks/stats")]);
+        await page.evaluate(
+          () => new Promise<void>((r) => requestAnimationFrame(() => r())),
+        );
       }
     }
 
@@ -182,17 +197,24 @@ test.describe("Browser log", () => {
       }),
     );
     await page.goto(`${BASE}/${CANARY}`);
+    // A Chrome upgrade that stops logging a canary turns this red: the
+    // message names the version so that is diagnosable.
     await expect
-      .poll(() => [
-        entries.some((e) => e.startsWith("[console warning]") && e.includes(CANARY)),
-        entries.some((e) => e.startsWith("[log error network]") && e.includes(CANARY)),
-        entries.some(
-          (e) =>
-            e.startsWith("[log warning other]") &&
-            e.includes(`${BASE}/${CANARY}`) &&
-            e.includes("apple-mobile-web-app-capable"),
-        ),
-      ])
+      .poll(
+        () => [
+          entries.some((e) => e.startsWith("[console warning]") && e.includes(CANARY)),
+          entries.some((e) => e.startsWith("[log error network]") && e.includes(CANARY)),
+          entries.some(
+            (e) =>
+              e.startsWith("[log warning other]") &&
+              e.includes(`${BASE}/${CANARY}`) &&
+              e.includes("apple-mobile-web-app-capable"),
+          ),
+        ],
+        {
+          message: `canaries [console warn, Log error, Log warning] on Chrome ${browser.version()}`,
+        },
+      )
       .toEqual([true, true, true]);
 
     expect(entries.filter((e) => !e.includes(CANARY))).toEqual([]);
