@@ -109,6 +109,44 @@ paths:
     box has python `websocket-client`). Chrome's own sign-in bubble
     (`chrome://signin-dice-web-intercept...`) is a separate target the viewer never
     sees; it is harmless.
+- **Rooms nobody views are hidden (#407).** The control-room Chrome renders in software
+  through ONE compositor thread (gpu-process; `gpu_compositing: disabled_software`,
+  llvmpipe). Without a window manager no window is ever occluded or minimized, so every
+  open room kept decoding and compositing its live previews. On stream-pp, 2026-10-18,
+  the thread ran at 100 % and the shown room dropped 56 % of its frames.
+  - `visibility.rs`:
+    - `ShownTabs` counts the tabs relays show now, from all viewers: the kiosk and a
+      notebook may watch two rooms at once.
+    - `to_hide` returns every opener-less web page nobody shows; popups are the
+      room's business.
+    - `hide_if_visible` runs `Runtime.evaluate document.visibilityState`; a
+      `visible` page gets `Page.setWebLifecycleState frozen` then `active`. Hidden,
+      but its JS runs on, so a sign-in popup can still `postMessage` its opener.
+  - The relay sends `Page.setWebLifecycleState active` (idempotent),
+    `Page.bringToFront` and `Emulation.setFocusEmulationEnabled {enabled:true}`
+    on attach.
+    - The `active` covers a hide that froze the page but failed its `active`;
+      without it the room would stay dead for the next viewer.
+    - `hide_others` and the leave-hide re-check `is_shown` right before freezing.
+      A viewer may open the room meanwhile.
+    - It hides the others only when the bringToFront REPLY arrives (`front_id` in
+      the page reader), because activation re-shows the window it leaves.
+    - A viewer leaving (`TabEnd::Over`) hides its room unless another relay still
+      shows it.
+  - **What did NOT work** (dev2 spike): `setWindowBounds` minimized or off-screen
+    (no WM: still visible); `active` alone or `setDeviceMetricsOverride` to show a
+    hidden page. `startScreencast` on a hidden page gives one stale frame, then 0 fps.
+  - **`--disable-back-forward-cache-for-web-sockets`** (`launch_args`): without it, a
+    freeze closes every WebSocket of the page (code 1006); the page reconnects when
+    shown. It applies only at the next Chrome start, since Chrome survives
+    Restreamer restarts.
+  - Measured on dev2 under load: the shown room dropped 46.5 % of frames before, 5.1 %
+    after, and the screencast went from 34 to 51 fps. The rest of the gpu-process load is
+    the screencast capture itself (~65 points) and JPEG encoding in the browser process.
+  - **Windows** has urgent tab discarding: a hidden room may be discarded under memory
+    pressure and reload when shown. This is not measured.
+  - Tests: FakeChrome `visibility` answers `Runtime.evaluate`;
+    `relay_visibility_tests.rs`; `visibility_tests.rs`.
 - **Frames are paced by the viewer.** Chrome sends the next screencast frame only after
   the last one is acked. The relay acks when the dashboard reports `{t:drawn}` after
   drawing, never on queueing: acking on queueing let a playing video (a YouTube seek, a

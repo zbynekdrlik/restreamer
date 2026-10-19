@@ -36,7 +36,9 @@ emitter of one.
     push-stage invariant, VPS reachability). END edges only: a start request
     on a LIVE delivery reuses its instance yet still records
     `DeliveryStarted` and re-emits `VpsReady`;
-  - `EndpointAdded/Removed`, `EndpointStartChunkUpdated` → that endpoint's;
+  - `EndpointAdded/Removed`, `EndpointStartChunkUpdated`, and
+    `EndpointSourceEnded` (#408: a deliberate OBS stop closed its live
+    publish) → that endpoint's;
   - `RescueActivated` → that endpoint's push-stage invariant (the live pusher
     was dropped for the rescue clip);
   - `EventStarted/Stopped` → S3 upload failures.

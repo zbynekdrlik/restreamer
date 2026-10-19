@@ -166,9 +166,12 @@ fn ends_scope(action: Action) -> Option<Scope> {
         // instance yet still records DeliveryStarted and re-emits VpsReady,
         // and must not close that delivery's episodes.
         Action::DeliveryStopped | Action::VpsDeleted => Some(Scope::Delivery),
-        Action::EndpointAdded | Action::EndpointRemoved | Action::EndpointStartChunkUpdated => {
-            Some(Scope::Endpoint)
-        }
+        // #408: `EndpointSourceEnded` closed the endpoint's live publish
+        // after a deliberate OBS stop: its subject ended, nothing recovered.
+        Action::EndpointAdded
+        | Action::EndpointRemoved
+        | Action::EndpointStartChunkUpdated
+        | Action::EndpointSourceEnded => Some(Scope::Endpoint),
         Action::RescueActivated => Some(Scope::LivePusher),
         Action::EventStarted | Action::EventStopped => Some(Scope::Event),
         _ => None,

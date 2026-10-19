@@ -308,6 +308,13 @@ UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
     runner as exit 1. Tests that mimic a step can assert only zero vs non-zero.
   - A function that returns an EMPTY array returns `$null`. Use `return , @(...)` when
     empty is a real answer: "no instance left" is not "Restreamer did not answer".
+  - A function that returns a ONE-element array returns the bare element. A
+    `PSCustomObject` has no `.Count` on PS 5.1 (it reads `$null`), so `$rows.Count -lt 1`
+    is true for one real row. Wrap the CALL: `$rows = @(Get-AuditRows "x")`. The #408
+    gate missed its one `source_stopped_deliberately` row this way (run 39164865884), and
+    would have missed a single `rescue_activated` too.
+  - `@($null).Count` is 1. Read `$r.rows` and `$r.items` into `@()` only when they are
+    non-null.
   - `@(... | ConvertFrom-Json)` can nest a JSON array as ONE element, so `.id` becomes an
     array. Flatten it with `(... | ConvertFrom-Json) | ForEach-Object { $_ }`.
   - **PS 5.1 `Invoke-WebRequest`/`Invoke-RestMethod -TimeoutSec` is not a hard bound.** It

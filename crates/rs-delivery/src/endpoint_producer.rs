@@ -145,6 +145,8 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     break;
                 }
                 buffer_state.note_sent(sent_id);
+                // #408: a chunk past an announced end: the source is back.
+                buffer_state.source_end.note_fetched(sent_id);
 
                 chunk_id += 1;
                 // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
@@ -241,6 +243,13 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 // so an interleaved 404/error pattern doesn't double-count.
                 consecutive_fetch_errors = 0;
 
+                // #408: past the announced end of the source a miss is the
+                // expected end, not a gap: no `chunk_gap` stall and no
+                // read-delay growth. The probe still runs: a chunk it finds
+                // ahead (the end's next chunk was never uploaded) is the
+                // source coming back, and fetching it clears the end.
+                let at_source_end =
+                    crate::source_end::past_end(buffer_state.source_end.ended_at(), chunk_id);
                 // Chunk gap skip-ahead logic
                 if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
                     // Captured BEFORE the probe loop mutates chunk_id, so the
@@ -277,7 +286,9 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
 
                     if !found_ahead {
                         let mut s = stats.lock().await;
-                        s.stall_reason = Some("chunk_gap".to_string());
+                        if !at_source_end {
+                            s.stall_reason = Some("chunk_gap".to_string());
+                        }
                         s.consecutive_chunk_misses = consecutive_chunk_misses;
                         drop(s);
                         tracing::warn!(
@@ -296,7 +307,9 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     // a forward chunk was found; 0 when the gap was unbounded
                     // (no chunk found → grow by the floor margin only). Runs
                     // ONLY on the probe cycle, never on every miss.
-                    if let Some(ctrl) = fast_delay.as_mut() {
+                    // #408: the gap past a deliberate end is the stop, not
+                    // a starvation: the delay must not ratchet up for it.
+                    if let Some(ctrl) = fast_delay.as_mut().filter(|_| !at_source_end) {
                         let deficit_secs = if found_ahead {
                             ((chunk_id - stuck_at).max(0) as u64)
                                 .saturating_mul(typical_chunk_dur_ms)

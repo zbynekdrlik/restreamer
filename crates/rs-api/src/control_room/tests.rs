@@ -852,3 +852,34 @@ fn uploads_live_in_the_browser_profiles_dir() {
         dir.path().join("browser-profiles").join("uploads")
     );
 }
+
+/// #407: every room relay gets the SAME shown-tabs set, so a room one viewer
+/// watches is never hidden by another viewer's relay.
+#[test]
+fn every_relay_shares_one_shown_tabs_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let rooms = ControlRooms::new(dir.path());
+    let _viewer = rooms.shown_tabs().show("T1");
+    assert!(rooms.shown_tabs().is_shown("T1"));
+}
+
+/// #405 follow-up: a page saved by an older release that `remember_url`
+/// rejects today (YT-BB-RTMP on stream-pp kept `studio.youtube.com/reauth`
+/// from 0.29.47) is never reopened: the room opens at its default page.
+#[tokio::test]
+async fn a_saved_page_no_longer_worth_keeping_is_not_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = TabMap {
+        url: [(1, "https://studio.youtube.com/reauth?rapt=x".to_string())].into(),
+        ..Default::default()
+    };
+    std::fs::write(
+        dir.path().join("control-room-tabs.json"),
+        serde_json::to_vec(&map).unwrap(),
+    )
+    .unwrap();
+    let rooms =
+        ControlRooms::with_browser(dir.path(), Browser::at(dir.path(), "127.0.0.1:9".into()));
+    let d = rooms.status(&[ep(1, "YT A", "YT_RTMP")]).await;
+    assert_eq!(d[0].url, "https://studio.youtube.com/");
+}

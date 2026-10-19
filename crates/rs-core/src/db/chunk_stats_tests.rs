@@ -140,3 +140,57 @@ async fn pending_chunks_excludes_permanently_failed() {
     assert_eq!(stats.sent_chunks, 0);
     assert_eq!(stats.in_process_chunks, 0);
 }
+
+/// #408: the end of the source is the last chunk already ON S3 (the VPS can
+/// read only those), per event, `None` before the first upload.
+#[tokio::test]
+async fn last_sent_sequence_is_the_highest_uploaded_chunk_of_the_event() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-last-sent")
+        .await
+        .unwrap();
+    let other = upsert_streaming_event(&pool, "evt-other").await.unwrap();
+    assert_eq!(
+        get_last_sent_sequence_for_event(&pool, event_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let first = insert_chunk(&pool, event_id, "/tmp/a.bin", 100, "a", 0)
+        .await
+        .unwrap();
+    let second = insert_chunk(&pool, event_id, "/tmp/b.bin", 100, "b", 0)
+        .await
+        .unwrap();
+    let _pending = insert_chunk(&pool, event_id, "/tmp/c.bin", 100, "c", 0)
+        .await
+        .unwrap();
+    let foreign = insert_chunk(&pool, other, "/tmp/d.bin", 100, "d", 0)
+        .await
+        .unwrap();
+    for id in [first, second, foreign] {
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+    for _ in 0..3 {
+        let f = insert_chunk(&pool, other, "/tmp/e.bin", 100, "e", 0)
+            .await
+            .unwrap();
+        set_chunk_sent(&pool, f).await.unwrap();
+    }
+
+    // Sequence numbers are per event and start at 1: the third chunk of
+    // the event is not uploaded yet, so the VPS can read up to 2.
+    assert_eq!(
+        get_last_sent_sequence_for_event(&pool, event_id)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        get_last_sent_sequence_for_event(&pool, other)
+            .await
+            .unwrap(),
+        Some(4)
+    );
+}

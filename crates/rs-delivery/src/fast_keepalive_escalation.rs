@@ -35,6 +35,9 @@ pub(crate) enum KeepaliveOutcome {
     /// Sustained outage detected (gap >= threshold AND producer stalled) —
     /// consumer should escalate to `run_outage_rescue` on a fresh session.
     EscalateToRescue,
+    /// #408: the source stopped on purpose and this endpoint delivered its
+    /// last chunk (the value): stop sending, never rescue.
+    SourceEnded(i64),
 }
 
 /// When the keepalive loop next re-checks the escalation gate: AT the
@@ -91,6 +94,8 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     stats: &Stats,
     buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
+    // #408: the last chunk this endpoint delivered, against the source's end.
+    last_delivered: i64,
     // #124: elapsed-since-keepalive-ENTRY at which a stalled producer escalates
     // to the fresh-reconnect rescue clip. Anchored by the caller to the last
     // real chunk (`keepalive_escalate_after`) so escalation never fires later
@@ -100,6 +105,12 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     // ONLY codec-homogeneous bytes (the last real chunk). `None` => no chunk
     // delivered yet => pure-wait, never push. Borrows `last_chunk_bytes` (an
     // immutable `&` param) for the whole fn; nothing mutates it here.
+    // #408: the gap is the end of the source, not an outage: no freeze, no
+    // keepalive rows, no rescue.
+    let ended = || crate::source_end::reached(buffer_state.source_end.ended_at(), last_delivered);
+    if let Some(end) = ended() {
+        return KeepaliveOutcome::SourceEnded(end);
+    }
     let freeze: Option<&[u8]> = crate::fast_keepalive::keepalive_bytes(last_chunk_bytes);
     // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock shares
     // the loop's `tokio::time::sleep` time source: identical to the real clock
@@ -165,6 +176,11 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
             finish!(@end_normal);
             return KeepaliveOutcome::Stop;
         }};
+        (source_end $end:expr) => {{
+            crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+            tracing::info!(alias = %alias, "keepalive: the source ended on purpose; stop sending");
+            return KeepaliveOutcome::SourceEnded($end);
+        }};
         (escalate) => {{
             crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
             tracing::warn!(alias = %alias, "keepalive: sustained outage (producer stalled past threshold); escalating to fresh-session rescue");
@@ -178,6 +194,9 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     }
     match freeze {
         Some(bytes) => loop {
+            if let Some(end) = ended() {
+                finish!(source_end end);
+            }
             if should_escalate(buffer_state) {
                 finish!(escalate);
             }
@@ -202,6 +221,9 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
         // session that starves BEFORE its first chunk still reaches rescue
         // instead of going dark forever — no push arm, so no codec-foreign bytes.
         None => loop {
+            if let Some(end) = ended() {
+                finish!(source_end end);
+            }
             if should_escalate(buffer_state) {
                 finish!(escalate);
             }

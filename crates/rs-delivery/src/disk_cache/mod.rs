@@ -68,6 +68,10 @@ pub struct DiskCache {
     pub cache_dir: PathBuf,
     pub event_id: String,
     pub window_chunks: i64,
+    /// #408: where the source ended after a deliberate OBS stop. One per
+    /// event, so every endpoint (and a re-init that keeps this cache) sees
+    /// the same end.
+    pub source_end: crate::source_end::SourceEnd,
 }
 
 impl DiskCache {
@@ -109,6 +113,7 @@ impl DiskCache {
             cache_dir: cfg.cache_dir,
             event_id,
             window_chunks: cfg.window_chunks,
+            source_end: crate::source_end::SourceEnd::new(),
         })
     }
 

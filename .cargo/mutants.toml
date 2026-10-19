@@ -78,6 +78,13 @@ exclude_re = [
     "RtmpPusher::push_flv_bytes",
     "RtmpPusher::close",
     "<impl Pushable for RtmpPusher>",
+    # #408: the obs-websocket connection loop needs a live OBS websocket;
+    # its state changes go through tested helpers (`handle_obs_message`,
+    # `ObsState::mark_disconnected`).
+    "obs_connection_loop",
+    "connect_and_run",
+    # #408: the 2 s loop around the tested `SourceEndWatch::tick`.
+    "SourceEndWatch::run",
     # #368: std::fs::File is unbuffered, so DailyLogFile's flush (a
     # delegation to File::flush, a no-op) has only the equivalent mutant
     # `Ok(())`.

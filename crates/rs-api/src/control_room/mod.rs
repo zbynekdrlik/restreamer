@@ -23,6 +23,7 @@ pub mod popups;
 pub mod relay;
 #[cfg(windows)]
 mod spawn_windows;
+pub mod visibility;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -350,6 +351,8 @@ pub struct ControlRooms {
     /// One open at a time: two concurrent opens would each see the other's new
     /// tab as "theirs" (duplicate tabs, a tab mapped to the wrong endpoint).
     open_lock: Mutex<()>,
+    /// The tabs a viewer watches now; every other room is hidden (#407).
+    shown_tabs: visibility::ShownTabs,
 }
 
 impl ControlRooms {
@@ -366,7 +369,13 @@ impl ControlRooms {
             tabs: std::sync::Mutex::new(read_json(&tabs_path)),
             open_lock: Mutex::new(()),
             tabs_path,
+            shown_tabs: visibility::ShownTabs::default(),
         }
+    }
+
+    /// The tabs a viewer watches now (#407), shared by every relay.
+    pub fn shown_tabs(&self) -> visibility::ShownTabs {
+        self.shown_tabs.clone()
     }
 
     /// Where files the operator puts into a room are written (#399); the
@@ -418,11 +427,13 @@ impl ControlRooms {
         }
     }
 
-    /// Point each destination at the room page it showed last.
+    /// Point each destination at the room page it showed last. A page an
+    /// older release saved that is no room page any more (a `/reauth`
+    /// hand-back, #405) is skipped: the room opens at its default page.
     pub fn apply_saved_urls(&self, dests: &mut [Destination]) {
         let map = lock(&self.tabs);
         for d in dests.iter_mut() {
-            if let Some(u) = map.url.get(&d.endpoint_id) {
+            if let Some(u) = map.url.get(&d.endpoint_id).filter(|u| remember_url(u)) {
                 d.url = u.clone();
             }
         }

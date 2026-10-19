@@ -170,6 +170,7 @@ pub async fn ws(
     let on_url: super::relay::UrlSink =
         std::sync::Arc::new(move |url: String| rooms.note_url(&tab, &url));
     let uploads = state.control_rooms.uploads_dir();
+    let shown_tabs = state.control_rooms.shown_tabs();
     // A file (thumbnail, #399) travels base64 in one message: up to ~27 MB. A
     // browser sends each message as ONE frame, so the frame limit (16 MiB by
     // default) must match, or a larger file drops the whole room.
@@ -177,7 +178,15 @@ pub async fn ws(
         .max_message_size(32 << 20)
         .max_frame_size(32 << 20)
         .on_upgrade(move |socket| {
-            super::relay::relay_room(socket, cdp, page.target_id, page.url, on_url, uploads)
+            super::relay::relay_room(
+                socket,
+                cdp,
+                page.target_id,
+                page.url,
+                on_url,
+                uploads,
+                shown_tabs,
+            )
         })
 }
 

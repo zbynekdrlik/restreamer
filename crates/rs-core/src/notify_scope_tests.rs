@@ -23,10 +23,13 @@ const DELIVERY_BOUNDARIES: [Action; 2] = [Action::DeliveryStopped, Action::VpsDe
 const DELIVERY_START_EDGES: [Action; 2] = [Action::DeliveryStarted, Action::VpsReady];
 
 /// One endpoint's delivery begins anew or ends (rows carry the alias).
-const ENDPOINT_BOUNDARIES: [Action; 3] = [
+/// #408: an endpoint that played the source out after a deliberate OBS stop
+/// closed its live publish, so its VPS-side episodes are over too.
+const ENDPOINT_BOUNDARIES: [Action; 4] = [
     Action::EndpointAdded,
     Action::EndpointRemoved,
     Action::EndpointStartChunkUpdated,
+    Action::EndpointSourceEnded,
 ];
 
 /// A streaming event (and so its chunk uploads) begins or ends.

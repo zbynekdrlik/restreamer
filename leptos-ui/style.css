@@ -243,6 +243,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .status-dot.warning { background: var(--status-warn); opacity: 1; }
 .status-dot.error { background: var(--status-error); opacity: 1; animation: pulse 1s ease-in-out infinite; }
 .status-dot.recovering { background: #3b82f6; opacity: 1; animation: pulse 2s ease-in-out infinite; }
+.status-dot.ended { background: var(--text-secondary); opacity: 0.8; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 /* OBS Toggle */
@@ -432,6 +433,8 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .endpoint-node.live { border-left-color: var(--status-ok); }
 .endpoint-node.pending { border-left-color: var(--border); }
 .endpoint-node.recovering { border-left-color: #3b82f6; }
+/* #408: OBS stopped on purpose, the endpoint stopped sending: calm grey, not an outage. */
+.endpoint-node.ended { border-left-color: var(--text-secondary); opacity: 0.75; }
 .endpoint-node.attention { border-left-color: var(--status-error); }
 .endpoint-anomaly { font-size: 13px; color: var(--status-warn); }
 .endpoint-mode-warmup {
@@ -460,6 +463,15 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 }
 .endpoint-mode-refilling {
     background: #14b8a6;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 8px;
+}
+/* #408: OBS stopped on purpose, the endpoint stopped sending. */
+.endpoint-mode-ended {
+    background: #6b7280;
     color: white;
     padding: 2px 6px;
     border-radius: 4px;

@@ -32,9 +32,56 @@ pub struct ObsState {
     pub streaming: bool,
     pub recording: bool,
     pub stream_timecode: Option<String>,
+    /// The stream output's last obs-websocket `outputState`
+    /// (`OBS_WEBSOCKET_OUTPUT_STARTED`, `..._RECONNECTING`, ...). `streaming`
+    /// alone cannot tell a stop from a reconnect: obs-websocket reports
+    /// `outputActive:false` for both (#408).
+    #[serde(default)]
+    pub output_state: Option<String>,
+    /// The stream output is STOPPED because someone stopped it (#408): it
+    /// went there from STOPPING, STARTED or RECONNECTED, never straight from
+    /// RECONNECTING (OBS giving up its reconnects ends in STOPPED too).
+    #[serde(default)]
+    pub stopped_deliberately: bool,
+    /// When the deliberate stop was seen (#408). The host matches it to the
+    /// ingest disconnect it caused: an OBS stop from long ago says nothing
+    /// about another publisher dropping now (CI's ffmpeg publisher).
+    #[serde(skip)]
+    pub stopped_at: Option<std::time::Instant>,
 }
 
 impl ObsState {
+    /// OBS is gone (websocket lost, or OBS exiting): nothing it reported
+    /// holds any more, a deliberate stop included (#408).
+    pub fn mark_disconnected(&mut self) {
+        self.connected = false;
+        self.streaming = false;
+        self.recording = false;
+        self.stream_timecode = None;
+        self.output_state = None;
+        self.stopped_deliberately = false;
+        self.stopped_at = None;
+    }
+
+    /// Record the verdict for the new stream-output state at `now`: the
+    /// stop instant is kept while the verdict holds and dropped with it.
+    pub(crate) fn set_output_state(&mut self, output_state: Option<&str>, now: std::time::Instant) {
+        let deliberate = stopped_deliberately_after(
+            self.output_state.as_deref(),
+            output_state,
+            self.stopped_deliberately,
+        );
+        // `stopped_at` is `None` whenever the verdict is false, so a kept
+        // instant is always this stop's own.
+        self.stopped_at = if deliberate {
+            self.stopped_at.or(Some(now))
+        } else {
+            None
+        };
+        self.stopped_deliberately = deliberate;
+        self.output_state = output_state.map(str::to_owned);
+    }
+
     pub fn summary(&self) -> String {
         if !self.connected {
             "disconnected".to_string()
@@ -82,6 +129,17 @@ impl ObsClient {
         });
 
         Self { state, cmd_tx }
+    }
+
+    /// A client that only holds `state` (no connection): tests of code that
+    /// reads OBS status (#408).
+    #[cfg(test)]
+    pub fn with_state(state: ObsState) -> Self {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+            cmd_tx,
+        }
     }
 
     /// Get current OBS state snapshot.
@@ -133,10 +191,7 @@ async fn obs_connection_loop(
         // Mark disconnected
         {
             let mut s = state.write().await;
-            s.connected = false;
-            s.streaming = false;
-            s.recording = false;
-            s.stream_timecode = None;
+            s.mark_disconnected();
             let _ = ws_tx.send(s.to_ws_event());
         }
 
@@ -315,6 +370,38 @@ pub fn compute_obs_auth(password: &str, salt: &str, challenge: &str) -> String {
     BASE64.encode(hasher.finalize())
 }
 
+/// obs-websocket `outputState` values of the stream output (#408).
+const OUTPUT_STOPPED: &str = "OBS_WEBSOCKET_OUTPUT_STOPPED";
+const OUTPUT_STOPPING: &str = "OBS_WEBSOCKET_OUTPUT_STOPPING";
+#[cfg(test)]
+const OUTPUT_STARTED: &str = "OBS_WEBSOCKET_OUTPUT_STARTED";
+#[cfg(test)]
+const OUTPUT_RECONNECTED: &str = "OBS_WEBSOCKET_OUTPUT_RECONNECTED";
+
+/// Whether the stream output is now stopped ON PURPOSE (#408), from its
+/// previous `outputState`, the new one, and the previous verdict.
+///
+/// Only a user or API stop goes through STOPPING: libobs `obs_output_stop`
+/// and `obs_output_force_stop` signal "stopping" first. STOPPED straight
+/// from STARTED, RECONNECTED or RECONNECTING is `obs_output_signal_stop`
+/// with an error (an encoder failure, a dropped link OBS will not or can
+/// no longer reconnect): an outage. A repeated STOPPED keeps the verdict;
+/// any other state means the output is not stopped.
+pub(crate) fn stopped_deliberately_after(
+    prev: Option<&str>,
+    new: Option<&str>,
+    prev_verdict: bool,
+) -> bool {
+    if new != Some(OUTPUT_STOPPED) {
+        return false;
+    }
+    match prev {
+        Some(OUTPUT_STOPPING) => true,
+        Some(OUTPUT_STOPPED) => prev_verdict,
+        _ => false,
+    }
+}
+
 /// Handle an incoming OBS message (event or request response).
 async fn handle_obs_message(
     msg: &serde_json::Value,
@@ -333,7 +420,14 @@ async fn handle_obs_message(
                 "StreamStateChanged" => {
                     let active = event_data["outputActive"].as_bool().unwrap_or(false);
                     let timecode = event_data["outputTimecode"].as_str().map(|s| s.to_string());
+                    let output_state = event_data["outputState"].as_str();
                     let mut s = state.write().await;
+                    let prev = s.output_state.clone();
+                    s.set_output_state(output_state, std::time::Instant::now());
+                    info!(
+                        "OBS stream output: {prev:?} -> {output_state:?} (deliberate stop: {})",
+                        s.stopped_deliberately
+                    );
                     s.streaming = active;
                     if active {
                         s.stream_timecode = timecode;
@@ -351,10 +445,7 @@ async fn handle_obs_message(
                 "ExitStarted" => {
                     info!("OBS is shutting down");
                     let mut s = state.write().await;
-                    s.connected = false;
-                    s.streaming = false;
-                    s.recording = false;
-                    s.stream_timecode = None;
+                    s.mark_disconnected();
                     let _ = ws_tx.send(s.to_ws_event());
                 }
                 _ => {
@@ -486,6 +577,7 @@ mod tests {
             streaming: true,
             recording: false,
             stream_timecode: Some("00:01:23".to_string()),
+            ..Default::default()
         };
         let event = state.to_ws_event();
         match event {
@@ -587,6 +679,138 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_stop_is_deliberate_only_after_stopping_started_or_reconnected() {
+        let f = stopped_deliberately_after;
+        // A user / API stop: always through STOPPING.
+        assert!(f(Some(OUTPUT_STOPPING), Some(OUTPUT_STOPPED), false));
+        // STOPPED with no STOPPING is OBS stopping on an error (an encoder
+        // failure, no reconnect), or giving up its reconnects: an outage.
+        for prev in [
+            OUTPUT_STARTED,
+            OUTPUT_RECONNECTED,
+            "OBS_WEBSOCKET_OUTPUT_RECONNECTING",
+        ] {
+            assert!(!f(Some(prev), Some(OUTPUT_STOPPED), false), "{prev}");
+        }
+        // Nothing known before (fresh connection) or a failed start.
+        assert!(!f(None, Some(OUTPUT_STOPPED), false));
+        assert!(!f(
+            Some("OBS_WEBSOCKET_OUTPUT_STARTING"),
+            Some(OUTPUT_STOPPED),
+            false
+        ));
+        // A repeated STOPPED keeps the verdict either way.
+        assert!(f(Some(OUTPUT_STOPPED), Some(OUTPUT_STOPPED), true));
+        assert!(!f(Some(OUTPUT_STOPPED), Some(OUTPUT_STOPPED), false));
+        // Not stopped (yet), or an event without a state: never deliberate.
+        assert!(!f(Some(OUTPUT_STARTED), Some(OUTPUT_STOPPING), true));
+        assert!(!f(Some(OUTPUT_STOPPED), Some(OUTPUT_STARTED), true));
+        assert!(!f(Some(OUTPUT_STOPPING), None, true));
+    }
+
+    fn stream_state(output_state: &str, active: bool) -> serde_json::Value {
+        serde_json::json!({
+            "op": 5,
+            "d": {
+                "eventType": "StreamStateChanged",
+                "eventData": { "outputActive": active, "outputState": output_state }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_user_stop_is_recorded_as_deliberate_and_a_restart_clears_it() {
+        let state = Arc::new(RwLock::new(ObsState {
+            connected: true,
+            ..Default::default()
+        }));
+        let (ws_tx, _) = broadcast::channel(16);
+        for (st, active) in [
+            (OUTPUT_STARTED, true),
+            (OUTPUT_STOPPING, false),
+            (OUTPUT_STOPPED, false),
+        ] {
+            handle_obs_message(&stream_state(st, active), &state, &ws_tx).await;
+        }
+        {
+            let s = state.read().await;
+            assert!(s.stopped_deliberately);
+            assert_eq!(s.output_state.as_deref(), Some(OUTPUT_STOPPED));
+            assert!(!s.streaming);
+        }
+        handle_obs_message(
+            &stream_state("OBS_WEBSOCKET_OUTPUT_STARTING", false),
+            &state,
+            &ws_tx,
+        )
+        .await;
+        assert!(!state.read().await.stopped_deliberately);
+    }
+
+    #[test]
+    fn the_stop_instant_is_the_first_deliberate_stopped_and_goes_with_the_verdict() {
+        let t0 = std::time::Instant::now();
+        let t1 = t0 + Duration::from_secs(5);
+        let mut s = ObsState {
+            connected: true,
+            ..Default::default()
+        };
+        s.set_output_state(Some(OUTPUT_STARTED), t0);
+        assert_eq!(s.stopped_at, None);
+        s.set_output_state(Some(OUTPUT_STOPPING), t0);
+        assert_eq!(s.stopped_at, None, "stopping is not stopped yet");
+        s.set_output_state(Some(OUTPUT_STOPPED), t0);
+        assert!(s.stopped_deliberately);
+        assert_eq!(s.stopped_at, Some(t0));
+        s.set_output_state(Some(OUTPUT_STOPPED), t1);
+        assert_eq!(
+            s.stopped_at,
+            Some(t0),
+            "a repeated STOPPED keeps the instant"
+        );
+        s.set_output_state(Some("OBS_WEBSOCKET_OUTPUT_STARTING"), t1);
+        assert_eq!((s.stopped_deliberately, s.stopped_at), (false, None));
+        s.stopped_at = Some(t0);
+        s.stopped_deliberately = true;
+        s.mark_disconnected();
+        assert_eq!(s.stopped_at, None);
+    }
+
+    #[tokio::test]
+    async fn giving_up_reconnects_is_not_a_deliberate_stop() {
+        let state = Arc::new(RwLock::new(ObsState {
+            connected: true,
+            ..Default::default()
+        }));
+        let (ws_tx, _) = broadcast::channel(16);
+        for (st, active) in [
+            (OUTPUT_STARTED, true),
+            ("OBS_WEBSOCKET_OUTPUT_RECONNECTING", false),
+            (OUTPUT_STOPPED, false),
+        ] {
+            handle_obs_message(&stream_state(st, active), &state, &ws_tx).await;
+        }
+        assert!(!state.read().await.stopped_deliberately);
+    }
+
+    #[tokio::test]
+    async fn obs_exiting_forgets_the_deliberate_stop() {
+        let state = Arc::new(RwLock::new(ObsState {
+            connected: true,
+            output_state: Some(OUTPUT_STOPPED.to_string()),
+            stopped_deliberately: true,
+            ..Default::default()
+        }));
+        let (ws_tx, _) = broadcast::channel(16);
+        let exit =
+            serde_json::json!({ "op": 5, "d": { "eventType": "ExitStarted", "eventData": {} } });
+        handle_obs_message(&exit, &state, &ws_tx).await;
+        let s = state.read().await;
+        assert!(!s.stopped_deliberately);
+        assert_eq!(s.output_state, None);
+    }
+
     #[tokio::test]
     async fn handle_record_state_changed() {
         let state = Arc::new(RwLock::new(ObsState {
@@ -616,6 +840,7 @@ mod tests {
             streaming: true,
             recording: true,
             stream_timecode: Some("00:01:00".to_string()),
+            ..Default::default()
         }));
         let (ws_tx, _) = broadcast::channel(16);
 

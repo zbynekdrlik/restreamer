@@ -46,6 +46,7 @@ auto-load on their `paths:` — you do not invoke those.
 - restreamer.log daily roll + 14-day retention (fixed live file name) → `.claude/rules/log-retention.md` (auto)
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 - control-room tabs (box-hosted Chrome, per-destination YT profiles, CDP screencast relay) → `.claude/rules/control-rooms.md` (auto)
+- deliberate OBS stop = end of program, not outage (obs-websocket outputState, `/api/source`, `ended` mode, #408) → `.claude/rules/deliberate-obs-stop.md` (auto)
 - stress/concurrency tests on starved CI runners (count-based stop, runner-scaled liveness cap, injection proofs) → `.claude/rules/load-robust-tests.md` (auto)
 
 ## Project Structure

@@ -76,6 +76,9 @@ pub fn launch_args(user_data: &Path, port: u16, windows: bool) -> Vec<String> {
         "--disable-backgrounding-occluded-windows".into(),
         "--disable-renderer-backgrounding".into(),
         "--disable-background-timer-throttling".into(),
+        // #407: hiding a room (`frozen` then `active`) must not close its
+        // WebSockets; without this a freeze closes every one of the page.
+        "--disable-back-forward-cache-for-web-sockets".into(),
         format!("--window-size={WINDOW_W},{WINDOW_H}"),
     ];
     if windows {

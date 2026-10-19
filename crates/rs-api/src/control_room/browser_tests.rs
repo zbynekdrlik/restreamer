@@ -37,6 +37,10 @@ fn launch_args_pin_profile_dir_port_and_hidden_window() {
 
     let lin = launch_args(ud, 9231, false);
     assert!(lin.contains(&"--password-store=basic".to_string()));
+    // #407: hiding a room must not close its WebSockets, on both systems.
+    for a in [&win, &lin] {
+        assert!(a.contains(&"--disable-back-forward-cache-for-web-sockets".to_string()));
+    }
     assert!(
         !lin.iter()
             .any(|a| a.starts_with("--window-position=-32000"))

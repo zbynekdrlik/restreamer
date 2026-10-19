@@ -29,6 +29,14 @@ pub struct FakeState {
     pub refuse_attach: Vec<String>,
     /// Every page socket asked for, in order.
     pub attaches: Vec<String>,
+    /// target id -> the `document.visibilityState` a `Runtime.evaluate` of
+    /// it reports (#407); unset = the reply carries no value. Like Chrome, a
+    /// `frozen` lifecycle hides a tracked page, and `Page.bringToFront` or
+    /// focus emulation shows it.
+    pub visibility: HashMap<String, String>,
+    /// When set, a `Page.bringToFront` reply waits for this gate (#407: the
+    /// relay hides the other rooms only after that reply).
+    pub front_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Clone)]
@@ -147,12 +155,33 @@ async fn serve_socket(mut ws: WebSocket, state: Arc<Mutex<FakeState>>, path: Str
         let result = {
             let mut s = state.lock().unwrap();
             s.requests.push((path.clone(), req.clone()));
+            let shown = match req["method"].as_str() {
+                Some("Page.setWebLifecycleState") if req["params"]["state"] == "frozen" => {
+                    Some("hidden")
+                }
+                Some("Page.bringToFront") => Some("visible"),
+                Some("Emulation.setFocusEmulationEnabled") if req["params"]["enabled"] == true => {
+                    Some("visible")
+                }
+                _ => None,
+            };
+            if let (Some(v), Some(cur)) = (shown, s.visibility.get_mut(&id)) {
+                *cur = v.to_string();
+            }
             match req["method"].as_str() {
                 Some("Target.getTargets") => json!({"targetInfos": s.targets}),
                 Some("Target.closeTarget") => {
                     let id = req["params"]["targetId"].clone();
                     s.targets.retain(|t| t["targetId"] != id);
                     json!({"success": true})
+                }
+                Some("Runtime.evaluate")
+                    if req["params"]["expression"] == "document.visibilityState" =>
+                {
+                    match s.visibility.get(&id) {
+                        Some(v) => json!({"result": {"type": "string", "value": v}}),
+                        None => json!({}),
+                    }
                 }
                 Some("Network.getCookies") => {
                     let names = s.cookies.get(&id).cloned().unwrap_or_default();
@@ -161,6 +190,12 @@ async fn serve_socket(mut ws: WebSocket, state: Arc<Mutex<FakeState>>, path: Str
                 _ => json!({}),
             }
         };
+        let gate = (req["method"] == "Page.bringToFront")
+            .then(|| state.lock().unwrap().front_gate.clone())
+            .flatten();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         let reply = json!({"id": req["id"], "result": result});
         if ws
             .send(Message::Text(reply.to_string().into()))

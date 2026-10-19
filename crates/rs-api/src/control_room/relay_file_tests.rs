@@ -189,6 +189,7 @@ async fn a_file_goes_into_the_chooser_then_a_second_one_is_dropped() {
                         "https://start/".into(),
                         Arc::new(|_| {}),
                         dir,
+                        super::ShownTabs::default(),
                     )
                 })
             }
@@ -336,6 +337,7 @@ async fn a_navigation_ends_a_pending_file_chooser() {
                         "https://start/".into(),
                         Arc::new(|_| {}),
                         dir,
+                        super::ShownTabs::default(),
                     )
                 })
             }

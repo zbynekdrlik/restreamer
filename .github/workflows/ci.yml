@@ -3275,7 +3275,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 145 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + up to 60min #349 rig-lease wait + margin
+    timeout-minutes: 157 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + #408 deliberate-stop gate up to 12min + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -6179,6 +6179,93 @@ jobs:
           } else {
             throw "FAILED: Second health check -- YouTube not receiving stream after resilience tests ($maxRetries attempts)."
           }
+
+      - name: "GATE: a deliberate OBS stop ends every endpoint without rescue (#408)"
+        if: success()
+        shell: powershell
+        timeout-minutes: 12
+        run: |
+          # #408: the operator stopping the stream in OBS is the end of the
+          # program, not an outage. Restreamer's own obs-websocket client sees
+          # the output go STOPPING -> STOPPED and announces the last chunk to
+          # the VPS (host row source_stopped_deliberately). Every endpoint plays
+          # its buffer out to that chunk and stops sending (endpoint_source_ended)
+          # instead of entering rescue: NO rescue_activated, the row that is the
+          # Discord outage alert. When OBS publishes again, every endpoint
+          # resumes on the next chunk (endpoint_source_resumed).
+          # The stop and the restart are the canonical checked Republish (#374):
+          # the dead air must outlast the deepest cache, so every endpoint
+          # reaches the end before OBS comes back.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+          $appStatus = Invoke-RestMethod -Uri "$base/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+
+          $obs = Invoke-RestMethod -Uri "$base/api/v1/obs/status" -TimeoutSec 10
+          if (-not $obs.connected) {
+            throw "FAILED (#408): Restreamer's own obs-websocket client is not connected, so a deliberate stop cannot be told from an outage"
+          }
+          $hostSt = Invoke-RestMethod -Uri "$base/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $aliases = @($hostSt.endpoint_details | ForEach-Object { $_.alias })
+          if ($aliases.Count -lt 1) { throw "FAILED (#408): no endpoint attached to event $eventId" }
+          $maxDelay = ($hostSt.endpoint_details | Measure-Object -Property chunk_delay_secs -Maximum).Maximum
+          if (-not $maxDelay -or $maxDelay -lt 0) { $maxDelay = 0 }
+          $gap = 210
+          if (([double]$maxDelay + 45) -gt $gap) {
+            throw "FAILED (#408): the deepest cache (${maxDelay}s) does not drain inside the ${gap}s of dead air; raise -GapSeconds"
+          }
+          Write-Host "endpoints: [$($aliases -join ', ')], deepest cache ${maxDelay}s, dead air ${gap}s"
+
+          $sinceIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+          function Get-AuditRows([string]$action) {
+            $r = Invoke-RestMethod -Uri "$base/api/v1/audit?event_id=$eventId&action=$action&since=$sinceIso&limit=1000" -TimeoutSec 30
+            if ($r.rows) { return @($r.rows) } elseif ($r.items) { return @($r.items) } else { return @() }
+          }
+
+          Write-Host "Deliberate OBS stop, ${gap}s of dead air, then the checked restart..."
+          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 210
+          if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish for the #408 gate (see the ::error:: line above)" }
+
+          # @(): PowerShell 5.1 unrolls a one-row result into a PSCustomObject,
+          # which has no .Count (run 39164865884 missed the one real row).
+          $announced = @(Get-AuditRows "source_stopped_deliberately")
+          if ($announced.Count -lt 1) {
+            throw "FAILED (#408): no source_stopped_deliberately row: the host never announced the end of the source to the VPS"
+          }
+          Write-Host "host announced the end at chunk $($announced[0].detail.ended_at_chunk_id)"
+
+          $ended = @(Get-AuditRows "endpoint_source_ended" | ForEach-Object { $_.endpoint } | Sort-Object -Unique)
+          $notEnded = @($aliases | Where-Object { $ended -notcontains $_ })
+          if ($notEnded.Count -gt 0) {
+            throw "FAILED (#408): these endpoints never stopped sending after the deliberate OBS stop: $($notEnded -join ', ')"
+          }
+          Write-Host "OK: every endpoint played out and stopped sending: [$($ended -join ', ')]"
+
+          $deadline = (Get-Date).AddSeconds(120)
+          do {
+            $resumed = @(Get-AuditRows "endpoint_source_resumed" | ForEach-Object { $_.endpoint } | Sort-Object -Unique)
+            $waiting = @($aliases | Where-Object { $resumed -notcontains $_ })
+            if ($waiting.Count -eq 0) { break }
+            Write-Host "waiting for [$($waiting -join ', ')] to resume..."
+            Start-Sleep -Seconds 5
+          } while ((Get-Date) -lt $deadline)
+          if ($waiting.Count -gt 0) {
+            throw "FAILED (#408): these endpoints did not resume after OBS published again: $($waiting -join ', ')"
+          }
+
+          $rescue = @(Get-AuditRows "rescue_activated")
+          if ($rescue.Count -gt 0) {
+            $who = @($rescue | ForEach-Object { $_.endpoint } | Sort-Object -Unique) -join ', '
+            throw "FAILED (#408): rescue_activated on [$who] around a deliberate OBS stop: the outage clip and the outage alert went out"
+          }
+          Write-Host "=== #408 GATE PASSED: deliberate stop -> every endpoint ended, 0 rescue, every endpoint resumed ==="
+
+      - name: "Program-audio breach check (#379)"
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          . scripts/ci/program-audio-guard.ps1
+          Assert-NoProgramAudioBreach
 
       - name: Stop OBS stream
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'

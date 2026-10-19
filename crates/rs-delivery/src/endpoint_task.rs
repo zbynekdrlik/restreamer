@@ -374,6 +374,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &mut stop_rx,
                             &stats,
                             &buffer_state,
+                            last_delivered_chunk_id,
                             crate::fast_keepalive::keepalive_escalate_after(
                                 ep_cfg.is_fast,
                                 crate::rescue::RESCUE_STALL_THRESHOLD_SECS,
@@ -393,6 +394,25 @@ async fn consumer_task<P: OutputProcessFactory>(
                             c
                         }
                         KeepaliveOutcome::Stop => break,
+                        // #408: OBS stopped on purpose and this endpoint
+                        // delivered the last chunk: stop sending until the
+                        // source is back, then go on with a fresh session.
+                        KeepaliveOutcome::SourceEnded(end) => {
+                            let Some(c) = crate::source_end::idle_until_resume(
+                                &push_target, end, &mut rx, &mut stop_rx, &stats, &audit_ring, &mut rust_pusher,
+                            )
+                            .await
+                            else {
+                                break;
+                            };
+                            reset_after_rescue(&mut flv_normalizer, &mut last_chunk_bytes, &mut rust_telemetry);
+                            // SAME buffer bookkeeping as the Chunk arm.
+                            let dur = c.duration_ms.max(0) as u64;
+                            let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                            buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                            last_delivered_chunk_id = c.chunk_id;
+                            c
+                        }
                         KeepaliveOutcome::EscalateToRescue => {
                             // C1 (#251) / #124: sustained outage on a rust
                             // endpoint (fast OR non-fast). Keepalive could not

@@ -40,8 +40,16 @@ pub fn summarize_delivery(cached: &CachedDeliveryStatus) -> (ComponentStatus, Co
         )
     });
 
+    // #408: every endpoint played the source out after a deliberate OBS stop.
+    let all_ended = cached
+        .endpoints
+        .iter()
+        .all(|e| matches!(e.lifecycle, EndpointLifecycle::Ended));
+
     let endpoint_state = if total == 0 {
         "starting"
+    } else if all_ended {
+        "ended"
     } else if any_attention {
         "attention"
     } else if any_recovering {
@@ -181,6 +189,28 @@ mod tests {
             ],
         ));
         assert_eq!(e.state, "attention");
+    }
+
+    /// #408: all endpoints ended after a deliberate OBS stop is its own calm
+    /// state; one still playing its buffer out keeps the normal rollup.
+    #[test]
+    fn all_ended_rolls_up_to_ended() {
+        let (e, _) = summarize_delivery(&cached(
+            "delivering",
+            vec![
+                ep("YT", true, EndpointLifecycle::Ended),
+                ep("FB", true, EndpointLifecycle::Ended),
+            ],
+        ));
+        assert_eq!(e.state, "ended");
+        let (e, _) = summarize_delivery(&cached(
+            "delivering",
+            vec![
+                ep("YT", true, EndpointLifecycle::Live),
+                ep("FB", true, EndpointLifecycle::Ended),
+            ],
+        ));
+        assert_eq!(e.state, "live");
     }
 
     #[test]

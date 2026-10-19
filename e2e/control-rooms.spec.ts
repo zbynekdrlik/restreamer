@@ -364,6 +364,7 @@ test("a popup shown in a room offers the way back to the page", async ({ page, r
   await send({ t: "url", url: "https://accounts.google.com/v3/signin/challenge/pwd" });
   await send({ t: "popup", open: true });
   await expect(page.getByTestId("cr-popup-bar")).toBeVisible();
+  await expect(page.getByTestId("cr-room-status")).toHaveText("vyskakovacie okno stránky");
   await expect(page.getByTestId("cr-url")).toHaveValue("https://accounts.google.com/v3/signin/challenge/pwd");
 
   await page.getByTestId("cr-popup-close").click();
@@ -374,6 +375,8 @@ test("a popup shown in a room offers the way back to the page", async ({ page, r
   await send({ t: "url", url: "https://studio.youtube.com/channel/UC1/livestreaming" });
   await expect(page.getByTestId("cr-popup-bar")).toHaveCount(0);
   await expect(page.getByTestId("cr-url")).toHaveValue("https://studio.youtube.com/channel/UC1/livestreaming");
+  // The status leaves the popup state too (seen stale on stream-pp, 0.29.48).
+  await expect(page.getByTestId("cr-room-status")).toHaveText("pripojené");
 
   expect(unexpected(consoleMessages)).toEqual([]);
 });

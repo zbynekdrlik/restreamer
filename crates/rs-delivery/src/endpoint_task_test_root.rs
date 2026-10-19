@@ -24,5 +24,7 @@ mod resend_tests;
 mod rust_push_tests;
 #[path = "endpoint_task_service_type_tests.rs"]
 mod service_type_tests;
+#[path = "source_end_loop_tests.rs"]
+mod source_end_loop_tests;
 #[path = "endpoint_task_tests.rs"]
 mod tests;

@@ -519,6 +519,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                -1, // #408: no source end announced
                 std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
@@ -595,6 +596,7 @@ mod fast_upload_gap_regression {
         let chunk = match returned {
             KeepaliveOutcome::Chunk(c) => c,
             KeepaliveOutcome::Stop => panic!("keepalive returned Stop, expected resumed chunk"),
+            KeepaliveOutcome::SourceEnded(_) => panic!("no source end was announced"),
             KeepaliveOutcome::EscalateToRescue => panic!(
                 "keepalive must NOT escalate while producer_active=true (trickle jitter must stay freeze-only)"
             ),
@@ -663,6 +665,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                -1, // #408: no source end announced
                 std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
@@ -698,6 +701,7 @@ mod fast_upload_gap_regression {
         let chunk = match returned {
             KeepaliveOutcome::Chunk(c) => c,
             KeepaliveOutcome::Stop => panic!("keepalive returned Stop, expected first chunk"),
+            KeepaliveOutcome::SourceEnded(_) => panic!("no source end was announced"),
             KeepaliveOutcome::EscalateToRescue => panic!(
                 "keepalive must NOT escalate while producer_active=true (no-first-chunk wait must stay pure-wait)"
             ),
@@ -767,6 +771,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                -1, // #408: no source end announced
                 anchor,
             )
             .await
@@ -822,6 +827,7 @@ mod fast_upload_gap_regression {
                 "non-fast bridge returned Stop — it must escalate to the \
                  fresh-reconnect rescue once the stall crosses the anchor"
             ),
+            KeepaliveOutcome::SourceEnded(_) => panic!("no source end was announced"),
         }
     }
 
@@ -855,6 +861,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats,
                 &buffer_state_task,
+                -1, // #408: no source end announced
                 Duration::from_millis(2500),
             )
             .await
@@ -871,6 +878,7 @@ mod fast_upload_gap_regression {
             KeepaliveOutcome::EscalateToRescue => {}
             KeepaliveOutcome::Chunk(_) => panic!("no chunk was ever sent"),
             KeepaliveOutcome::Stop => panic!("no stop was ever sent"),
+            KeepaliveOutcome::SourceEnded(_) => panic!("no source end was announced"),
         }
     }
 

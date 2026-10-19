@@ -9,7 +9,14 @@ paths:
 # VPS `delivery_mode` in CI gates
 
 Each endpoint's `delivery_mode` comes from the VPS: `warmup`, `normal`, `refilling`,
-`rescue`, `recovering`.
+`rescue`, `recovering`, `ended`.
+
+- **`ended` is a deliberate OBS stop, not an outage** (#408). The endpoint played its
+  buffer out to the end the host announced, then stopped sending. Every E2E job's
+  teardown OBS stop now drains into `ended`, not into rescue. A gate that counts
+  `rescue_activated` after an OBS `-Action Stop`/`Republish` must expect none once
+  the buffer drained; outages are simulated by S3 blocks or killing Restreamer.
+  See `.claude/rules/deliberate-obs-stop.md`.
 
 - **`refilling` is NORMAL delivery** (#296). A buffered (non-fast) endpoint whose
   cushion is below its 120 s target delivers slightly slower until it is back.
