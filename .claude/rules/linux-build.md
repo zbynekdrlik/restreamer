@@ -42,10 +42,15 @@ paths:
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
 - **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
-  sudo there. Copy the release `.deb` to `/tmp/`; the camera-box session (which has the
-  sudo path) runs `sudo dpkg -i` + `systemctl --user daemon-reload` (the package ships
-  the unit file) + `systemctl --user restart restreamer`. Then verify the version on the
-  dashboard and `dpkg-query -W restreamer` (0.29.38, 2026-10-13).
+  sudo there. The owner gave this session the sudo password on 2026-10-19 (#323). It is
+  the dev1 key file `stream-pp-sudo` in the secrets store, and it is used only through
+  `airuleset.py secret exec --file <it> --env PPPW -- bash <script>`. The script pipes
+  `${PPPW%$'\n'}` into `ssh newlevel@10.76.8.204 "sudo -S -k -p '' dpkg -i /tmp/<deb>"`
+  (the file ends in a newline, so strip it). Never read the file inline; a hook blocks
+  it. Then run `systemctl --user daemon-reload` (the package ships the unit file) and
+  `systemctl --user restart restreamer` through the `linux-stream-pp` MCP. Verify the
+  version on the dashboard (`http://10.76.8.204:8910/`), `dpkg-query -W restreamer`,
+  and `wmctrl -l` (the `Restreamer Dashboard` window, with `DISPLAY=:0`) (0.29.51).
   The repo is public, so stage the `.deb` with `curl -sSL -o /tmp/<deb>
   https://github.com/zbynekdrlik/restreamer/releases/download/restreamer-v<X.Y.Z>/<deb>`
   run on the box (MCP Shell), and compare its sha256 with a `gh release download` copy
