@@ -18,5 +18,5 @@ mod www_dir;
 
 pub use log_capture::LogCaptureLayer;
 pub use orchestrator::ServiceCore;
-pub use refused_subscribes::{RefusedSubscribes, SUMMARY_INTERVAL};
+pub use refused_subscribes::RefusedSubscribes;
 pub use shutdown::ShutdownCoordinator;

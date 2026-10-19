@@ -2,6 +2,7 @@
 paths:
   - "src-tauri/src/lib.rs"
   - "crates/rs-runtime/src/daily_log*.rs"
+  - "crates/rs-runtime/src/refused_subscribes*.rs"
 ---
 
 # restreamer.log retention (#368)
@@ -43,3 +44,24 @@ from DB timestamps.
   day it covers, and would be a new dependency for ~150 tested lines.
 - Tests drive it with an injected clock (`open_with_clock`) and set a file's
   mtime with `File::set_modified`.
+
+## Dropping ONE noisy xiu line (#404)
+
+xiu (rtmp, streamhub) logs through the `log` crate. tracing-log turns each
+record into an event whose metadata target is `log`, with the real target in
+the `log.target` field and the text in `message`. An `EnvFilter` directive
+works per target only, so `streamhub=off` would hide every streamhub error.
+
+To drop one specific line everywhere (stdout, the file, the dashboard
+capture), use a layer whose `event_enabled` returns false for it:
+`rs_runtime::RefusedSubscribes` is the example. It drops streamhub's
+`event_loop Subscribe error: no app or stream name` (camera-box's headphone
+monitor probing an unpublished stream every ~3 s) and logs a count at INFO
+every 60 s. It is wired into src-tauri's `init_tracing` only: that is the
+shipped binary on both boxes. `rs-service`'s `restreamer-service` binary is
+not shipped (install.ps1 and CI only remove old copies), and its untested
+`init_*_tracing` would only add MISSED mutants. Test such a layer with a real
+bridged record:
+`tracing_log::format_trace(&log::Record::builder()...build())` under
+`tracing::subscriber::with_default`, built in ONE statement so the
+`format_args!` temporary lives long enough (E0716 otherwise).

@@ -9,16 +9,22 @@
 //! INFO, so the fact stays visible.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use tracing::{Event, Subscriber};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
+/// The `log` target xiu's streamhub crate logs under.
+const STREAMHUB_TARGET: &str = "streamhub";
+/// streamhub's message for a subscribe to a stream nobody publishes.
+const REFUSAL_MESSAGE: &str = "event_loop Subscribe error: no app or stream name";
+
 /// How often the refusal count is logged.
-pub const SUMMARY_INTERVAL: Duration = Duration::from_secs(60);
+const SUMMARY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A global filter layer: drops streamhub's "no publisher" refusal and
 /// counts it. Clones share the count.
@@ -28,14 +34,16 @@ pub struct RefusedSubscribes {
 }
 
 impl RefusedSubscribes {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// The summary line for the refusals counted since the last call, or
     /// `None` when there were none. Resets the count.
     pub fn take_summary(&self) -> Option<String> {
-        None
+        let refused = self.refused.swap(0, Ordering::Relaxed);
+        (refused > 0).then(|| {
+            format!(
+                "{refused} RTMP subscribes refused since the last report: \
+                 nothing publishes the stream (#404)"
+            )
+        })
     }
 
     /// Starts the thread that logs the summary at INFO every
@@ -51,18 +59,66 @@ impl RefusedSubscribes {
     /// its own thread. The thread ends when `emit` returns false.
     fn spawn_summary(
         &self,
-        _every: Duration,
-        _emit: impl FnMut(String) -> bool + Send + 'static,
+        every: Duration,
+        mut emit: impl FnMut(String) -> bool + Send + 'static,
     ) -> std::io::Result<JoinHandle<()>> {
+        let this = self.clone();
         std::thread::Builder::new()
             .name("refused-subscribes".into())
-            .spawn(|| {})
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(every);
+                    if let Some(line) = this.take_summary()
+                        && !emit(line)
+                    {
+                        return;
+                    }
+                }
+            })
     }
 }
 
 impl<S: Subscriber> Layer<S> for RefusedSubscribes {
-    fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
+    /// Returning false here drops the event for the WHOLE stack (stdout, the
+    /// log file, the dashboard capture), not just for this layer.
+    fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
+        if *event.metadata().level() != Level::ERROR {
+            return true;
+        }
+        let mut fields = RefusalFields::default();
+        event.record(&mut fields);
+        // A `log` record arrives with the metadata target "log" and its real
+        // target in the `log.target` field (tracing-log).
+        let target = fields
+            .log_target
+            .as_deref()
+            .unwrap_or(event.metadata().target());
+        if target == STREAMHUB_TARGET && fields.message == REFUSAL_MESSAGE {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         true
+    }
+}
+
+/// The two fields of an event the refusal check reads.
+#[derive(Default)]
+struct RefusalFields {
+    message: String,
+    log_target: Option<String>,
+}
+
+impl Visit for RefusalFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "log.target" {
+            self.log_target = Some(value.to_owned());
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
     }
 }
 

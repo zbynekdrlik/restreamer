@@ -31,7 +31,7 @@ const REFUSAL: &str = "event_loop Subscribe error: no app or stream name";
 
 #[test]
 fn the_no_publisher_refusal_is_dropped_and_counted() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     assert_eq!(
         bridge(&refused, "streamhub", log::Level::Error, REFUSAL),
         0,
@@ -47,7 +47,7 @@ fn the_no_publisher_refusal_is_dropped_and_counted() {
 
 #[test]
 fn other_streamhub_errors_still_pass() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     assert_eq!(
         bridge(
             &refused,
@@ -62,21 +62,21 @@ fn other_streamhub_errors_still_pass() {
 
 #[test]
 fn the_same_message_from_another_target_passes() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     assert_eq!(bridge(&refused, "rtmp", log::Level::Error, REFUSAL), 1);
     assert_eq!(refused.take_summary(), None);
 }
 
 #[test]
 fn the_same_message_below_error_passes() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     assert_eq!(bridge(&refused, "streamhub", log::Level::Warn, REFUSAL), 1);
     assert_eq!(refused.take_summary(), None);
 }
 
 #[test]
 fn a_native_tracing_event_with_the_streamhub_target_is_dropped_too() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     let buffer = LogBuffer::new(100);
     let subscriber = tracing_subscriber::registry()
         .with(refused.clone())
@@ -92,7 +92,7 @@ fn a_native_tracing_event_with_the_streamhub_target_is_dropped_too() {
 
 #[test]
 fn the_summary_counts_since_the_last_report_and_resets() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     assert_eq!(refused.take_summary(), None, "no refusal yet");
     for _ in 0..3 {
         bridge(&refused, "streamhub", log::Level::Error, REFUSAL);
@@ -108,7 +108,7 @@ fn the_summary_counts_since_the_last_report_and_resets() {
 
 #[test]
 fn the_summary_thread_reports_on_its_interval() {
-    let refused = RefusedSubscribes::new();
+    let refused = RefusedSubscribes::default();
     bridge(&refused, "streamhub", log::Level::Error, REFUSAL);
     bridge(&refused, "streamhub", log::Level::Error, REFUSAL);
     let (tx, rx) = std::sync::mpsc::channel();
