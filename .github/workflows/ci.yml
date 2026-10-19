@@ -2439,6 +2439,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
+          if (-not (Test-Path $ffmpegPath)) {
+            throw "FAILED: ffmpeg not found at $ffmpegPath"
+          }
           $streamDuration = 600  # 10 minutes
 
           # Clear any stale snapshot from a prior run -- self-hosted runner
