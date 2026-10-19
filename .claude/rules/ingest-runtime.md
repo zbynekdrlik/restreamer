@@ -95,8 +95,10 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   - `RtmpServer` sets `PLAY_QUEUE_LIMIT_FRAMES` (2000) on every session. A
     player past it ends with `PlayQueueOverflow`; it is logged on the
     `RTMP session ended` line.
-  - The limit stays above the cached GOP that the hub queues at subscribe:
-    up to ~18 s at 4K60.
+  - The hub replays the GOP so far into a new player's queue BEFORE it
+    answers the subscription. xiu records that count (`play_replayed`), and
+    those frames count on top of the limit. Without that, a long keyframe
+    interval cut every new player on its first frame.
   - **The queue check alone does not catch a player that stops reading.**
     The write to it blocks forever, so the loop never returns to the check
     while the hub keeps queueing. Every play write is bounded by
@@ -118,7 +120,13 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
     reading the player's socket. Reading unblocks a stalled write, which is
     how the first version passed while the stall case was still broken.
   - The queue-limit test paces its reader at ~1 MB/s (half the stream), so
-    no write stalls. The stall test never reads before the verdict.
+    no write stalls, and it asserts the player read >= 2 MB before the cut.
+    The stall test never reads before the verdict. Only it uses a 4 KB
+    receive buffer: a tiny buffer also slows a "slow" reader to ~200 KB/s.
+  - Every test publishes its own stream name, and a verdict counts only with
+    `stream=<name>,` in the line. The captured log is global to the binary,
+    and tests run in parallel.
+  - The mid-GOP test (10 s GOP, joins 6 s in, limit 50) must NOT be cut.
   - The whole-function mutants of `serve`/`accept_loop` are killed only by
     these integration tests: never run that crate's mutants with `-- --lib`.
 
