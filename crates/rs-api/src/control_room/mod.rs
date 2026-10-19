@@ -103,7 +103,8 @@ pub fn remember_url(url: &str) -> bool {
     match host {
         // `/reauth` is a verification popup's hand-back page (#405).
         "studio.youtube.com" => !path.starts_with("/reauth"),
-        "www.facebook.com" | "facebook.com" | "web.facebook.com" => {
+        // A page's Live Producer lives on business.facebook.com.
+        "www.facebook.com" | "facebook.com" | "web.facebook.com" | "business.facebook.com" => {
             path.starts_with("/live/producer")
         }
         _ => false,
