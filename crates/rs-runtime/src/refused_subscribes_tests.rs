@@ -125,7 +125,14 @@ fn the_summary_thread_reports_on_its_interval() {
         line,
         "2 RTMP subscribes refused since the last report: nothing publishes the stream (#404)"
     );
-    handle
-        .join()
-        .expect("the thread ends when emit returns false");
+    // Bounded: a bare `join()` would hang the test, not fail it, if the
+    // thread kept running.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        handle.is_finished(),
+        "the thread ends when emit returns false"
+    );
 }
