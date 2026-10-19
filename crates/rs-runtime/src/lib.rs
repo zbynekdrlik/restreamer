@@ -10,6 +10,7 @@ pub mod ingest_runtime;
 mod inpoint_service;
 mod log_capture;
 mod orchestrator;
+mod refused_subscribes;
 pub mod rtmp_bind;
 mod shutdown;
 pub mod stall_detector;
@@ -17,4 +18,5 @@ mod www_dir;
 
 pub use log_capture::LogCaptureLayer;
 pub use orchestrator::ServiceCore;
+pub use refused_subscribes::{RefusedSubscribes, SUMMARY_INTERVAL};
 pub use shutdown::ShutdownCoordinator;
