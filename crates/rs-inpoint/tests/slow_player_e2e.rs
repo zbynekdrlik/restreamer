@@ -14,6 +14,7 @@
     reason = "test code: #[tokio::test] expands to Runtime::block_on and the player socket is cloned with std; never on the ingest runtime (#368 clippy.toml)"
 )]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -62,16 +63,17 @@ impl std::io::Write for LogSink {
     }
 }
 
-/// Wait until the server logs a session end that contains `reason`.
-async fn session_ended_with(reason: &str, within: Duration) -> bool {
+/// Wait until the server logs that a session on `stream` ended with
+/// `reason` (any reason for ""). Every test publishes its own stream name,
+/// so tests running in parallel never read each other's verdicts.
+async fn session_ended_with(stream: &str, reason: &str, within: Duration) -> bool {
     let log = server_log();
+    let session = format!("stream={stream},");
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
-        let ended = log
-            .lock()
-            .unwrap()
-            .lines()
-            .any(|l| l.contains("RTMP session ended") && l.contains(reason));
+        let ended = log.lock().unwrap().lines().any(|l| {
+            l.contains("RTMP session ended") && l.contains(&session) && l.contains(reason)
+        });
         if ended {
             return true;
         }
@@ -96,9 +98,10 @@ impl Drop for Publisher {
     }
 }
 
-/// A constant ~16 Mbit/s 720p30 stream (x264 CBR with filler), so a player
-/// that does not keep up falls behind within seconds.
-fn spawn_cbr_publisher(port: u16, duration_secs: u32) -> Publisher {
+/// A constant ~16 Mbit/s 720p30 stream (x264 CBR with filler) with a
+/// keyframe every `gop` frames, so a player that does not keep up falls
+/// behind within seconds.
+fn spawn_cbr_publisher(port: u16, duration_secs: u32, stream: &str, gop: u32) -> Publisher {
     let child = std::process::Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -120,7 +123,7 @@ fn spawn_cbr_publisher(port: u16, duration_secs: u32) -> Publisher {
             "-tune",
             "zerolatency",
             "-g",
-            "30",
+            &gop.to_string(),
             "-bf",
             "0",
             "-b:v",
@@ -139,7 +142,7 @@ fn spawn_cbr_publisher(port: u16, duration_secs: u32) -> Publisher {
             "64k",
             "-f",
             "flv",
-            &format!("rtmp://127.0.0.1:{port}/live/test"),
+            &format!("rtmp://127.0.0.1:{port}/live/{stream}"),
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -150,6 +153,7 @@ fn spawn_cbr_publisher(port: u16, duration_secs: u32) -> Publisher {
 
 struct Rig {
     port: u16,
+    stream: &'static str,
     shutdown: tokio::sync::broadcast::Sender<()>,
     server: tokio::task::JoinHandle<Result<(), rs_inpoint::InpointError>>,
     publisher: Publisher,
@@ -157,8 +161,13 @@ struct Rig {
 
 impl Rig {
     /// A server (with `limit` frames per player, or the production default)
-    /// and a publisher that is already connected.
-    async fn start(limit: Option<usize>, publish_secs: u32) -> Self {
+    /// and a publisher of `stream` that is already connected.
+    async fn start(
+        limit: Option<usize>,
+        publish_secs: u32,
+        stream: &'static str,
+        gop: u32,
+    ) -> Self {
         server_log();
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = std_listener.local_addr().unwrap().port();
@@ -176,7 +185,7 @@ impl Rig {
                 .run_on_listener(listener, Arc::new(FlvChunkSink::new_null()), server_state)
                 .await
         });
-        let publisher = spawn_cbr_publisher(port, publish_secs);
+        let publisher = spawn_cbr_publisher(port, publish_secs, stream, gop);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while !state.is_connected() {
             assert!(
@@ -187,6 +196,7 @@ impl Rig {
         }
         Self {
             port,
+            stream,
             shutdown,
             server,
             publisher,
@@ -199,12 +209,18 @@ impl Rig {
     }
 }
 
-/// Connect a player with a tiny receive buffer, run the RTMP client side up
-/// to `play`, and return a second handle to its socket. Nothing reads from
-/// it until the test does.
-async fn start_player(port: u16) -> tokio::net::TcpStream {
+/// Connect a player (with `recv_buffer` bytes of receive buffer, if given),
+/// run the RTMP client side up to `play`, and return a second handle to its
+/// socket. Nothing reads from it until the test does.
+async fn start_player(
+    port: u16,
+    stream_name: &str,
+    recv_buffer: Option<u32>,
+) -> tokio::net::TcpStream {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.set_recv_buffer_size(4096).unwrap();
+    if let Some(bytes) = recv_buffer {
+        socket.set_recv_buffer_size(bytes).unwrap();
+    }
     let stream = socket
         .connect(format!("127.0.0.1:{port}").parse().unwrap())
         .await
@@ -243,7 +259,7 @@ async fn start_player(port: u16) -> tokio::net::TcpStream {
         .await
         .unwrap();
     NetStreamWriter::new(Arc::clone(&io))
-        .write_play(&3.0, &"test".to_string(), &-2.0, &-1.0, &false)
+        .write_play(&3.0, &stream_name.to_string(), &-2.0, &-1.0, &false)
         .await
         .unwrap();
 
@@ -254,37 +270,50 @@ async fn start_player(port: u16) -> tokio::net::TcpStream {
     tokio::net::TcpStream::from_std(reader).unwrap()
 }
 
-/// Read until EOF, `chunk` bytes at a time with `pause` between reads.
-async fn read_to_eof(player: &mut tokio::net::TcpStream, chunk: usize, pause: Duration) {
+/// Read until EOF, `chunk` bytes at a time with `pause` between reads,
+/// counting the bytes into `read`.
+async fn read_to_eof(
+    player: &mut tokio::net::TcpStream,
+    chunk: usize,
+    pause: Duration,
+    read: &AtomicUsize,
+) {
     let mut buf = vec![0u8; chunk];
     loop {
         match player.read(&mut buf).await {
             Ok(0) | Err(_) => return,
-            Ok(_) => tokio::time::sleep(pause).await,
+            Ok(n) => {
+                read.fetch_add(n, Ordering::Relaxed);
+                tokio::time::sleep(pause).await;
+            }
         }
     }
 }
 
 /// A player reading ~1 MB/s of a ~2 MB/s stream falls behind on every
 /// frame, yet every write to it still completes (a ~1 MB keyframe in ~1 s,
-/// far below xiu's 10 s write stall). Once more than `limit` frames wait
-/// for it, it is cut.
+/// far below xiu's 10 s write stall). Once more than `limit` frames beyond
+/// the replayed GOP wait for it, it is cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_that_reads_too_slowly_is_cut_by_the_queue_limit() {
-    let mut rig = Rig::start(Some(50), 45).await;
-    let mut player = start_player(rig.port).await;
+    let mut rig = Rig::start(Some(200), 45, "slow", 30).await;
+    let mut player = start_player(rig.port, rig.stream, None).await;
+    let read = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&read);
     let reader = tokio::spawn(async move {
-        read_to_eof(&mut player, 32 * 1024, Duration::from_millis(30)).await;
+        read_to_eof(&mut player, 32 * 1024, Duration::from_millis(30), &counter).await;
     });
 
-    let cut = session_ended_with("player fell behind", Duration::from_secs(25)).await;
+    let cut = session_ended_with(rig.stream, "player fell behind", Duration::from_secs(25)).await;
+    let read_before_cut = read.load(Ordering::Relaxed);
     reader.abort();
     let publisher_alive = rig.publisher.alive();
     rig.stop().await;
 
+    assert!(cut, "a player 200 frames behind must be disconnected");
     assert!(
-        cut,
-        "a player more than 50 frames behind must be disconnected"
+        read_before_cut >= 2_000_000,
+        "the player must have been reading before the cut ({read_before_cut} bytes)"
     );
     assert!(publisher_alive, "the publisher must keep going");
 }
@@ -294,16 +323,23 @@ async fn a_player_that_reads_too_slowly_is_cut_by_the_queue_limit() {
 /// production limit, the stalled write itself must end the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_that_stops_reading_is_cut_with_the_production_limit() {
-    let mut rig = Rig::start(None, 45).await;
-    let mut player = start_player(rig.port).await;
+    let mut rig = Rig::start(None, 45, "stalled", 30).await;
+    // A tiny receive buffer, so the server's write stalls within seconds.
+    let mut player = start_player(rig.port, rig.stream, Some(4096)).await;
 
     // The socket buffers fill within a few seconds, then the write stalls.
-    let cut = session_ended_with("player stopped reading", Duration::from_secs(30)).await;
+    let cut = session_ended_with(
+        rig.stream,
+        "player stopped reading",
+        Duration::from_secs(30),
+    )
+    .await;
     // Once ended, the connection closes: what is buffered, then EOF.
+    let drained = AtomicUsize::new(0);
     let closed = cut
         && tokio::time::timeout(
             Duration::from_secs(15),
-            read_to_eof(&mut player, 64 * 1024, Duration::ZERO),
+            read_to_eof(&mut player, 64 * 1024, Duration::ZERO, &drained),
         )
         .await
         .is_ok();
@@ -313,4 +349,34 @@ async fn a_player_that_stops_reading_is_cut_with_the_production_limit() {
     assert!(cut, "a player that stopped reading must be disconnected");
     assert!(closed, "the disconnected player's socket must close");
     assert!(publisher_alive, "the publisher must keep going");
+}
+
+/// The hub replays the GOP so far into a new player's queue at subscribe.
+/// With a long GOP that is far more than the limit, but a player that keeps
+/// up drains it: joining mid-GOP must never get it cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_player_that_joins_mid_gop_is_not_cut_by_the_replayed_gop() {
+    // A keyframe every 10 s; after ~6 s the GOP holds ~440 frames.
+    let rig = Rig::start(Some(50), 45, "midgop", 300).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let mut player = start_player(rig.port, rig.stream, None).await;
+    let read = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&read);
+    let reader = tokio::spawn(async move {
+        read_to_eof(&mut player, 64 * 1024, Duration::ZERO, &counter).await;
+    });
+
+    let cut = session_ended_with(rig.stream, "", Duration::from_secs(8)).await;
+    let read_total = read.load(Ordering::Relaxed);
+    reader.abort();
+    rig.stop().await;
+
+    assert!(
+        !cut,
+        "a player that keeps up must not be cut for the GOP replayed at subscribe"
+    );
+    assert!(
+        read_total >= 4_000_000,
+        "the player must be receiving the stream ({read_total} bytes)"
+    );
 }
