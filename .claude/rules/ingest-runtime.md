@@ -92,9 +92,18 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
   through `[patch.crates-io]` in BOTH the workspace root and
   `src-tauri/Cargo.toml`. A `[patch]` applies only in the root of a build, and
   the exe/.deb are built from src-tauri.
-  - `RtmpServer` sets `PLAY_QUEUE_LIMIT_FRAMES` (1000) on every session. A
+  - `RtmpServer` sets `PLAY_QUEUE_LIMIT_FRAMES` (2000) on every session. A
     player past it ends with `PlayQueueOverflow`; it is logged on the
     `RTMP session ended` line.
+  - The limit stays above the cached GOP that the hub queues at subscribe:
+    up to ~18 s at 4K60.
+  - **The queue check alone does not catch a player that stops reading.**
+    The write to it blocks forever, so the loop never returns to the check
+    while the hub keeps queueing. Every play write is bounded by
+    `PLAY_WRITE_STALL` (10 s, vendor), and the session ends with
+    `PlayerStalled`.
+  - A very slow reader (~80 KB/s against 16 Mbit/s) hits the stall too: one
+    ~1 MB keyframe write takes longer than 10 s.
   - `with_play_queue_limit` exists for tests.
   - See `vendor/rtmp/VENDORED.md`. The vendor dir is excluded from the
     workspace, and its `Cargo.toml` allows `non_local_definitions`.
@@ -104,8 +113,12 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
     and never reads, with a 4 KB receive buffer.
   - Its socket is `try_clone`d BEFORE `TcpIO` takes it, so the test can read
     it later.
-  - Disconnected = read to EOF within 15 s. A subscribed player keeps getting
-    the live stream instead.
+  - The verdict is read from the server's own `RTMP session ended … <reason>`
+    log line (a tracing writer captured once per test binary), NEVER by
+    reading the player's socket. Reading unblocks a stalled write, which is
+    how the first version passed while the stall case was still broken.
+  - The queue-limit test paces its reader at ~1 MB/s (half the stream), so
+    no write stalls. The stall test never reads before the verdict.
   - The whole-function mutants of `serve`/`accept_loop` are killed only by
     these integration tests: never run that crate's mutants with `-- --lib`.
 
