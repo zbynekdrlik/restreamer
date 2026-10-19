@@ -1,6 +1,29 @@
 use streamhub::define::{DataSender, StatisticData, StatisticDataSender};
 use tokio::sync::oneshot;
 
+/* restreamer #368: a play write blocked this long means the player stopped
+reading. The write never returns, so the queue check below never runs again
+while the queue grows; the session ends instead. */
+const PLAY_WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/* restreamer #368: `send`, bounded by PLAY_WRITE_STALL when `bounded`. */
+async fn stall_bounded(
+    bounded: bool,
+    send: impl std::future::Future<Output = Result<(), SessionError>>,
+) -> Result<(), SessionError> {
+    if !bounded {
+        return send.await;
+    }
+    match tokio::time::timeout(PLAY_WRITE_STALL, send).await {
+        Ok(result) => result,
+        Err(_) => Err(SessionError {
+            value: SessionErrorValue::PlayerStalled {
+                secs: PLAY_WRITE_STALL.as_secs(),
+            },
+        }),
+    }
+}
+
 use {
     super::{
         define::SessionType,
@@ -104,7 +127,8 @@ impl Common {
                 match data {
                     FrameData::Audio { timestamp, data } => {
                         let data_size = data.len();
-                        self.send_audio(data, timestamp).await?;
+                        let bounded = self.play_queue_limit.is_some();
+                        stall_bounded(bounded, self.send_audio(data, timestamp)).await?;
 
                         if let Some(sender) = &self.statistic_data_sender {
                             let statistic_audio_data = StatisticData::Audio {
@@ -120,7 +144,8 @@ impl Common {
                     }
                     FrameData::Video { timestamp, data } => {
                         let data_size = data.len();
-                        self.send_video(data, timestamp).await?;
+                        let bounded = self.play_queue_limit.is_some();
+                        stall_bounded(bounded, self.send_video(data, timestamp)).await?;
 
                         if let Some(sender) = &self.statistic_data_sender {
                             let statistic_video_data = StatisticData::Video {
@@ -136,7 +161,8 @@ impl Common {
                         }
                     }
                     FrameData::MetaData { timestamp, data } => {
-                        self.send_metadata(data, timestamp).await?;
+                        let bounded = self.play_queue_limit.is_some();
+                        stall_bounded(bounded, self.send_metadata(data, timestamp)).await?;
                     }
                     _ => {}
                 }

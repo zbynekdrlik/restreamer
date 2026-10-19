@@ -63,6 +63,9 @@ pub enum SessionErrorValue {
         queued, limit
     )]
     PlayQueueOverflow { queued: usize, limit: usize },
+    // restreamer #368: a player that stopped reading is disconnected.
+    #[fail(display = "player stopped reading: a write blocked for {} s", secs)]
+    PlayerStalled { secs: u64 },
 
     #[fail(display = "amf0 count not correct error")]
     Amf0ValueCountNotCorrect,

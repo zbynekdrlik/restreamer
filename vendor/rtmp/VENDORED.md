@@ -21,7 +21,13 @@ and OBS dropped 117 frames on 2026-10-18. The queue sits in `Common`'s private
   play session with more frames than that still queued ends with
   `SessionErrorValue::PlayQueueOverflow`. It then takes xiu's own error path:
   unsubscribe, then the session ends.
-- `session/errors.rs`: the `PlayQueueOverflow { queued, limit }` variant.
+- `session/common.rs`: when `play_queue_limit` is set, every play write is
+  bounded by `PLAY_WRITE_STALL` (10 s), and a timeout ends the session with
+  `SessionErrorValue::PlayerStalled`. A player that stops reading entirely
+  blocks the write forever, so the loop never gets back to the queue check
+  while the hub keeps queueing.
+- `session/errors.rs`: the `PlayQueueOverflow { queued, limit }` and
+  `PlayerStalled { secs }` variants.
 - The crate's `rtmp_specification_1.0.pdf` is left out.
 - `Cargo.toml`: `[lints.rust] non_local_definitions = "allow"`. failure's derive
   trips that lint, and cargo shows a path dependency's warnings, unlike a

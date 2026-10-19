@@ -13,10 +13,13 @@ use crate::flv_chunker::FlvChunkSink;
 use crate::media_receiver::MediaReceiver;
 
 /// Most frames a local player (VLC, a headphone probe) may have queued
-/// before its play session is ended (#368): ~9 s at 4K60 (~107 frames/s
-/// with audio), well above the one-GOP burst at subscribe. Unbounded, a
-/// player slower than real time grew xiu's queue to 8 GB on stream.lan.
-pub const PLAY_QUEUE_LIMIT_FRAMES: usize = 1000;
+/// before its play session is ended (#368): ~18 s at 4K60 (~107 frames/s
+/// with audio), ~100-200 MB at 40 Mbit/s. The hub queues the whole cached
+/// GOP at subscribe, so this stays above a GOP of up to ~18 s. Unbounded, a
+/// player slower than real time grew xiu's queue to 8 GB on stream.lan. A
+/// player that stops reading entirely is cut by xiu's write stall instead
+/// (vendor/rtmp `PLAY_WRITE_STALL`, 10 s).
+pub const PLAY_QUEUE_LIMIT_FRAMES: usize = 2000;
 
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
 ///
@@ -232,7 +235,9 @@ impl RtmpServer {
 /// Drop a finished session on the runtime's blocking pool, never on the
 /// ingest thread (#368). Dropping it drains and frees every frame still
 /// queued for it: up to 8 GB and 7 s for a player that fell behind, while
-/// OBS's socket went unread.
+/// OBS's socket went unread. Only a drop still queued when the runtime shuts
+/// down runs on the thread that drops the runtime; no publisher is served
+/// then.
 fn retire_session<S: Send + 'static>(session: S) {
     drop(tokio::task::spawn_blocking(move || drop(session)));
 }
@@ -261,8 +266,7 @@ mod tests {
     /// on stream.lan), and OBS's socket went unread the whole time.
     #[test]
     fn a_finished_session_is_dropped_off_the_ingest_thread() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
+        let dropped_on = std::thread::Builder::new()
             .name("ingest-under-test".into())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -270,13 +274,15 @@ mod tests {
                     .thread_name("ingest-io-under-test")
                     .build()
                     .expect("runtime");
+                let (tx, rx) = std::sync::mpsc::channel();
                 runtime.block_on(async move { retire_session(DropProbe(tx)) });
+                // Wait while the runtime is alive: its shutdown would run a
+                // still-queued drop on this thread.
+                rx.recv_timeout(std::time::Duration::from_secs(5))
             })
             .expect("spawn")
             .join()
-            .expect("join");
-        let dropped_on = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("join")
             .expect("the session must be dropped");
         assert_eq!(dropped_on.as_deref(), Some("ingest-io-under-test"));
     }
