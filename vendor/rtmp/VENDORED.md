@@ -26,6 +26,11 @@ and OBS dropped 117 frames on 2026-10-18. The queue sits in `Common`'s private
   `SessionErrorValue::PlayerStalled`. A player that stops reading entirely
   blocks the write forever, so the loop never gets back to the queue check
   while the hub keeps queueing.
+- `session/common.rs`: `subscribe_from_stream_hub` records how many frames
+  were already queued when the subscription was answered (`play_replayed`).
+  The hub replays the GOP so far BEFORE it answers, and those frames count on
+  top of the limit. Without this, a long GOP cut every new player on its
+  first frame.
 - `session/errors.rs`: the `PlayQueueOverflow { queued, limit }` and
   `PlayerStalled { secs }` variants.
 - The crate's `rtmp_specification_1.0.pdf` is left out.

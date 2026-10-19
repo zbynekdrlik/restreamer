@@ -81,6 +81,10 @@ pub struct Common {
     /* restreamer #368: most frames a player may have queued; past it the
     play session ends. None = unbounded (upstream behaviour). */
     pub play_queue_limit: Option<usize>,
+    /* restreamer #368: frames already queued when the subscription was
+    accepted (the GOP the hub replays first); they count on top of the
+    limit. */
+    play_replayed: usize,
 }
 
 impl Common {
@@ -105,6 +109,7 @@ impl Common {
             remote_addr,
             request_url: String::default(),
             play_queue_limit: None,
+            play_replayed: 0,
             stream_handler: Arc::new(RtmpStreamHandler::new()),
             statistic_data_sender: None,
             //cache: None,
@@ -118,6 +123,7 @@ impl Common {
                 // queue cannot grow without bound.
                 if let Some(limit) = self.play_queue_limit {
                     let queued = self.data_receiver.len();
+                    let limit = limit + self.play_replayed;
                     if queued > limit {
                         return Err(SessionError {
                             value: SessionErrorValue::PlayQueueOverflow { queued, limit },
@@ -401,6 +407,8 @@ impl Common {
 
         let result = event_result_receiver.await??;
         self.data_receiver = result.0.frame_receiver.unwrap();
+        // restreamer #368: the hub queues the replayed GOP before it answers.
+        self.play_replayed = self.data_receiver.len();
 
         let statistic_data_sender: Option<StatisticDataSender> = result.1;
 

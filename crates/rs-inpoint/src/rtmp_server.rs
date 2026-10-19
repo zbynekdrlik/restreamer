@@ -12,10 +12,10 @@ use rs_core::models::InpointState;
 use crate::flv_chunker::FlvChunkSink;
 use crate::media_receiver::MediaReceiver;
 
-/// Most frames a local player (VLC, a headphone probe) may have queued
+/// Most frames a local player (VLC, a headphone probe) may fall behind
 /// before its play session is ended (#368): ~18 s at 4K60 (~107 frames/s
-/// with audio), ~100-200 MB at 40 Mbit/s. The hub queues the whole cached
-/// GOP at subscribe, so this stays above a GOP of up to ~18 s. Unbounded, a
+/// with audio), ~100-200 MB at 40 Mbit/s. The GOP the hub replays at
+/// subscribe counts on top (vendor/rtmp `play_replayed`). Unbounded, a
 /// player slower than real time grew xiu's queue to 8 GB on stream.lan. A
 /// player that stops reading entirely is cut by xiu's write stall instead
 /// (vendor/rtmp `PLAY_WRITE_STALL`, 10 s).
