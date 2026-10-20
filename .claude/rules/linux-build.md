@@ -73,6 +73,14 @@ paths:
   `systemctl list-timers restreamer-upgrade.timer`. The release signs the `.deb` with
   `TAURI_SIGNING_PRIVATE_KEY` (tauri-cli reads the password from the env; never pass
   `-p`) and verifies it with the built binary (`Restreamer --verify-update <deb> <sig>`).
+  **The signing key (2026-10-20, owner decision on #323):** the pair from bf7bb18f was
+  created with an empty password, and the minisign of the time stored it unencrypted
+  but flagged "Sc", so tauri-cli 2.x failed with "Wrong password for that key" for any
+  password. The SAME pair (pubkey unchanged) was re-encrypted with a real password
+  (minisign 0.9.1 `SecretKey::encrypt` + `raw_scrypt_params`, done in Python) and both
+  secrets replaced. The re-encrypted key and its password are dev1 key files
+  `tauri-updater-signing-key` / `-password` in the secrets store; the original pair
+  is `~/.tauri/restreamer.key` (mode 600). Never read them inline.
   Dev CI does the same, installs the `.deb` on the runner, runs the real check, and
   drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
   unit under a lingering user manager. A release now has 5 assets.

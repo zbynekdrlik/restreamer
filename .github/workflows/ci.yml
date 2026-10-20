@@ -687,9 +687,10 @@ jobs:
       - name: "Sign the .deb and verify it with the app's own key (#323)"
         run: |
           deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
-          # The key has no password (generated in bf7bb18f); GitHub cannot store
-          # an empty secret, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not usable.
-          cargo tauri signer sign -p "" "$deb"
+          # tauri-cli reads the key and its password from the env (never -p: it
+          # would put the password on a command line). The key was re-encrypted
+          # with a real password on 2026-10-20 (#323).
+          cargo tauri signer sign "$deb"
           test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
           src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
           cp "$deb" tampered.deb
@@ -699,6 +700,7 @@ jobs:
           fi
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       # #323: install the package as the box does, then run the real check
       # against the GitHub release (this build is never older than it).
       - name: "Install the .deb and run the upgrade check like the box's timer (#323)"
