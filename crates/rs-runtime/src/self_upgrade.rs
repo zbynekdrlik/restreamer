@@ -7,8 +7,10 @@
 //! `Restreamer --upgrade-check` every 15 min. One check:
 //! 1. reads the latest release from the GitHub API;
 //! 2. compares it with what is INSTALLED (dpkg), not with its own compiled
-//!    version: a half-finished install (dpkg left it unconfigured) is retried,
-//!    and a GUI still running a binary dpkg replaced gets its pending restart;
+//!    version: a half-finished install (dpkg left it unpacked) is retried,
+//!    and a GUI still running a binary dpkg replaced gets its pending restart.
+//!    An INTERRUPTED dpkg run ("you must manually run dpkg --configure -a")
+//!    fails every check until unattended-upgrades or a person runs that;
 //! 3. stops while the box is busy (an RTMP publisher connected, or an event
 //!    receiving or delivering): the app restart would cut the stream. All the
 //!    slow work (download, verify, fetching new dependencies) comes first; it
@@ -234,11 +236,13 @@ pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
     }
 }
 
-/// Whether an apt-get failure is only a dpkg lock held by another install
-/// (unattended-upgrades, apt-daily): a deferral, not an error. apt says
-/// "... is another process using it?" for a held lock (frontend or admin
-/// directory) and "... are you root?" for a missing permission, which is a
-/// real error.
+/// Whether an apt-get failure is only an apt/dpkg lock held by another apt
+/// run (unattended-upgrades, apt-daily): a deferral, not an error. apt says
+/// "... is another process using it?" when its wait for the dpkg frontend or
+/// admin-directory lock runs out, and "Could not get lock
+/// /var/cache/apt/archives/lock ..." for the archives lock it never waits
+/// for; "... are you root?" is a missing permission, a real error. apt runs
+/// with `LC_ALL=C`, so these are the English texts.
 pub fn dpkg_locked(error: &str) -> bool {
     error.contains("Could not get lock") || error.contains("is another process using it?")
 }
@@ -316,7 +320,8 @@ pub fn passwd_user(passwd: &str, uid: u32) -> Option<String> {
     })
 }
 
-/// Runs `command`; an exit code other than 0 is an error carrying its stderr.
+/// Runs `command`; an exit code other than 0 is an error carrying its stderr
+/// and the end of its stdout ([`failure_text`]).
 pub fn run_command(command: &mut Command) -> Result<(), String> {
     let output = command.output().map_err(|e| format!("{command:?}: {e}"))?;
     if output.status.success() {
@@ -325,8 +330,31 @@ pub fn run_command(command: &mut Command) -> Result<(), String> {
         Err(format!(
             "{command:?} failed ({}): {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            failure_text(
+                &String::from_utf8_lossy(&output.stdout),
+                &String::from_utf8_lossy(&output.stderr)
+            )
         ))
+    }
+}
+
+/// Lines of stdout a failure keeps.
+const STDOUT_TAIL_LINES: usize = 20;
+
+/// stderr, then the last [`STDOUT_TAIL_LINES`] non-empty lines of stdout:
+/// apt names the package it would remove or cannot satisfy only on stdout
+/// ("The following packages will be REMOVED: ..."), while stderr says just
+/// "E: Packages need to be removed but remove is disabled."
+pub fn failure_text(stdout: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail = &lines[lines.len().saturating_sub(STDOUT_TAIL_LINES)..];
+    if tail.is_empty() {
+        stderr.trim().to_owned()
+    } else {
+        format!("{} | stdout: {}", stderr.trim(), tail.join(" / "))
     }
 }
 
@@ -566,7 +594,7 @@ impl<H: Host> Upgrader<H> {
 fn locked(latest: &Version, error: &str) -> Outcome {
     Outcome::Busy {
         latest: latest.clone(),
-        reason: format!("the dpkg lock is held by another install: {error}"),
+        reason: format!("an apt/dpkg lock is held by another apt run: {error}"),
     }
 }
 

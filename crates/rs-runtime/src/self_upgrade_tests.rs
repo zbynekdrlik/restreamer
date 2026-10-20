@@ -321,8 +321,42 @@ fn shell(script: &str) -> Command {
 #[test]
 fn a_command_that_fails_is_an_error_with_its_stderr() {
     assert_eq!(run_command(&mut shell("exit 0")), Ok(()));
-    let err = run_command(&mut shell("echo apt-said-no 1>&2 && exit 3")).unwrap_err();
+    let err = run_command(&mut shell(
+        "echo REMOVED-other3 && echo apt-said-no 1>&2 && exit 3",
+    ))
+    .unwrap_err();
     assert!(err.contains("apt-said-no"), "{err}");
+    assert!(err.contains("stdout: REMOVED-other3"), "{err}");
+}
+
+#[test]
+fn a_failure_keeps_stderr_and_the_end_of_stdout() {
+    let err = "E: Packages need to be removed but remove is disabled.";
+    assert_eq!(failure_text("", err), err);
+    assert_eq!(
+        failure_text("\n  \n", err),
+        err,
+        "blank stdout adds nothing"
+    );
+    let stdout = (1..=30)
+        .map(|n| format!("line {n}"))
+        .chain([
+            "The following packages will be REMOVED:".into(),
+            "  other3".into(),
+        ])
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = failure_text(&stdout, err);
+    assert!(text.starts_with(&format!("{err} | stdout: ")), "{text}");
+    assert!(
+        text.ends_with("The following packages will be REMOVED: /   other3"),
+        "{text}"
+    );
+    assert!(!text.contains("line 12 "), "only the last 20 lines: {text}");
+    assert!(
+        text.contains("line 13 /"),
+        "the last 20 lines are kept: {text}"
+    );
 }
 
 #[test]
@@ -763,8 +797,10 @@ fn only_a_held_dpkg_lock_is_a_deferral() {
         "E: Unable to lock the administration directory (/var/lib/dpkg/), is another \
          process using it?"
     ));
+    // The archives lock, which apt never waits for (real apt 3.2.0 text).
     assert!(dpkg_locked(
-        "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42"
+        "E: Could not get lock /var/cache/apt/archives/lock. It is held by process 7 \
+         (perl)\nE: Unable to lock directory /var/cache/apt/archives/"
     ));
     // A missing permission is a real error, never a reason to wait.
     assert!(!dpkg_locked(
@@ -899,9 +935,12 @@ async fn any_other_status_failure_is_an_error_with_its_cause() {
     let mut check = upgrader(&server, dir.path(), &host);
     check.status_url = url.clone();
     let err = check.run_once().await.unwrap_err();
-    assert!(err.starts_with(&format!("GET {url}: ")), "{err}");
-    // reqwest's own text leaves the cause out; the chain names it.
-    assert!(err.contains(": client error ("), "{err}");
+    // reqwest's own text leaves the cause out; the chain adds at least one
+    // ": <cause>" (the URL itself has no ": ").
+    let rest = err
+        .strip_prefix(&format!("GET {url}: "))
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(rest.contains(": "), "no cause after reqwest's text: {err}");
     assert!(host.installs.lock().unwrap().is_empty());
 }
 

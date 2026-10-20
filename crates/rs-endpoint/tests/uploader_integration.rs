@@ -92,7 +92,14 @@ fn create_s3_config(endpoint: &str) -> S3Config {
 
 /// Run the uploader long enough to drain the queue, then shut it down.
 /// Polls the DB until `predicate` returns true or `max_wait` elapses.
-async fn run_until<F>(uploader: ChunkUploader, pool: &SqlitePool, predicate: F, max_wait: Duration)
+/// Runs the uploader until `predicate` holds or `max_wait` passes, then stops
+/// it. Returns whether the predicate held.
+async fn run_until<F>(
+    uploader: ChunkUploader,
+    pool: &SqlitePool,
+    predicate: F,
+    max_wait: Duration,
+) -> bool
 where
     F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
 {
@@ -100,19 +107,25 @@ where
     let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
 
     let deadline = tokio::time::Instant::now() + max_wait;
-    loop {
+    let held = loop {
         if predicate().await {
-            break;
+            break true;
         }
         if tokio::time::Instant::now() >= deadline {
-            break;
+            break false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
     let _ = pool; // suppress unused warning
+    held
 }
+
+/// How long `uploader_full_flow_success` waits for the whole flow (upload,
+/// DB row sent, file deleted). A hang bound only (#382): nothing asserts on
+/// how fast the flow is.
+const FULL_FLOW_LIVENESS: Duration = Duration::from_secs(10);
 
 // --- Integration Tests ---
 
@@ -148,7 +161,7 @@ async fn uploader_full_flow_success() {
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
     let chunk_path_check = chunk_path.clone();
-    run_until(
+    let finished = run_until(
         uploader,
         &pool,
         move || {
@@ -167,9 +180,16 @@ async fn uploader_full_flow_success() {
                     && !chunk_path_check.exists()
             })
         },
-        Duration::from_secs(5),
+        FULL_FLOW_LIVENESS,
     )
     .await;
+    assert!(
+        finished,
+        "liveness: the flow did not finish within {FULL_FLOW_LIVENESS:?} \
+         (uploads {}, file still there: {})",
+        s3_state.upload_count.load(Ordering::SeqCst),
+        chunk_path.exists()
+    );
 
     // Verify S3 upload was called with correct key format
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);

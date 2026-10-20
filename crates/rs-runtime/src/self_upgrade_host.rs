@@ -85,12 +85,16 @@ impl Host for SystemHost {
 /// `apt-get install` of a local `.deb`, not `dpkg -i`: it installs a new
 /// Depends too. `-f` repairs a half-install (a hand `dpkg -i` with a missing
 /// Depends leaves the package unpacked, and plain apt-get then refuses every
-/// later install); `--no-remove` makes apt abort rather than remove another
-/// package unattended. Waits at most 10 s for a held dpkg lock.
+/// later install); it also completes ANY other broken package on the box
+/// (installs its missing Depends), since such breakage blocked every upgrade.
+/// `--no-remove` makes apt abort rather than remove another package
+/// unattended. Waits at most 10 s for a held dpkg lock. `LC_ALL=C` keeps the
+/// messages `dpkg_locked` reads in English whatever the box's locale.
 fn apt_get(deb: &Path) -> Command {
     let mut command = Command::new("apt-get");
     command
         .env("DEBIAN_FRONTEND", "noninteractive")
+        .env("LC_ALL", "C")
         .args(["install", "-y", "-f", "--no-remove"])
         .args(["-o", "DPkg::Lock::Timeout=10"])
         .arg(deb);
