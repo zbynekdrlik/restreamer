@@ -8,8 +8,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::{
-    Host, Installed, LATEST_RELEASE_URL, Outcome, STATUS_URL, UPDATER_PUBKEY, Upgrader,
-    app_process, exe_replaced, parse_dpkg_query, passwd_user, run_command, verify_signature,
+    DPKG_QUERY_FORMAT, Host, Installed, LATEST_RELEASE_URL, Outcome, STATUS_TIMEOUT, STATUS_URL,
+    UPDATER_PUBKEY, Upgrader, app_process, exe_replaced, parse_dpkg_query, passwd_user,
+    run_command, verify_signature,
 };
 
 /// One request, the ~22 MB `.deb` included, over the venue's line.
@@ -21,7 +22,9 @@ pub struct SystemHost;
 impl Host for SystemHost {
     fn installed(&self) -> Result<Option<Installed>, String> {
         let output = Command::new("dpkg-query")
-            .args(["-W", "-f=${db:Status-Abbrev}${Version}", "restreamer"])
+            .arg("-W")
+            .arg(format!("-f={DPKG_QUERY_FORMAT}"))
+            .arg("restreamer")
             .output()
             .map_err(|e| format!("dpkg-query: {e}"))?;
         // Exit 1 = the package is not installed.
@@ -30,6 +33,10 @@ impl Host for SystemHost {
             .success()
             .then(|| parse_dpkg_query(&String::from_utf8_lossy(&output.stdout)))
             .flatten())
+    }
+
+    fn app_running(&self) -> bool {
+        app_process(Path::new("/proc"), std::process::id()).is_some()
     }
 
     fn restart_pending(&self) -> bool {
@@ -135,6 +142,7 @@ pub fn run_cli() -> i32 {
         // since a shared runner address can be over the anonymous limit.
         github_token: std::env::var("GITHUB_TOKEN").ok(),
         status_url: STATUS_URL.into(),
+        status_timeout: STATUS_TIMEOUT,
         pubkey: UPDATER_PUBKEY.into(),
         download_dir: download_dir.clone(),
         host: SystemHost,
@@ -152,8 +160,8 @@ pub fn run_cli() -> i32 {
             tracing::info!("{latest} is waiting for an idle box: {reason}");
             0
         }
-        Ok(Outcome::RestartPending { latest, reason }) => {
-            tracing::info!("{latest} installed; the restart waits for an idle box: {reason}");
+        Ok(Outcome::Held { latest, installed }) => {
+            tracing::info!("{installed} is held (apt-mark hold); {latest} is not installed");
             0
         }
         Ok(Outcome::Upgraded {

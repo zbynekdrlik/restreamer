@@ -11,16 +11,20 @@
 //!    and a GUI still running a binary dpkg replaced gets its pending restart;
 //! 3. stops while the box is busy (an RTMP publisher connected, or an event
 //!    receiving or delivering): the app restart would cut the stream. It looks
-//!    again right before the install and right before the restart;
+//!    again after the download, right before the install, and restarts right
+//!    after it: an old binary serving the new package's files is worse than a
+//!    restart (it would upload the new bundled VPS binary as the old version);
 //! 4. downloads the `.deb` and its `.sig`, and verifies the minisign signature
 //!    against [`UPDATER_PUBKEY`] AND that the signature was made for exactly
 //!    that file name (a renamed old package cannot pose as a newer one);
 //! 5. installs it and restarts the desktop user's `restreamer` unit
 //!    (`self_upgrade_host.rs`, the OS calls).
 
+use std::error::Error as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use base64::Engine as _;
 use minisign_verify::{PublicKey, Signature};
@@ -44,6 +48,9 @@ pub const LATEST_RELEASE_URL: &str =
 /// The app's own status API on the box. It requires `api.bind` to answer on
 /// 127.0.0.1 (the default, or 0.0.0.0) and `api.port` 8910.
 pub const STATUS_URL: &str = "http://127.0.0.1:8910/api/v1/status";
+
+/// The status API answers at once on a healthy box; a hung app is not idle.
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Release tags are `restreamer-v<semver>`.
 const TAG_PREFIX: &str = "restreamer-v";
@@ -177,27 +184,55 @@ fn base64_text(encoded: &str) -> Result<String, String> {
 /// The installed `restreamer` package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    /// dpkg's status is `ii`: unpacked AND configured.
+    /// `apt-mark hold`: the operator pinned this version.
+    pub held: bool,
+    /// dpkg finished configuring it (status `installed`, not `unpacked`).
     pub configured: bool,
     pub version: Version,
 }
 
-/// Parses `dpkg-query -W -f='${db:Status-Abbrev}${Version}' restreamer`
-/// (`ii 0.29.53`; `iU 0.29.53` is unpacked but not configured).
+/// The `dpkg-query -f` format [`parse_dpkg_query`] reads.
+pub const DPKG_QUERY_FORMAT: &str = "${db:Status-Want} ${db:Status-Status} ${Version}";
+
+/// Parses [`DPKG_QUERY_FORMAT`] output: `install installed 0.29.53`,
+/// `hold installed 0.29.53`, `install unpacked 0.29.53`, ...
 pub fn parse_dpkg_query(output: &str) -> Option<Installed> {
     let mut fields = output.split_whitespace();
+    let want = fields.next()?;
     let status = fields.next()?;
     let version = Version::parse(fields.next()?).ok()?;
     Some(Installed {
-        configured: status == "ii",
+        held: want == "hold",
+        configured: status == "installed",
         version,
     })
 }
 
-/// Whether `latest` still has to be installed: it is not installed, older,
-/// or dpkg did not finish configuring it.
+/// Whether `latest` has to be installed: nothing is installed, an older
+/// version is, or `latest` itself is but dpkg did not finish configuring it.
+/// A NEWER installed version is never downgraded.
 pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
-    !installed.is_some_and(|installed| installed.configured && installed.version >= *latest)
+    match installed {
+        None => true,
+        Some(installed) => {
+            installed.version < *latest || (installed.version == *latest && !installed.configured)
+        }
+    }
+}
+
+/// Whether a reqwest error is a refused connection: nothing listens there.
+pub fn connection_refused(error: &reqwest::Error) -> bool {
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// Whether a process's `/proc/<pid>/exe` link target says its binary was
@@ -292,7 +327,10 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub trait Host {
     /// The installed `restreamer` package, `None` when it is not installed.
     fn installed(&self) -> Result<Option<Installed>, String>;
-    /// Whether the GUI still runs a binary that an install replaced.
+    /// Whether the operator's GUI process runs.
+    fn app_running(&self) -> bool;
+    /// Whether the GUI still runs a binary that an install replaced (an
+    /// earlier restart failed).
     fn restart_pending(&self) -> bool;
     /// Installs the `.deb` at `deb`, with its dependencies.
     fn install(&self, deb: &Path) -> Result<(), String>;
@@ -305,12 +343,11 @@ pub trait Host {
 pub enum Outcome {
     /// The latest release is installed and running.
     UpToDate { latest: Version },
+    /// The operator holds the package (`apt-mark hold`): nothing is touched.
+    Held { latest: Version, installed: Version },
     /// Something is to do, but the box streams.
     Busy { latest: Version, reason: String },
-    /// Installed; the box turned busy before the restart. A later check
-    /// restarts (the GUI runs a replaced binary).
-    RestartPending { latest: Version, reason: String },
-    /// Installed (`installed`, else only the pending restart) and restarted.
+    /// Installed (`installed`, else only a pending restart) and restarted.
     Upgraded {
         latest: Version,
         installed: bool,
@@ -326,6 +363,8 @@ pub struct Upgrader<H> {
     /// Sent only to `latest_url` (CI; the box asks anonymously).
     pub github_token: Option<String>,
     pub status_url: String,
+    /// Bound on one status request ([`STATUS_TIMEOUT`] on the box).
+    pub status_timeout: Duration,
     pub pubkey: String,
     pub download_dir: PathBuf,
     pub host: H,
@@ -347,9 +386,20 @@ impl<H: Host> Upgrader<H> {
                     self.latest_url
                 )
             })?;
-        let package = deb_package(&release)?;
-        let latest = package.version.clone();
-        let install = install_needed(self.host.installed()?.as_ref(), &latest);
+        let latest = release_version(&release.tag_name).ok_or_else(|| {
+            format!(
+                "release tag {:?} is not {TAG_PREFIX}<semver>",
+                release.tag_name
+            )
+        })?;
+        let installed = self.host.installed()?;
+        if let Some(held) = installed.as_ref().filter(|installed| installed.held) {
+            return Ok(Outcome::Held {
+                latest,
+                installed: held.version.clone(),
+            });
+        }
+        let install = install_needed(installed.as_ref(), &latest);
         if !install && !self.host.restart_pending() {
             return Ok(Outcome::UpToDate { latest });
         }
@@ -358,6 +408,9 @@ impl<H: Host> Upgrader<H> {
         }
 
         if install {
+            // Only now: a release without its .deb/.sig must not turn the
+            // checks of an up-to-date box into errors.
+            let package = deb_package(&release)?;
             let deb = self.bytes(&package.deb_url).await?;
             let signature = String::from_utf8(self.bytes(&package.sig_url).await?)
                 .map_err(|e| format!("{} is not text: {e}", package.sig_url))?;
@@ -375,9 +428,8 @@ impl<H: Host> Upgrader<H> {
             installed?;
         }
 
-        if let Some(reason) = self.busy().await? {
-            return Ok(Outcome::RestartPending { latest, reason });
-        }
+        // Right away: until the restart, the old binary would serve the new
+        // package's files (see the module doc).
         let restart = self.host.restart_app()?;
         Ok(Outcome::Upgraded {
             latest,
@@ -386,12 +438,19 @@ impl<H: Host> Upgrader<H> {
         })
     }
 
-    /// Why the box is busy, or `None`. Nothing listening on the status port
-    /// means the app is down, so nothing can stream: idle (the release may
-    /// be the fix for a crash loop).
+    /// Why the box is busy, or `None`. A refused connection while no GUI
+    /// process runs means the app is down, so nothing can stream: idle (the
+    /// release may be the fix for a crash loop). Any other failure, or a
+    /// refusal while the GUI runs (another port or bind), is an error.
     async fn busy(&self) -> Result<Option<String>, String> {
-        let response = match self.http.get(&self.status_url).send().await {
-            Err(e) if e.is_connect() => return Ok(None),
+        let sent = self
+            .http
+            .get(&self.status_url)
+            .timeout(self.status_timeout)
+            .send()
+            .await;
+        let response = match sent {
+            Err(e) if connection_refused(&e) && !self.host.app_running() => return Ok(None),
             sent => sent
                 .and_then(reqwest::Response::error_for_status)
                 .map_err(|e| format!("GET {}: {e}", self.status_url))?,

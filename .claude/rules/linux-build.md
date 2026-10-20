@@ -46,14 +46,20 @@ paths:
   `restreamer-upgrade.timer` (every 15 min), enabled by its `postinst`. It runs
   `Restreamer --upgrade-check` (`crates/rs-runtime/src/self_upgrade.rs`):
   - it compares the latest GitHub release with the INSTALLED package (`dpkg-query`
-    `${db:Status-Abbrev}`), never with its own compiled version: once dpkg replaced
-    `/usr/bin/Restreamer`, a compiled-version check would call a half-done install
-    (unconfigured, missing Depends) "up to date" forever;
+    `${db:Status-Want} ${db:Status-Status} ${Version}`), never with its own compiled
+    version: once dpkg replaced `/usr/bin/Restreamer`, a compiled-version check would
+    call a half-done install (unpacked, missing Depends) "up to date" forever. A
+    package on hold (`apt-mark hold`) is left alone; a newer one is never downgraded;
+    the release's `.deb`/`.sig` are looked up only when an install is due;
   - a GUI whose `/proc/<pid>/exe` ends in ` (deleted)` has a restart pending, and the
     next idle check does it;
   - it checks "idle" (no `rtmp_connected`, no event receiving or delivering) before the
-    download, again before the install and again before the restart. Nothing listening
-    on 127.0.0.1:8910 counts as idle: the app is down, and the release may fix that;
+    download and again right before the install, then restarts at once: an old binary
+    serving the new package's files would upload the new bundled VPS binary under the
+    old version. A REFUSED status port counts as idle only while no GUI process runs
+    (the app is down; the release may fix it); a timeout, an HTTP error, or a refusal
+    while the GUI runs (another `api.port`/`api.bind`) is an error. The status
+    request has its own 10 s bound;
   - it installs only a `.deb` whose `.deb.sig` verifies with `UPDATER_PUBKEY` (pinned to
     `tauri.conf.json`'s updater pubkey by a test) AND whose signed comment names that
     exact file (`file:Restreamer_<v>_amd64.deb`): a renamed old package cannot pose as

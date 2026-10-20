@@ -176,36 +176,59 @@ fn installed(status: &str, version: &str) -> Installed {
 }
 
 #[test]
-fn dpkg_query_gives_the_version_and_whether_it_is_configured() {
+fn dpkg_query_gives_the_version_whether_it_is_configured_and_held() {
     assert_eq!(
-        parse_dpkg_query("ii 0.29.53"),
+        parse_dpkg_query("install installed 0.29.53"),
         Some(Installed {
+            held: false,
             configured: true,
             version: v("0.29.53")
         })
     );
     assert_eq!(
-        parse_dpkg_query("iU 0.29.53"),
+        parse_dpkg_query("install unpacked 0.29.53"),
         Some(Installed {
+            held: false,
             configured: false,
             version: v("0.29.53")
         })
     );
+    assert_eq!(
+        parse_dpkg_query("hold installed 0.29.53"),
+        Some(Installed {
+            held: true,
+            configured: true,
+            version: v("0.29.53")
+        })
+    );
     assert_eq!(parse_dpkg_query(""), None);
-    assert_eq!(parse_dpkg_query("ii not-a-version"), None);
+    assert_eq!(parse_dpkg_query("install installed not-a-version"), None);
 }
 
 #[test]
 fn only_a_configured_latest_or_newer_needs_no_install() {
     let latest = v("0.29.54");
     assert!(install_needed(None, &latest), "not installed");
-    assert!(install_needed(Some(&installed("ii", "0.29.53")), &latest));
+    assert!(install_needed(
+        Some(&installed("install installed", "0.29.53")),
+        &latest
+    ));
     assert!(
-        install_needed(Some(&installed("iU", "0.29.54")), &latest),
+        install_needed(Some(&installed("install unpacked", "0.29.54")), &latest),
         "unpacked but never configured: retry"
     );
-    assert!(!install_needed(Some(&installed("ii", "0.29.54")), &latest));
-    assert!(!install_needed(Some(&installed("ii", "0.29.60")), &latest));
+    assert!(!install_needed(
+        Some(&installed("install installed", "0.29.54")),
+        &latest
+    ));
+    assert!(!install_needed(
+        Some(&installed("install installed", "0.29.60")),
+        &latest
+    ));
+    assert!(
+        !install_needed(Some(&installed("install unpacked", "0.29.60")), &latest),
+        "a newer version is never downgraded"
+    );
 }
 
 #[test]
@@ -323,6 +346,7 @@ fn write_new_stops_when_the_stale_entry_cannot_be_removed() {
 #[derive(Default)]
 struct FakeHost {
     installed: Option<Installed>,
+    app_running: bool,
     restart_pending: bool,
     fail_install: bool,
     installs: Mutex<Vec<Vec<u8>>>,
@@ -341,6 +365,10 @@ impl FakeHost {
 impl Host for &FakeHost {
     fn installed(&self) -> Result<Option<Installed>, String> {
         Ok(self.installed.clone())
+    }
+
+    fn app_running(&self) -> bool {
+        self.app_running
     }
 
     fn restart_pending(&self) -> bool {
@@ -412,6 +440,7 @@ fn upgrader<'a>(server: &MockServer, dir: &Path, host: &'a FakeHost) -> Upgrader
         latest_url: format!("{}/latest", server.uri()),
         github_token: None,
         status_url: format!("{}/status", server.uri()),
+        status_timeout: STATUS_TIMEOUT,
         pubkey: PUB_A.into(),
         download_dir: dir.to_path_buf(),
         host,
@@ -435,8 +464,8 @@ async fn the_installed_latest_is_up_to_date_and_nothing_is_fetched() {
     let server = server("0.29.54", PAYLOAD, 0, &[]).await;
     let dir = tempfile::tempdir().unwrap();
     for host in [
-        FakeHost::with("ii", "0.29.54"),
-        FakeHost::with("ii", "0.29.60"),
+        FakeHost::with("install installed", "0.29.54"),
+        FakeHost::with("install installed", "0.29.60"),
     ] {
         let outcome = upgrader(&server, dir.path(), &host).run_once().await;
         assert_eq!(
@@ -453,7 +482,7 @@ async fn the_installed_latest_is_up_to_date_and_nothing_is_fetched() {
 async fn a_newer_release_waits_while_the_box_streams() {
     let server = server("0.29.54", PAYLOAD, 0, &[streaming()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(
         outcome,
@@ -469,7 +498,7 @@ async fn a_newer_release_waits_while_the_box_streams() {
 async fn a_newer_signed_release_is_installed_and_the_app_restarted() {
     let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(outcome, upgraded(true));
     assert_eq!(*host.installs.lock().unwrap(), vec![PAYLOAD.to_vec()]);
@@ -481,7 +510,7 @@ async fn a_newer_signed_release_is_installed_and_the_app_restarted() {
 async fn an_unconfigured_install_of_the_latest_is_retried() {
     let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("iU", "0.29.54");
+    let host = FakeHost::with("install unpacked", "0.29.54");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(outcome, upgraded(true));
     assert_eq!(host.installs.lock().unwrap().len(), 1);
@@ -493,7 +522,7 @@ async fn a_pending_restart_is_done_without_a_new_download() {
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
         restart_pending: true,
-        ..FakeHost::with("ii", "0.29.54")
+        ..FakeHost::with("install installed", "0.29.54")
     };
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(outcome, upgraded(false));
@@ -507,7 +536,7 @@ async fn a_pending_restart_waits_while_the_box_streams() {
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
         restart_pending: true,
-        ..FakeHost::with("ii", "0.29.54")
+        ..FakeHost::with("install installed", "0.29.54")
     };
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert!(matches!(outcome, Ok(Outcome::Busy { .. })), "{outcome:?}");
@@ -518,7 +547,7 @@ async fn a_pending_restart_waits_while_the_box_streams() {
 async fn a_box_that_starts_streaming_during_the_download_is_not_touched() {
     let server = server("0.29.54", PAYLOAD, 1, &[idle(), streaming()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert!(matches!(outcome, Ok(Outcome::Busy { .. })), "{outcome:?}");
     assert!(host.installs.lock().unwrap().is_empty());
@@ -526,19 +555,53 @@ async fn a_box_that_starts_streaming_during_the_download_is_not_touched() {
 }
 
 #[tokio::test]
-async fn a_box_that_starts_streaming_during_the_install_keeps_its_restart_pending() {
+async fn the_restart_follows_the_install_at_once() {
+    // An old binary serving the new package's files is worse than the
+    // restart: no status read between the install and the restart.
     let server = server("0.29.54", PAYLOAD, 1, &[idle(), idle(), streaming()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert_eq!(outcome, upgraded(true));
+    assert_eq!(*host.restarts.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_release_without_its_signature_leaves_an_up_to_date_box_alone() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "restreamer-v0.29.54",
+            "assets": [{"name": SIGNED_DEB, "browser_download_url": "https://example.invalid/x"}]
+        })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("install installed", "0.29.54");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(
         outcome,
-        Ok(Outcome::RestartPending {
-            latest: v("0.29.54"),
-            reason: "an RTMP publisher is connected".into()
+        Ok(Outcome::UpToDate {
+            latest: v("0.29.54")
         })
     );
-    assert_eq!(host.installs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_held_package_is_never_touched() {
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("hold installed", "0.29.50");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert_eq!(
+        outcome,
+        Ok(Outcome::Held {
+            latest: v("0.29.54"),
+            installed: v("0.29.50")
+        })
+    );
+    assert!(host.installs.lock().unwrap().is_empty());
     assert_eq!(*host.restarts.lock().unwrap(), 0);
 }
 
@@ -546,7 +609,7 @@ async fn a_box_that_starts_streaming_during_the_install_keeps_its_restart_pendin
 async fn a_package_that_fails_its_signature_is_never_installed() {
     let server = server("0.29.54", TAMPERED, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let err = upgrader(&server, dir.path(), &host)
         .run_once()
         .await
@@ -560,7 +623,7 @@ async fn a_package_that_fails_its_signature_is_never_installed() {
 async fn an_old_signed_package_renamed_as_a_newer_release_is_refused() {
     let server = server("0.29.99", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let err = upgrader(&server, dir.path(), &host)
         .run_once()
         .await
@@ -575,7 +638,7 @@ async fn a_failed_install_restarts_nothing_and_removes_the_download() {
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
         fail_install: true,
-        ..FakeHost::with("ii", "0.29.53")
+        ..FakeHost::with("install installed", "0.29.53")
     };
     let err = upgrader(&server, dir.path(), &host)
         .run_once()
@@ -590,7 +653,7 @@ async fn a_failed_install_restarts_nothing_and_removes_the_download() {
 async fn an_unreadable_or_failing_status_installs_nothing() {
     let unreadable = server("0.29.54", PAYLOAD, 0, &[serde_json::json!({"oops": 1})]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let err = upgrader(&unreadable, dir.path(), &host)
         .run_once()
         .await
@@ -625,30 +688,51 @@ async fn a_status_that_does_not_answer_in_time_is_not_idle() {
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let mut check = upgrader(&server, dir.path(), &host);
-    check.http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
-        .build()
-        .unwrap();
+    check.status_timeout = std::time::Duration::from_millis(500);
     let err = check.run_once().await.unwrap_err();
     assert!(err.contains("/status"), "{err}");
     assert!(host.installs.lock().unwrap().is_empty());
 }
 
+/// A port that refuses connections and stays reserved (bound, never
+/// listening), so no parallel test can take it.
+fn refusing_port() -> (tokio::net::TcpSocket, String) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("http://{}/status", socket.local_addr().unwrap());
+    (socket, url)
+}
+
 #[tokio::test]
 async fn an_app_that_is_down_counts_as_idle() {
-    // A release can be the fix for a crash loop: nothing listening on the
-    // status port means nothing streams.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let closed_url = format!("http://{}/status", closed.local_addr().unwrap());
-    drop(closed);
+    // A release can be the fix for a crash loop: a refused status port with
+    // no GUI process means nothing streams.
+    let (_reserved, refused_url) = refusing_port();
     let server = server("0.29.54", PAYLOAD, 1, &[]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let mut check = upgrader(&server, dir.path(), &host);
-    check.status_url = closed_url;
+    check.status_url = refused_url;
     assert_eq!(check.run_once().await, upgraded(true));
+}
+
+#[tokio::test]
+async fn a_refused_status_while_the_gui_runs_is_not_idle() {
+    // The GUI may listen on another port or address: never guess idle.
+    let (_reserved, refused_url) = refusing_port();
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        app_running: true,
+        ..FakeHost::with("install installed", "0.29.53")
+    };
+    let mut check = upgrader(&server, dir.path(), &host);
+    check.status_url = refused_url;
+    let err = check.run_once().await.unwrap_err();
+    assert!(err.contains("/status"), "{err}");
+    assert!(host.installs.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -677,7 +761,7 @@ async fn the_token_goes_to_the_release_api_only() {
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::with("ii", "0.29.53");
+    let host = FakeHost::with("install installed", "0.29.53");
     let mut check = upgrader(&server, dir.path(), &host);
     check.latest_url = format!("{}/latest-with-token", server.uri());
     check.github_token = Some("t0ken".into());

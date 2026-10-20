@@ -707,6 +707,9 @@ jobs:
           sudo apt-get install -y "./$deb"
           systemctl is-enabled restreamer-upgrade.timer
           systemctl is-active restreamer-upgrade.timer
+          # Long past OnBootSec, the enabled timer fires within minutes: stop it,
+          # so only this step's own check runs.
+          sudo systemctl stop restreamer-upgrade.timer
           out=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
             || { echo "$out"; echo "the upgrade check failed"; exit 1; }
           echo "$out"
