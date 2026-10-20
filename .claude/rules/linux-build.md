@@ -49,14 +49,18 @@ paths:
     `${db:Status-Want} ${db:Status-Status} ${Version}`), never with its own compiled
     version: once dpkg replaced `/usr/bin/Restreamer`, a compiled-version check would
     call a half-done install (unpacked, missing Depends) "up to date" forever. A
-    package on hold (`apt-mark hold`) is left alone; a newer one is never downgraded;
-    the release's `.deb`/`.sig` are looked up only when an install is due;
+    package on hold or being removed (Status-Want `hold`/`deinstall`/`purge`) is left
+    alone; a newer one is never downgraded; the release's `.deb`/`.sig` are looked up
+    only when an install is due; it restarts only after dpkg reports the new version
+    configured;
   - a GUI whose `/proc/<pid>/exe` ends in ` (deleted)` has a restart pending, and the
     next idle check does it;
   - it checks "idle" (no `rtmp_connected`, no event receiving or delivering) before the
-    download and again right before the install, then restarts at once: an old binary
+    download, then does the slow work (download, verify, `apt-get --download-only` for
+    new Depends), checks again, installs with `DPkg::Lock::Timeout=10` (a held lock is
+    a deferral to the next tick, `dpkg_locked`) and restarts at once: an old binary
     serving the new package's files would upload the new bundled VPS binary under the
-    old version. A REFUSED status port counts as idle only while no GUI process runs
+    old version. So only dpkg runs between the last idle check and the restart. A REFUSED status port counts as idle only while no GUI process runs
     (the app is down; the release may fix it); a timeout, an HTTP error, or a refusal
     while the GUI runs (another `api.port`/`api.bind`) is an error. The status
     request has its own 10 s bound;
@@ -64,9 +68,8 @@ paths:
     `tauri.conf.json`'s updater pubkey by a test) AND whose signed comment names that
     exact file (`file:Restreamer_<v>_amd64.deb`): a renamed old package cannot pose as
     a newer release;
-  - it installs with `apt-get install -y -o DPkg::Lock::Timeout=300 <deb>` (a new
-    Depends gets installed), then `systemctl --user -M <gui user>@ daemon-reload` +
-    `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
+  - it installs with `apt-get install -y` (a new Depends gets installed), then
+    `systemctl --user -M <gui user>@ daemon-reload` + `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
     not root and not a CLI mode (`--upgrade-check`, `--verify-update`, `--restart-app`).
 
   Read it with `journalctl -u restreamer-upgrade` (one line per check) and
@@ -78,11 +81,12 @@ paths:
   but flagged "Sc", so tauri-cli 2.x failed with "Wrong password for that key" for any
   password. The SAME pair (pubkey unchanged) was re-encrypted with a real password
   (minisign 0.9.1 `SecretKey::encrypt` + `raw_scrypt_params`, done in Python) and both
-  secrets replaced. The re-encrypted key and its password are dev1 key files
-  `tauri-updater-signing-key` / `-password` in the secrets store; the original pair
-  is `~/.tauri/restreamer.key` (mode 600). Never read them inline.
-  Dev CI does the same, installs the `.deb` on the runner, runs the real check, and
-  drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
+  secrets replaced. The re-encrypted key and its password are the dev1 key files
+  `tauri-updater-signing-key` and `tauri-updater-signing-password` in the secrets
+  store. `~/.tauri/restreamer.key` (mode 600) holds the same re-encrypted key; no
+  unencrypted copy is kept. Never read them inline.
+  Dev CI does the same, installs the `.deb` on the runner, runs the real check (and
+  again under `apt-mark hold`: left alone), and drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
   unit under a lingering user manager. A release now has 5 assets.
   `self_upgrade_host.rs` (dpkg, apt, systemctl, CLI) is mutation-excluded glue.
 - **Upgrading stream-pp by hand** (the first 0.29.53 install, or when the timer is

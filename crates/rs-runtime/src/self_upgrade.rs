@@ -10,10 +10,13 @@
 //!    version: a half-finished install (dpkg left it unconfigured) is retried,
 //!    and a GUI still running a binary dpkg replaced gets its pending restart;
 //! 3. stops while the box is busy (an RTMP publisher connected, or an event
-//!    receiving or delivering): the app restart would cut the stream. It looks
-//!    again after the download, right before the install, and restarts right
-//!    after it: an old binary serving the new package's files is worse than a
-//!    restart (it would upload the new bundled VPS binary as the old version);
+//!    receiving or delivering): the app restart would cut the stream. All the
+//!    slow work (download, verify, fetching new dependencies) comes first; it
+//!    looks again right before the install, installs without waiting for a
+//!    held dpkg lock, and restarts right after: an old binary serving the new
+//!    package's files is worse than a restart (it would upload the new bundled
+//!    VPS binary as the old version). So only dpkg itself runs between the
+//!    last idle check and the restart;
 //! 4. downloads the `.deb` and its `.sig`, and verifies the minisign signature
 //!    against [`UPDATER_PUBKEY`] AND that the signature was made for exactly
 //!    that file name (a renamed old package cannot pose as a newer one);
@@ -184,25 +187,35 @@ fn base64_text(encoded: &str) -> Result<String, String> {
 /// The installed `restreamer` package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    /// `apt-mark hold`: the operator pinned this version.
-    pub held: bool,
+    /// dpkg's selection: `install`, or `hold` / `deinstall` / `purge` when
+    /// the operator pinned the package or is removing it.
+    pub want: String,
     /// dpkg finished configuring it (status `installed`, not `unpacked`).
     pub configured: bool,
     pub version: Version,
+}
+
+impl Installed {
+    /// The operator pinned (`apt-mark hold`) or is removing the package: the
+    /// upgrade check never touches it.
+    pub fn left_alone(&self) -> bool {
+        self.want != "install"
+    }
 }
 
 /// The `dpkg-query -f` format [`parse_dpkg_query`] reads.
 pub const DPKG_QUERY_FORMAT: &str = "${db:Status-Want} ${db:Status-Status} ${Version}";
 
 /// Parses [`DPKG_QUERY_FORMAT`] output: `install installed 0.29.53`,
-/// `hold installed 0.29.53`, `install unpacked 0.29.53`, ...
+/// `hold installed 0.29.53`, `install unpacked 0.29.53`,
+/// `deinstall config-files 0.29.53`, ...
 pub fn parse_dpkg_query(output: &str) -> Option<Installed> {
     let mut fields = output.split_whitespace();
     let want = fields.next()?;
     let status = fields.next()?;
     let version = Version::parse(fields.next()?).ok()?;
     Some(Installed {
-        held: want == "hold",
+        want: want.to_owned(),
         configured: status == "installed",
         version,
     })
@@ -218,6 +231,13 @@ pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
             installed.version < *latest || (installed.version == *latest && !installed.configured)
         }
     }
+}
+
+/// Whether an apt-get failure is only a dpkg lock held by another install
+/// (unattended-upgrades, apt-daily): a deferral, not an error.
+pub fn dpkg_locked(error: &str) -> bool {
+    error.contains("Could not get lock")
+        || error.contains("Unable to acquire the dpkg frontend lock")
 }
 
 /// Whether a reqwest error is a refused connection: nothing listens there.
@@ -332,7 +352,11 @@ pub trait Host {
     /// Whether the GUI still runs a binary that an install replaced (an
     /// earlier restart failed).
     fn restart_pending(&self) -> bool;
-    /// Installs the `.deb` at `deb`, with its dependencies.
+    /// Downloads what installing `deb` needs (new dependencies), installing
+    /// nothing: the slow part, done before the last idle check.
+    fn fetch_dependencies(&self, deb: &Path) -> Result<(), String>;
+    /// Installs the `.deb` at `deb` without waiting long for a held dpkg lock
+    /// (an error that [`dpkg_locked`] recognises).
     fn install(&self, deb: &Path) -> Result<(), String>;
     /// Restarts the running GUI on the new version; returns what it did.
     fn restart_app(&self) -> Result<String, String>;
@@ -343,8 +367,12 @@ pub trait Host {
 pub enum Outcome {
     /// The latest release is installed and running.
     UpToDate { latest: Version },
-    /// The operator holds the package (`apt-mark hold`): nothing is touched.
-    Held { latest: Version, installed: Version },
+    /// The operator holds or is removing the package: nothing is touched.
+    LeftAlone {
+        latest: Version,
+        installed: Version,
+        want: String,
+    },
     /// Something is to do, but the box streams.
     Busy { latest: Version, reason: String },
     /// Installed (`installed`, else only a pending restart) and restarted.
@@ -393,10 +421,14 @@ impl<H: Host> Upgrader<H> {
             )
         })?;
         let installed = self.host.installed()?;
-        if let Some(held) = installed.as_ref().filter(|installed| installed.held) {
-            return Ok(Outcome::Held {
+        if let Some(pinned) = installed
+            .as_ref()
+            .filter(|installed| installed.left_alone())
+        {
+            return Ok(Outcome::LeftAlone {
                 latest,
-                installed: held.version.clone(),
+                installed: pinned.version.clone(),
+                want: pinned.want.clone(),
             });
         }
         let install = install_needed(installed.as_ref(), &latest);
@@ -416,16 +448,14 @@ impl<H: Host> Upgrader<H> {
                 .map_err(|e| format!("{} is not text: {e}", package.sig_url))?;
             verify_signature(&deb, &signature, &self.pubkey, &package.deb_name)
                 .map_err(|e| format!("{}: {e}", package.deb_name))?;
-            // The download took a while: look again right before the install.
-            if let Some(reason) = self.busy().await? {
-                return Ok(Outcome::Busy { latest, reason });
-            }
             let path = self.download_dir.join(&package.deb_name);
             write_new(&path, &deb)?;
-            let installed = self.host.install(&path);
-            // Installed or failed, the copy goes.
+            let installed = self.install_when_idle(&path, &latest).await;
+            // Installed, deferred or failed, the copy goes.
             let _ = std::fs::remove_file(&path);
-            installed?;
+            if let Some(deferred) = installed? {
+                return Ok(deferred);
+            }
         }
 
         // Right away: until the restart, the old binary would serve the new
@@ -436,6 +466,39 @@ impl<H: Host> Upgrader<H> {
             installed: install,
             restart,
         })
+    }
+
+    /// Fetches the new dependencies, then installs only while the box is still
+    /// idle; `Some(outcome)` when it deferred. A restart follows only an
+    /// install that really finished (dpkg: `latest`, configured).
+    async fn install_when_idle(
+        &self,
+        deb: &Path,
+        latest: &Version,
+    ) -> Result<Option<Outcome>, String> {
+        self.host.fetch_dependencies(deb)?;
+        if let Some(reason) = self.busy().await? {
+            return Ok(Some(Outcome::Busy {
+                latest: latest.clone(),
+                reason,
+            }));
+        }
+        match self.host.install(deb) {
+            Err(e) if dpkg_locked(&e) => {
+                return Ok(Some(Outcome::Busy {
+                    latest: latest.clone(),
+                    reason: format!("the dpkg lock is held by another install: {e}"),
+                }));
+            }
+            installed => installed?,
+        }
+        match self.host.installed()? {
+            Some(now) if now.configured && now.version == *latest => Ok(None),
+            now => Err(format!(
+                "{latest} is not installed and configured after the install (dpkg: {now:?}); \
+                 not restarting"
+            )),
+        }
     }
 
     /// Why the box is busy, or `None`. A refused connection while no GUI
@@ -450,10 +513,34 @@ impl<H: Host> Upgrader<H> {
             .send()
             .await;
         let response = match sent {
-            Err(e) if connection_refused(&e) && !self.host.app_running() => return Ok(None),
+            Err(e) if connection_refused(&e) => {
+                if !self.host.app_running() {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "the status port {} refused while the GUI runs: does api.bind/api.port \
+                     answer on 127.0.0.1:8910?",
+                    self.status_url
+                ));
+            }
+            Err(e) if e.is_timeout() => {
+                return Err(format!(
+                    "no status from {} within {:?}",
+                    self.status_url, self.status_timeout
+                ));
+            }
             sent => sent
                 .and_then(reqwest::Response::error_for_status)
-                .map_err(|e| format!("GET {}: {e}", self.status_url))?,
+                .map_err(|e| {
+                    // reqwest's own text leaves the cause out: add the chain.
+                    let mut text = format!("GET {}: {e}", self.status_url);
+                    let mut cause = e.source();
+                    while let Some(inner) = cause {
+                        text.push_str(&format!(": {inner}"));
+                        cause = inner.source();
+                    }
+                    text
+                })?,
         };
         let status: Value = response
             .json()

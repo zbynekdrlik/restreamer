@@ -709,9 +709,17 @@ jobs:
           sudo apt-get install -y "./$deb"
           systemctl is-enabled restreamer-upgrade.timer
           systemctl is-active restreamer-upgrade.timer
-          # Long past OnBootSec, the enabled timer fires within minutes: stop it,
-          # so only this step's own check runs.
-          sudo systemctl stop restreamer-upgrade.timer
+          # Long past OnBootSec, the enabled timer fires within minutes: stop it
+          # and any check it already started, so only this step's checks run.
+          sudo systemctl stop restreamer-upgrade.timer restreamer-upgrade.service
+          # Real dpkg through the real code: a held package is left alone.
+          sudo apt-mark hold restreamer
+          held=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
+            || { echo "$held"; echo "the upgrade check failed on a held package"; exit 1; }
+          echo "$held"
+          echo "$held" | grep -q 'left alone' \
+            || { echo "a held package must be left alone"; exit 1; }
+          sudo apt-mark unhold restreamer
           out=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
             || { echo "$out"; echo "the upgrade check failed"; exit 1; }
           echo "$out"

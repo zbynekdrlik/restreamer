@@ -46,13 +46,26 @@ impl Host for SystemHost {
         })
     }
 
-    fn install(&self, deb: &Path) -> Result<(), String> {
-        // apt-get, not dpkg -i: it installs a new Depends too. Wait for a
-        // dpkg lock held by unattended-upgrades instead of failing at once.
+    fn fetch_dependencies(&self, deb: &Path) -> Result<(), String> {
+        // The slow part (new Depends over the network), before the last
+        // idle check; installs nothing.
         run_command(
             Command::new("apt-get")
                 .env("DEBIAN_FRONTEND", "noninteractive")
-                .args(["install", "-y", "-o", "DPkg::Lock::Timeout=300"])
+                .args(["install", "--download-only", "-y"])
+                .arg(deb),
+        )
+    }
+
+    fn install(&self, deb: &Path) -> Result<(), String> {
+        // apt-get, not dpkg -i: it installs a new Depends too. A dpkg lock
+        // held by unattended-upgrades fails within 10 s (`dpkg_locked`), and
+        // the check tries again at the next tick instead of waiting here,
+        // between the idle check and the restart.
+        run_command(
+            Command::new("apt-get")
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .args(["install", "-y", "-o", "DPkg::Lock::Timeout=10"])
                 .arg(deb),
         )
     }
@@ -94,9 +107,14 @@ fn download_dir() -> Result<(PathBuf, bool), String> {
         return Ok((PathBuf::from(dir), false));
     }
     let dir = std::env::temp_dir().join(format!("restreamer-upgrade-{}", std::process::id()));
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     builder
         .create(&dir)
         .map_err(|e| format!("creating {}: {e}", dir.display()))?;
@@ -153,15 +171,22 @@ pub fn run_cli() -> i32 {
     }
     match outcome {
         Ok(Outcome::UpToDate { latest }) => {
-            tracing::info!("up to date: {latest} is installed and running");
+            tracing::info!("up to date: nothing newer than the latest release {latest} to install");
             0
         }
         Ok(Outcome::Busy { latest, reason }) => {
             tracing::info!("{latest} is waiting for an idle box: {reason}");
             0
         }
-        Ok(Outcome::Held { latest, installed }) => {
-            tracing::info!("{installed} is held (apt-mark hold); {latest} is not installed");
+        Ok(Outcome::LeftAlone {
+            latest,
+            installed,
+            want,
+        }) => {
+            tracing::info!(
+                "restreamer {installed} is marked {want:?} (apt-mark hold or a removal): \
+                 left alone; the latest release is {latest}"
+            );
             0
         }
         Ok(Outcome::Upgraded {

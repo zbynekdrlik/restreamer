@@ -180,7 +180,7 @@ fn dpkg_query_gives_the_version_whether_it_is_configured_and_held() {
     assert_eq!(
         parse_dpkg_query("install installed 0.29.53"),
         Some(Installed {
-            held: false,
+            want: "install".into(),
             configured: true,
             version: v("0.29.53")
         })
@@ -188,7 +188,7 @@ fn dpkg_query_gives_the_version_whether_it_is_configured_and_held() {
     assert_eq!(
         parse_dpkg_query("install unpacked 0.29.53"),
         Some(Installed {
-            held: false,
+            want: "install".into(),
             configured: false,
             version: v("0.29.53")
         })
@@ -196,11 +196,15 @@ fn dpkg_query_gives_the_version_whether_it_is_configured_and_held() {
     assert_eq!(
         parse_dpkg_query("hold installed 0.29.53"),
         Some(Installed {
-            held: true,
+            want: "hold".into(),
             configured: true,
             version: v("0.29.53")
         })
     );
+    let removing = parse_dpkg_query("deinstall config-files 0.29.53").unwrap();
+    assert!(removing.left_alone() && !removing.configured);
+    assert!(!installed("install installed", "0.29.53").left_alone());
+    assert!(installed("purge config-files", "0.29.53").left_alone());
     assert_eq!(parse_dpkg_query(""), None);
     assert_eq!(parse_dpkg_query("install installed not-a-version"), None);
 }
@@ -343,12 +347,17 @@ fn write_new_stops_when_the_stale_entry_cannot_be_removed() {
 
 // --- one whole check against a local server ------------------------------
 
+/// dpkg, apt and systemctl in memory. A successful install makes the
+/// package's version (from its file name) the configured installed one,
+/// unless `install_unfinished`.
 #[derive(Default)]
 struct FakeHost {
-    installed: Option<Installed>,
+    installed: Mutex<Option<Installed>>,
     app_running: bool,
     restart_pending: bool,
-    fail_install: bool,
+    install_error: Option<String>,
+    install_unfinished: bool,
+    fetches: Mutex<u32>,
     installs: Mutex<Vec<Vec<u8>>>,
     restarts: Mutex<u32>,
 }
@@ -356,7 +365,7 @@ struct FakeHost {
 impl FakeHost {
     fn with(status: &str, version: &str) -> Self {
         Self {
-            installed: Some(installed(status, version)),
+            installed: Mutex::new(Some(installed(status, version))),
             ..Self::default()
         }
     }
@@ -364,7 +373,7 @@ impl FakeHost {
 
 impl Host for &FakeHost {
     fn installed(&self) -> Result<Option<Installed>, String> {
-        Ok(self.installed.clone())
+        Ok(self.installed.lock().unwrap().clone())
     }
 
     fn app_running(&self) -> bool {
@@ -375,12 +384,29 @@ impl Host for &FakeHost {
         self.restart_pending
     }
 
+    fn fetch_dependencies(&self, deb: &Path) -> Result<(), String> {
+        assert!(deb.exists(), "the package is on disk before apt sees it");
+        *self.fetches.lock().unwrap() += 1;
+        Ok(())
+    }
+
     fn install(&self, deb: &Path) -> Result<(), String> {
         let bytes = std::fs::read(deb).map_err(|e| e.to_string())?;
         self.installs.lock().unwrap().push(bytes);
-        if self.fail_install {
-            return Err("apt-get failed".into());
+        if let Some(error) = &self.install_error {
+            return Err(error.clone());
         }
+        let name = deb.file_name().unwrap().to_str().unwrap();
+        let version = name
+            .strip_prefix("Restreamer_")
+            .and_then(|rest| rest.strip_suffix("_amd64.deb"))
+            .unwrap();
+        let state = if self.install_unfinished {
+            "install unpacked"
+        } else {
+            "install installed"
+        };
+        *self.installed.lock().unwrap() = Some(installed(state, version));
         Ok(())
     }
 
@@ -550,6 +576,11 @@ async fn a_box_that_starts_streaming_during_the_download_is_not_touched() {
     let host = FakeHost::with("install installed", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert!(matches!(outcome, Ok(Outcome::Busy { .. })), "{outcome:?}");
+    assert_eq!(
+        *host.fetches.lock().unwrap(),
+        1,
+        "the dependencies come before the last idle check"
+    );
     assert!(host.installs.lock().unwrap().is_empty());
     assert_eq!(*host.restarts.lock().unwrap(), 0);
 }
@@ -596,9 +627,10 @@ async fn a_held_package_is_never_touched() {
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(
         outcome,
-        Ok(Outcome::Held {
+        Ok(Outcome::LeftAlone {
             latest: v("0.29.54"),
-            installed: v("0.29.50")
+            installed: v("0.29.50"),
+            want: "hold".into()
         })
     );
     assert!(host.installs.lock().unwrap().is_empty());
@@ -637,7 +669,7 @@ async fn a_failed_install_restarts_nothing_and_removes_the_download() {
     let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
-        fail_install: true,
+        install_error: Some("apt-get failed".into()),
         ..FakeHost::with("install installed", "0.29.53")
     };
     let err = upgrader(&server, dir.path(), &host)
@@ -647,6 +679,72 @@ async fn a_failed_install_restarts_nothing_and_removes_the_download() {
     assert_eq!(err, "apt-get failed");
     assert_eq!(*host.restarts.lock().unwrap(), 0);
     assert!(empty(dir.path()));
+}
+
+#[tokio::test]
+async fn a_held_dpkg_lock_defers_the_install_to_the_next_check() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        install_error: Some(
+            "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42 \
+             (unattended-upgr)"
+                .into(),
+        ),
+        ..FakeHost::with("install installed", "0.29.53")
+    };
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    match outcome {
+        Ok(Outcome::Busy { latest, reason }) => {
+            assert_eq!(latest, v("0.29.54"));
+            assert!(reason.contains("dpkg lock"), "{reason}");
+        }
+        other => panic!("expected a deferral, got {other:?}"),
+    }
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
+    assert!(empty(dir.path()));
+}
+
+#[tokio::test]
+async fn an_install_that_does_not_finish_is_not_restarted() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        install_unfinished: true,
+        ..FakeHost::with("install installed", "0.29.53")
+    };
+    let err = upgrader(&server, dir.path(), &host)
+        .run_once()
+        .await
+        .unwrap_err();
+    assert!(err.contains("not installed and configured"), "{err}");
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_package_being_removed_is_left_alone() {
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("deinstall config-files", "0.29.50");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert!(
+        matches!(&outcome, Ok(Outcome::LeftAlone { want, .. }) if want == "deinstall"),
+        "{outcome:?}"
+    );
+    assert!(host.installs.lock().unwrap().is_empty());
+}
+
+#[test]
+fn only_a_held_dpkg_lock_is_a_deferral() {
+    assert!(dpkg_locked(
+        "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42"
+    ));
+    assert!(dpkg_locked(
+        "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend)"
+    ));
+    assert!(!dpkg_locked(
+        "E: Unable to correct problems, you have held broken packages."
+    ));
 }
 
 #[tokio::test]
@@ -692,7 +790,7 @@ async fn a_status_that_does_not_answer_in_time_is_not_idle() {
     let mut check = upgrader(&server, dir.path(), &host);
     check.status_timeout = std::time::Duration::from_millis(500);
     let err = check.run_once().await.unwrap_err();
-    assert!(err.contains("/status"), "{err}");
+    assert!(err.contains("no status from"), "{err}");
     assert!(host.installs.lock().unwrap().is_empty());
 }
 
@@ -731,7 +829,28 @@ async fn a_refused_status_while_the_gui_runs_is_not_idle() {
     let mut check = upgrader(&server, dir.path(), &host);
     check.status_url = refused_url;
     let err = check.run_once().await.unwrap_err();
-    assert!(err.contains("/status"), "{err}");
+    assert!(err.contains("refused while the GUI runs"), "{err}");
+    assert!(host.installs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn any_other_status_failure_is_an_error_with_its_cause() {
+    // A server that accepts and closes at once: neither refused nor a timeout.
+    // It keeps accepting (a leaked thread), so a retry is never refused.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/status", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("install installed", "0.29.53");
+    let mut check = upgrader(&server, dir.path(), &host);
+    check.status_url = url.clone();
+    let err = check.run_once().await.unwrap_err();
+    assert!(err.starts_with(&format!("GET {url}: ")), "{err}");
     assert!(host.installs.lock().unwrap().is_empty());
 }
 
