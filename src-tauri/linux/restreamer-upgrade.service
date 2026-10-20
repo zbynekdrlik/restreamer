@@ -1,0 +1,18 @@
+# #323: one unattended upgrade check of this box (stream-pp) from the GitHub
+# release, run as root by restreamer-upgrade.timer. It installs a newer,
+# signature-verified .deb only while the box is idle (no RTMP publisher, no
+# event receiving or delivering), then restarts the desktop user's
+# `restreamer` unit. Every check logs one line:
+#   journalctl -u restreamer-upgrade
+[Unit]
+Description=Restreamer upgrade check (#323)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/Restreamer --upgrade-check
+# Root-only download directory (/var/cache/restreamer-upgrade), never /tmp.
+CacheDirectory=restreamer-upgrade
+CacheDirectoryMode=0700
+PrivateTmp=yes

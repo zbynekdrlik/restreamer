@@ -1,0 +1,8 @@
+#!/bin/sh
+# #323: enable the root timer that upgrades this box from the GitHub release.
+# An upgrade run by that timer also runs this; enabling again is a no-op.
+set -eu
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable --now restreamer-upgrade.timer
+fi

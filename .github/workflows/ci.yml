@@ -657,9 +657,17 @@ jobs:
           # Tauri writes the paths without a leading "./"; strip it if present.
           dpkg-deb -c "$deb" | awk '{print $6}' | sed 's#^\./##' > deb-files.txt
           for want in usr/bin/Restreamer usr/lib/Restreamer/www/index.html \
-                      usr/lib/Restreamer/rs-delivery-linux usr/lib/systemd/user/restreamer.service; do
+                      usr/lib/Restreamer/rs-delivery-linux usr/lib/systemd/user/restreamer.service \
+                      usr/lib/systemd/system/restreamer-upgrade.service \
+                      usr/lib/systemd/system/restreamer-upgrade.timer; do
             grep -qx "$want" deb-files.txt || { echo "MISSING in .deb: $want"; cat deb-files.txt; exit 1; }
           done
+          # #323: the maintainer scripts enable the root upgrade timer.
+          dpkg-deb -e "$deb" deb-control
+          grep -q 'systemctl enable --now restreamer-upgrade.timer' deb-control/postinst \
+            || { echo "postinst must enable the upgrade timer (#323)"; ls deb-control; exit 1; }
+          grep -q 'systemctl disable --now restreamer-upgrade.timer' deb-control/prerm \
+            || { echo "prerm must disable the upgrade timer (#323)"; ls deb-control; exit 1; }
           dpkg-deb -f "$deb" Depends | grep -q ffmpeg || { echo ".deb does not depend on ffmpeg"; exit 1; }
           # #388: the control-room Chrome draws on Restreamer's own Xvfb display.
           dpkg-deb -f "$deb" Depends | grep -q xvfb || { echo ".deb does not depend on xvfb (#388)"; exit 1; }
@@ -672,6 +680,39 @@ jobs:
           jq -e '.app.windows[0] | .visible == true and .maximized == true and .closable == false' src-tauri/tauri.conf.json \
             || { echo "main window must be visible, maximized and non-closable (#393)"; jq '.app.windows' src-tauri/tauri.conf.json; exit 1; }
           echo "deb contents OK"
+      # #323: stream-pp's upgrade timer installs only a .deb whose minisign
+      # signature verifies with the updater key compiled into the app. Sign it
+      # like the release does, and verify it with that very binary, so a
+      # secret that does not match tauri.conf.json fails here, not on the box.
+      - name: "Sign the .deb and verify it with the app's own key (#323)"
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          cargo tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$deb"
+          test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
+          src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
+          cp "$deb" tampered.deb
+          printf 'tampered' >> tampered.deb
+          if src-tauri/target/release/Restreamer --verify-update tampered.deb "$deb.sig"; then
+            echo "a tampered .deb verified -- the check is broken"; exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # #323: install the package as the box does, then run the real check
+      # against the GitHub release (this build is never older than it).
+      - name: "Install the .deb and run the upgrade check like the box's timer (#323)"
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          sudo apt-get install -y "./$deb"
+          systemctl is-enabled restreamer-upgrade.timer
+          systemctl is-active restreamer-upgrade.timer
+          out=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
+            || { echo "$out"; echo "the upgrade check failed"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q 'up to date: ' \
+            || { echo "expected 'up to date': this build is not older than the latest release"; exit 1; }
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Upload the .deb
         uses: actions/upload-artifact@v4
         with:

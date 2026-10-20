@@ -1826,6 +1826,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minisign-verify"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e856fdd13623a2f5f2f54676a4ee49502a96a80ef4a62bcedd23d52427c44d43"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2808,14 +2814,18 @@ version = "0.29.53"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "log",
+ "minisign-verify",
  "reqwest 0.12.28",
  "rs-api",
  "rs-core",
  "rs-endpoint",
  "rs-inpoint",
  "rs-rtmp-push",
+ "semver",
+ "serde",
  "serde_json",
  "sqlx",
  "sysinfo",
@@ -2825,6 +2835,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "wiremock",
 ]
 
 [[package]]

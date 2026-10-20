@@ -12,6 +12,7 @@ mod log_capture;
 mod orchestrator;
 mod refused_subscribes;
 pub mod rtmp_bind;
+pub mod self_upgrade;
 mod shutdown;
 pub mod stall_detector;
 mod www_dir;

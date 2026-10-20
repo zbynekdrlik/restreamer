@@ -1,0 +1,6 @@
+#!/bin/sh
+# #323: on removal (not on an upgrade), stop and disable the upgrade timer.
+set -eu
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now restreamer-upgrade.timer
+fi

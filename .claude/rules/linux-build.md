@@ -2,6 +2,7 @@
 paths:
   - "src-tauri/tauri.linux.conf.json"
   - "src-tauri/linux/**"
+  - "crates/rs-runtime/src/self_upgrade*.rs"
   - "crates/rs-core/src/paths.rs"
   - "crates/rs-runtime/src/www_dir.rs"
   - ".github/workflows/release.yml"
@@ -41,7 +42,24 @@ paths:
 - **A config file must exist** (#112). The minimum is `client_uuid` plus
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
-- **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
+- **stream-pp upgrades itself (#323, from 0.29.53).** The `.deb` ships a ROOT timer,
+  `restreamer-upgrade.timer` (every 15 min), enabled by its `postinst`. It runs
+  `Restreamer --upgrade-check` (`crates/rs-runtime/src/self_upgrade.rs`):
+  - it reads the latest GitHub release and acts only on a newer version;
+  - it waits while the box is busy (`rtmp_connected`, or an event receiving or
+    delivering): the restart would cut the stream;
+  - it installs only a `.deb` whose `.deb.sig` verifies with `UPDATER_PUBKEY`, which
+    must equal `tauri.conf.json`'s updater pubkey (a test pins it);
+  - it runs `dpkg -i`, then `systemctl --user -M <gui user>@ restart restreamer`.
+
+  Read it with `journalctl -u restreamer-upgrade` (one line per check) and
+  `systemctl list-timers restreamer-upgrade.timer`. The release signs the `.deb` with
+  `TAURI_SIGNING_PRIVATE_KEY` and verifies it with the built binary
+  (`Restreamer --verify-update <deb> <sig>`); dev CI does the same, and also installs
+  the `.deb` on the runner and runs the real check. A release now has 5 assets.
+  `self_upgrade_host.rs` (dpkg, systemctl, CLI) is mutation-excluded glue.
+- **Upgrading stream-pp by hand** (the first 0.29.53 install, or when the timer is
+  broken) (`newlevel@10.76.8.204`): `newlevel` has no passwordless
   sudo there. The owner provided the sudo password on 2026-10-19 (#323: the
   streampp box drifts behind releases). It is the dev1 key file `stream-pp-sudo`
   in the secrets store, and it is used only through
