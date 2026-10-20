@@ -2,15 +2,18 @@
 
 use super::*;
 use std::sync::Mutex;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, header_exists, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A payload signed with a throwaway key (`cargo tauri signer generate`, the
-/// private half discarded); `PUB_A` is its public key, `PUB_B` another one.
+/// `Restreamer_0.29.54_amd64.deb` holding `PAYLOAD`, signed with a throwaway
+/// key (`cargo tauri signer generate`, the private half discarded). `PUB_A` is
+/// its public key, `PUB_B` another one. The signed comment names the file.
 const PAYLOAD: &[u8] = b"restreamer self-upgrade test payload (#323)\n";
-const PUB_A: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkzNUYzRDAxRjVBNEVFNDcKUldSSDdxVDFBVDFmazhPY1UwKzRkWXdzNEdPb0s0Y1lTTVFncGp6dHRZMGtXMGxUbEs5T3ZFQUwK";
-const PUB_B: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4NUFGQTlBMzRGRjM3MUYKUldRZk4vODBtdnBhaUYySFNBWFhCV0NDNDQzbnJRTkV3UmZKZk1sRGViNmo4NFdzYVAyVjY0WGYK";
-const SIG_A: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSSDdxVDFBVDFma3c5ODZucE03ckV2VjBjek1BQkZCWDRaeGJXK3d3ZU96WHQzYW1NdXpkbXVFb1EzWDRuK0RUMklLQWNxMDBlcG5qWmdvQkFCMitZdUZHQ2RyMnlPZUFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDU5OTU4CWZpbGU6cGF5bG9hZC5iaW4KQXlRdWdad3ZHYm5jaVlvZ3A1SzJycUdkMFZRREpHbWlDc3pUS1d4cXRCd0w4VndMVHZUN1ZOOVI1d0FqNVYwWExPZ1lvS0xuL1U2N2ZMektnSHZWQkE9PQo=";
+const SIGNED_DEB: &str = "Restreamer_0.29.54_amd64.deb";
+const PUB_A: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDExRjc4MEQxMEExMjQyMUMKUldRY1FoSUswWUQzRVlURTczTVFHb3lCZkxEYW5scndKODdTNGpWU3djL3JNRjBCQkNna2VSUzUK";
+const PUB_B: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJEMjJDRUREMDI5RkRGMjcKUldRbjM1OEMzYzRpTFVia3NIQnRUb05zQ2I3SWhscHdpYUZXdTdTVnhjMmtoNCtMdlI0eGhQaE8K";
+const SIG_A: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRY1FoSUswWUQzRVFyRWhad1prUVpkb1NTUWh4NGRCTWl4NEtWRXJoY2RoYXdmUVhnWGdqZGNzdFN1ai9yeklmQ1hiUk9PT3Zma1FCY0JvWlQ2Snp1S1JZTk8rVm9jWkEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDYxNjkyCWZpbGU6UmVzdHJlYW1lcl8wLjI5LjU0X2FtZDY0LmRlYgpXVEUrc2s2c2dqMkhraVM2N0d3UVdvblY5U0J5RUpLUzlaL1hmbkdoenduejViOU9UZTdhb0dMdGllR3NwanVsSHVMMEhqeEtIN3MzcmJ0a2xyNDFCQT09Cg==";
+const TAMPERED: &[u8] = b"restreamer self-upgrade test payload (#323)!\n";
 
 fn v(text: &str) -> Version {
     Version::parse(text).unwrap()
@@ -83,9 +86,17 @@ fn status(connected: bool, event: Value) -> Value {
     })
 }
 
+fn idle() -> Value {
+    status(false, Value::Null)
+}
+
+fn streaming() -> Value {
+    status(true, Value::Null)
+}
+
 #[test]
 fn an_idle_box_has_no_publisher_and_no_live_event() {
-    assert_eq!(busy_reason(&status(false, Value::Null)), Ok(None));
+    assert_eq!(busy_reason(&idle()), Ok(None));
     let quiet_event = serde_json::json!({
         "name": "PP-live", "receiving_activated": false, "delivering_activated": false
     });
@@ -95,7 +106,7 @@ fn an_idle_box_has_no_publisher_and_no_live_event() {
 #[test]
 fn a_connected_publisher_or_a_live_event_is_busy() {
     assert_eq!(
-        busy_reason(&status(true, Value::Null)),
+        busy_reason(&streaming()),
         Ok(Some("an RTMP publisher is connected".into()))
     );
     for flag in ["receiving_activated", "delivering_activated"] {
@@ -117,31 +128,36 @@ fn a_status_without_the_publisher_flag_is_an_error() {
 }
 
 #[test]
-fn a_good_signature_verifies() {
-    assert_eq!(verify_signature(PAYLOAD, SIG_A, PUB_A), Ok(()));
+fn a_good_signature_for_that_file_verifies() {
+    assert_eq!(verify_signature(PAYLOAD, SIG_A, PUB_A, SIGNED_DEB), Ok(()));
 }
 
 #[test]
 fn another_key_or_other_bytes_fail_the_signature() {
-    let wrong_key = verify_signature(PAYLOAD, SIG_A, PUB_B).unwrap_err();
+    let wrong_key = verify_signature(PAYLOAD, SIG_A, PUB_B, SIGNED_DEB).unwrap_err();
     assert!(wrong_key.contains("does not verify"), "{wrong_key}");
-    let tampered = verify_signature(
-        b"restreamer self-upgrade test payload (#323)!\n",
-        SIG_A,
-        PUB_A,
-    )
-    .unwrap_err();
+    let tampered = verify_signature(TAMPERED, SIG_A, PUB_A, SIGNED_DEB).unwrap_err();
     assert!(tampered.contains("does not verify"), "{tampered}");
     assert!(
-        verify_signature(PAYLOAD, "not base64 !", PUB_A)
+        verify_signature(PAYLOAD, "not base64 !", PUB_A, SIGNED_DEB)
             .unwrap_err()
             .contains("not base64")
     );
     assert!(
-        verify_signature(PAYLOAD, SIG_A, "AAAA")
+        verify_signature(PAYLOAD, SIG_A, "AAAA", SIGNED_DEB)
             .unwrap_err()
             .contains("bad updater public key")
     );
+}
+
+#[test]
+fn a_signature_made_for_another_file_name_is_refused() {
+    // A renamed old package must not pose as a newer release.
+    let renamed =
+        verify_signature(PAYLOAD, SIG_A, PUB_A, "Restreamer_99.0.0_amd64.deb").unwrap_err();
+    assert!(renamed.contains("made for another file"), "{renamed}");
+    // A name that only CONTAINS the signed one is not it.
+    assert!(verify_signature(PAYLOAD, SIG_A, PUB_A, "Restreamer_0.29.5").is_err());
 }
 
 #[test]
@@ -153,6 +169,49 @@ fn the_compiled_key_is_the_one_tauri_conf_declares() {
             .and_then(Value::as_str),
         Some(UPDATER_PUBKEY)
     );
+}
+
+fn installed(status: &str, version: &str) -> Installed {
+    parse_dpkg_query(&format!("{status} {version}")).unwrap()
+}
+
+#[test]
+fn dpkg_query_gives_the_version_and_whether_it_is_configured() {
+    assert_eq!(
+        parse_dpkg_query("ii 0.29.53"),
+        Some(Installed {
+            configured: true,
+            version: v("0.29.53")
+        })
+    );
+    assert_eq!(
+        parse_dpkg_query("iU 0.29.53"),
+        Some(Installed {
+            configured: false,
+            version: v("0.29.53")
+        })
+    );
+    assert_eq!(parse_dpkg_query(""), None);
+    assert_eq!(parse_dpkg_query("ii not-a-version"), None);
+}
+
+#[test]
+fn only_a_configured_latest_or_newer_needs_no_install() {
+    let latest = v("0.29.54");
+    assert!(install_needed(None, &latest), "not installed");
+    assert!(install_needed(Some(&installed("ii", "0.29.53")), &latest));
+    assert!(
+        install_needed(Some(&installed("iU", "0.29.54")), &latest),
+        "unpacked but never configured: retry"
+    );
+    assert!(!install_needed(Some(&installed("ii", "0.29.54")), &latest));
+    assert!(!install_needed(Some(&installed("ii", "0.29.60")), &latest));
+}
+
+#[test]
+fn a_deleted_exe_means_the_binary_was_replaced() {
+    assert!(exe_replaced(Path::new("/usr/bin/Restreamer (deleted)")));
+    assert!(!exe_replaced(Path::new("/usr/bin/Restreamer")));
 }
 
 #[test]
@@ -173,9 +232,9 @@ fn the_user_name_comes_from_passwd_by_uid() {
 }
 
 #[test]
-fn the_app_owner_is_another_restreamer_process() {
+fn the_gui_is_the_users_restreamer_not_a_root_cli_mode() {
     let root = tempfile::tempdir().unwrap();
-    let process = |pid: &str, comm: &str, uid: u32| {
+    let process = |pid: &str, comm: &str, uid: u32, args: &[&str]| {
         let dir = root.path().join(pid);
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
@@ -184,30 +243,115 @@ fn the_app_owner_is_another_restreamer_process() {
             format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
         )
         .unwrap();
+        let mut cmdline = Vec::new();
+        for arg in args {
+            cmdline.extend_from_slice(arg.as_bytes());
+            cmdline.push(0);
+        }
+        std::fs::write(dir.join("cmdline"), cmdline).unwrap();
     };
-    process("10", "Restreamer", 0); // the upgrade check itself
-    process("20", "obs", 1001);
+    process(
+        "10",
+        "Restreamer",
+        0,
+        &["/usr/bin/Restreamer", "--upgrade-check"],
+    ); // itself
+    process(
+        "11",
+        "Restreamer",
+        1000,
+        &["/usr/bin/Restreamer", "--verify-update", "a", "b"],
+    );
+    process(
+        "12",
+        "Restreamer",
+        1000,
+        &["/usr/bin/Restreamer", "--restart-app"],
+    );
+    process("13", "Restreamer", 0, &["/usr/bin/Restreamer"]); // root is never the GUI
+    process("20", "obs", 1001, &["obs"]);
     std::fs::create_dir(root.path().join("self")).unwrap();
-    assert_eq!(app_owner_uid(root.path(), 10), None, "only itself runs");
-    process("30", "Restreamer", 1000);
-    assert_eq!(app_owner_uid(root.path(), 10), Some(1000));
+    assert_eq!(app_process(root.path(), 10), None, "no GUI runs");
+    process("30", "Restreamer", 1000, &["/usr/bin/Restreamer"]);
+    assert_eq!(
+        app_process(root.path(), 10),
+        Some(AppProcess { pid: 30, uid: 1000 })
+    );
+}
+
+fn shell(script: &str) -> Command {
+    if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", script]);
+        command
+    } else {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+}
+
+#[test]
+fn a_command_that_fails_is_an_error_with_its_stderr() {
+    assert_eq!(run_command(&mut shell("exit 0")), Ok(()));
+    let err = run_command(&mut shell("echo apt-said-no 1>&2 && exit 3")).unwrap_err();
+    assert!(err.contains("apt-said-no"), "{err}");
+}
+
+#[test]
+fn write_new_replaces_a_stale_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Restreamer_0.29.54_amd64.deb");
+    std::fs::write(&path, b"stale, longer than the new content").unwrap();
+    write_new(&path, b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+}
+
+#[test]
+fn write_new_stops_when_the_stale_entry_cannot_be_removed() {
+    // A directory under the package's name: removing it as a file fails with
+    // something other than NotFound, and nothing is written.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Restreamer_0.29.54_amd64.deb");
+    std::fs::create_dir(&path).unwrap();
+    let err = write_new(&path, b"new").unwrap_err();
+    assert!(err.contains("removing the stale"), "{err}");
 }
 
 // --- one whole check against a local server ------------------------------
 
 #[derive(Default)]
 struct FakeHost {
-    installed: Mutex<Vec<Vec<u8>>>,
-    restarts: Mutex<u32>,
+    installed: Option<Installed>,
+    restart_pending: bool,
     fail_install: bool,
+    installs: Mutex<Vec<Vec<u8>>>,
+    restarts: Mutex<u32>,
+}
+
+impl FakeHost {
+    fn with(status: &str, version: &str) -> Self {
+        Self {
+            installed: Some(installed(status, version)),
+            ..Self::default()
+        }
+    }
 }
 
 impl Host for &FakeHost {
+    fn installed(&self) -> Result<Option<Installed>, String> {
+        Ok(self.installed.clone())
+    }
+
+    fn restart_pending(&self) -> bool {
+        self.restart_pending
+    }
+
     fn install(&self, deb: &Path) -> Result<(), String> {
         let bytes = std::fs::read(deb).map_err(|e| e.to_string())?;
-        self.installed.lock().unwrap().push(bytes);
+        self.installs.lock().unwrap().push(bytes);
         if self.fail_install {
-            return Err("dpkg failed".into());
+            return Err("apt-get failed".into());
         }
         Ok(())
     }
@@ -218,17 +362,18 @@ impl Host for &FakeHost {
     }
 }
 
-/// A local GitHub + app: release `latest` with the fixture `.deb` and `.sig`,
-/// and `status` as the app's status. `deb_hits` = expected `.deb` downloads.
-async fn server(latest: &str, status: Value, deb: &[u8], deb_hits: u64) -> MockServer {
+/// A local GitHub + app. The release `latest` lists `<deb>` and `<deb>.sig`;
+/// the `.deb` serves `deb` and must be fetched `deb_hits` times. The status
+/// answers `statuses` in order, the last one from then on (none: 404).
+async fn server(latest: &str, deb: &[u8], deb_hits: u64, statuses: &[Value]) -> MockServer {
     let server = MockServer::start().await;
-    let deb_name = format!("Restreamer_{latest}_amd64.deb");
+    let name = deb_name(&v(latest));
     let release = serde_json::json!({
         "tag_name": format!("restreamer-v{latest}"),
         "assets": [
-            {"name": deb_name, "browser_download_url": format!("{}/dl/{deb_name}", server.uri())},
-            {"name": format!("{deb_name}.sig"),
-             "browser_download_url": format!("{}/dl/{deb_name}.sig", server.uri())},
+            {"name": name, "browser_download_url": format!("{}/dl/{name}", server.uri())},
+            {"name": format!("{name}.sig"),
+             "browser_download_url": format!("{}/dl/{name}.sig", server.uri())},
         ]
     });
     Mock::given(method("GET"))
@@ -236,19 +381,25 @@ async fn server(latest: &str, status: Value, deb: &[u8], deb_hits: u64) -> MockS
         .respond_with(ResponseTemplate::new(200).set_body_json(release))
         .mount(&server)
         .await;
+    for (i, answer) in statuses.iter().enumerate() {
+        let mock = Mock::given(method("GET"))
+            .and(path("/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer.clone()));
+        let mock = if i + 1 < statuses.len() {
+            mock.up_to_n_times(1)
+        } else {
+            mock
+        };
+        mock.mount(&server).await;
+    }
     Mock::given(method("GET"))
-        .and(path("/status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(format!("/dl/{deb_name}")))
+        .and(path(format!("/dl/{name}")))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(deb.to_vec()))
         .expect(deb_hits)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path(format!("/dl/{deb_name}.sig")))
+        .and(path(format!("/dl/{name}.sig")))
         .respond_with(ResponseTemplate::new(200).set_body_string(SIG_A))
         .mount(&server)
         .await;
@@ -259,48 +410,50 @@ fn upgrader<'a>(server: &MockServer, dir: &Path, host: &'a FakeHost) -> Upgrader
     Upgrader {
         http: reqwest::Client::new(),
         latest_url: format!("{}/latest", server.uri()),
+        github_token: None,
         status_url: format!("{}/status", server.uri()),
         pubkey: PUB_A.into(),
-        current: v("0.29.53"),
         download_dir: dir.to_path_buf(),
         host,
     }
 }
 
-#[tokio::test]
-async fn the_same_version_is_up_to_date_and_nothing_is_downloaded() {
-    let server = server("0.29.53", status(false, Value::Null), PAYLOAD, 0).await;
-    let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
-    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
-    assert_eq!(
-        outcome,
-        Ok(Outcome::UpToDate {
-            latest: v("0.29.53")
-        })
-    );
-    assert!(host.installed.lock().unwrap().is_empty());
+fn upgraded(installed: bool) -> Result<Outcome, String> {
+    Ok(Outcome::Upgraded {
+        latest: v("0.29.54"),
+        installed,
+        restart: "restarted".into(),
+    })
+}
+
+fn empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).unwrap().next().is_none()
 }
 
 #[tokio::test]
-async fn an_older_release_is_never_installed() {
-    let server = server("0.29.52", status(false, Value::Null), PAYLOAD, 0).await;
+async fn the_installed_latest_is_up_to_date_and_nothing_is_fetched() {
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
-    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
-    assert_eq!(
-        outcome,
-        Ok(Outcome::UpToDate {
-            latest: v("0.29.52")
-        })
-    );
+    for host in [
+        FakeHost::with("ii", "0.29.54"),
+        FakeHost::with("ii", "0.29.60"),
+    ] {
+        let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+        assert_eq!(
+            outcome,
+            Ok(Outcome::UpToDate {
+                latest: v("0.29.54")
+            })
+        );
+        assert!(host.installs.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
 async fn a_newer_release_waits_while_the_box_streams() {
-    let server = server("0.29.54", status(true, Value::Null), PAYLOAD, 0).await;
+    let server = server("0.29.54", PAYLOAD, 0, &[streaming()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
+    let host = FakeHost::with("ii", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(
         outcome,
@@ -309,73 +462,226 @@ async fn a_newer_release_waits_while_the_box_streams() {
             reason: "an RTMP publisher is connected".into()
         })
     );
-    assert!(host.installed.lock().unwrap().is_empty());
+    assert!(host.installs.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn a_newer_signed_release_is_installed_and_the_app_restarted() {
-    let server = server("0.29.54", status(false, Value::Null), PAYLOAD, 1).await;
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
+    let host = FakeHost::with("ii", "0.29.53");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert_eq!(outcome, upgraded(true));
+    assert_eq!(*host.installs.lock().unwrap(), vec![PAYLOAD.to_vec()]);
+    assert_eq!(*host.restarts.lock().unwrap(), 1);
+    assert!(empty(dir.path()), "the downloaded package is removed");
+}
+
+#[tokio::test]
+async fn an_unconfigured_install_of_the_latest_is_retried() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("iU", "0.29.54");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert_eq!(outcome, upgraded(true));
+    assert_eq!(host.installs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_pending_restart_is_done_without_a_new_download() {
+    let server = server("0.29.54", PAYLOAD, 0, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        restart_pending: true,
+        ..FakeHost::with("ii", "0.29.54")
+    };
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert_eq!(outcome, upgraded(false));
+    assert!(host.installs.lock().unwrap().is_empty());
+    assert_eq!(*host.restarts.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_pending_restart_waits_while_the_box_streams() {
+    let server = server("0.29.54", PAYLOAD, 0, &[streaming()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        restart_pending: true,
+        ..FakeHost::with("ii", "0.29.54")
+    };
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert!(matches!(outcome, Ok(Outcome::Busy { .. })), "{outcome:?}");
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_box_that_starts_streaming_during_the_download_is_not_touched() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle(), streaming()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert!(matches!(outcome, Ok(Outcome::Busy { .. })), "{outcome:?}");
+    assert!(host.installs.lock().unwrap().is_empty());
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_box_that_starts_streaming_during_the_install_keeps_its_restart_pending() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle(), idle(), streaming()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
     assert_eq!(
         outcome,
-        Ok(Outcome::Installed {
-            from: v("0.29.53"),
-            to: v("0.29.54"),
-            restart: "restarted".into()
+        Ok(Outcome::RestartPending {
+            latest: v("0.29.54"),
+            reason: "an RTMP publisher is connected".into()
         })
     );
-    assert_eq!(*host.installed.lock().unwrap(), vec![PAYLOAD.to_vec()]);
-    assert_eq!(*host.restarts.lock().unwrap(), 1);
-    assert!(
-        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-        "the downloaded package is removed"
-    );
+    assert_eq!(host.installs.lock().unwrap().len(), 1);
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
 }
 
 #[tokio::test]
 async fn a_package_that_fails_its_signature_is_never_installed() {
-    let tampered = b"restreamer self-upgrade test payload (#323)!\n";
-    let server = server("0.29.54", status(false, Value::Null), tampered, 1).await;
+    let server = server("0.29.54", TAMPERED, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
+    let host = FakeHost::with("ii", "0.29.53");
     let err = upgrader(&server, dir.path(), &host)
         .run_once()
         .await
         .unwrap_err();
     assert!(err.contains("does not verify"), "{err}");
-    assert!(host.installed.lock().unwrap().is_empty());
+    assert!(host.installs.lock().unwrap().is_empty());
     assert_eq!(*host.restarts.lock().unwrap(), 0);
 }
 
 #[tokio::test]
+async fn an_old_signed_package_renamed_as_a_newer_release_is_refused() {
+    let server = server("0.29.99", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
+    let err = upgrader(&server, dir.path(), &host)
+        .run_once()
+        .await
+        .unwrap_err();
+    assert!(err.contains("made for another file"), "{err}");
+    assert!(host.installs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_failed_install_restarts_nothing_and_removes_the_download() {
-    let server = server("0.29.54", status(false, Value::Null), PAYLOAD, 1).await;
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
         fail_install: true,
-        ..FakeHost::default()
+        ..FakeHost::with("ii", "0.29.53")
     };
     let err = upgrader(&server, dir.path(), &host)
         .run_once()
         .await
         .unwrap_err();
-    assert_eq!(err, "dpkg failed");
+    assert_eq!(err, "apt-get failed");
     assert_eq!(*host.restarts.lock().unwrap(), 0);
-    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    assert!(empty(dir.path()));
 }
 
 #[tokio::test]
-async fn an_unreadable_status_installs_nothing() {
-    let server = server("0.29.54", serde_json::json!({"oops": 1}), PAYLOAD, 0).await;
+async fn an_unreadable_or_failing_status_installs_nothing() {
+    let unreadable = server("0.29.54", PAYLOAD, 0, &[serde_json::json!({"oops": 1})]).await;
     let dir = tempfile::tempdir().unwrap();
-    let host = FakeHost::default();
-    let err = upgrader(&server, dir.path(), &host)
+    let host = FakeHost::with("ii", "0.29.53");
+    let err = upgrader(&unreadable, dir.path(), &host)
         .run_once()
         .await
         .unwrap_err();
     assert!(err.contains("rtmp_connected"), "{err}");
+
+    let failing = server("0.29.54", PAYLOAD, 0, &[]).await;
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&failing)
+        .await;
+    let err = upgrader(&failing, dir.path(), &host)
+        .run_once()
+        .await
+        .unwrap_err();
+    assert!(err.contains("500"), "{err}");
+    assert!(host.installs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_status_that_does_not_answer_in_time_is_not_idle() {
+    // Only "nothing listens" means the app is down; a hung app may stream.
+    let server = server("0.29.54", PAYLOAD, 0, &[]).await;
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(idle())
+                .set_delay(std::time::Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
+    let mut check = upgrader(&server, dir.path(), &host);
+    check.http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap();
+    let err = check.run_once().await.unwrap_err();
+    assert!(err.contains("/status"), "{err}");
+    assert!(host.installs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_app_that_is_down_counts_as_idle() {
+    // A release can be the fix for a crash loop: nothing listening on the
+    // status port means nothing streams.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_url = format!("http://{}/status", closed.local_addr().unwrap());
+    drop(closed);
+    let server = server("0.29.54", PAYLOAD, 1, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
+    let mut check = upgrader(&server, dir.path(), &host);
+    check.status_url = closed_url;
+    assert_eq!(check.run_once().await, upgraded(true));
+}
+
+#[tokio::test]
+async fn the_token_goes_to_the_release_api_only() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    // Anything but the release API that gets an Authorization header fails.
+    Mock::given(header_exists("authorization"))
+        .and(path_regex("^/(dl|status)"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // And the release API answers only with the token.
+    Mock::given(method("GET"))
+        .and(path("/latest-with-token"))
+        .and(header("authorization", "Bearer t0ken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "restreamer-v0.29.54",
+            "assets": [
+                {"name": SIGNED_DEB,
+                 "browser_download_url": format!("{}/dl/{SIGNED_DEB}", server.uri())},
+                {"name": format!("{SIGNED_DEB}.sig"),
+                 "browser_download_url": format!("{}/dl/{SIGNED_DEB}.sig", server.uri())},
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost::with("ii", "0.29.53");
+    let mut check = upgrader(&server, dir.path(), &host);
+    check.latest_url = format!("{}/latest-with-token", server.uri());
+    check.github_token = Some("t0ken".into());
+    assert_eq!(check.run_once().await, upgraded(true));
 }
 
 // --- the packaging the timer depends on ----------------------------------
@@ -392,8 +698,10 @@ fn the_deb_ships_and_enables_the_upgrade_timer() {
     let service = linux_file("restreamer-upgrade.service");
     assert!(service.contains("ExecStart=/usr/bin/Restreamer --upgrade-check"));
     assert!(service.contains("CacheDirectory=restreamer-upgrade"));
+    assert!(service.contains("TimeoutStartSec="));
     assert!(linux_file("restreamer-upgrade.timer").contains("OnUnitActiveSec="));
     assert!(linux_file("postinst").contains("systemctl enable --now restreamer-upgrade.timer"));
+    assert!(linux_file("prerm").contains("systemctl disable --now restreamer-upgrade.timer"));
 
     let conf: Value =
         serde_json::from_str(include_str!("../../../src-tauri/tauri.linux.conf.json"))

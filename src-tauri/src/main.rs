@@ -22,6 +22,11 @@ struct Args {
     /// then exit (release CI, #323)
     #[arg(long, num_args = 2, value_names = ["DEB", "SIG"])]
     verify_update: Option<Vec<PathBuf>>,
+
+    /// Restart the desktop user's restreamer unit the way the upgrade check
+    /// does, then exit (CI test of that path, #323)
+    #[arg(long, hide = true)]
+    restart_app: bool,
 }
 
 fn main() {
@@ -32,6 +37,9 @@ fn main() {
     }
     if let Some([deb, sig]) = args.verify_update.as_deref() {
         std::process::exit(rs_runtime::self_upgrade::verify_files_cli(deb, sig));
+    }
+    if args.restart_app {
+        std::process::exit(rs_runtime::self_upgrade::restart_app_cli());
     }
     if args.headless {
         restreamer_lib::run_headless();

@@ -206,12 +206,13 @@ jobs:
         run: |
           deb=$(ls src-tauri/target/release/bundle/deb/*.deb)
           [ "$(printf '%s\n' "$deb" | wc -l)" -eq 1 ] || { echo "expected one .deb: $deb"; exit 1; }
-          cargo tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$deb"
+          # The key has no password (generated in bf7bb18f); GitHub cannot store
+          # an empty secret, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not usable.
+          cargo tauri signer sign -p "" "$deb"
           test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
           src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: tauri-linux-deb

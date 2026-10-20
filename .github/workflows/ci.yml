@@ -687,7 +687,9 @@ jobs:
       - name: "Sign the .deb and verify it with the app's own key (#323)"
         run: |
           deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
-          cargo tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$deb"
+          # The key has no password (generated in bf7bb18f); GitHub cannot store
+          # an empty secret, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not usable.
+          cargo tauri signer sign -p "" "$deb"
           test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
           src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
           cp "$deb" tampered.deb
@@ -697,7 +699,6 @@ jobs:
           fi
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       # #323: install the package as the box does, then run the real check
       # against the GitHub release (this build is never older than it).
       - name: "Install the .deb and run the upgrade check like the box's timer (#323)"
@@ -713,6 +714,29 @@ jobs:
             || { echo "expected 'up to date': this build is not older than the latest release"; exit 1; }
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # #323: the upgrade restarts the GUI user's unit from ROOT
+      # (`systemctl --user -M <user>@`). Drive that exact path here, against a
+      # stand-in: a process named Restreamer run by the packaged user unit.
+      - name: "Restart a user's restreamer unit from root, as the upgrade does (#323)"
+        run: |
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          [ -S "$XDG_RUNTIME_DIR/bus" ] || { echo "the user manager did not start"; exit 1; }
+          mkdir -p ~/stand-in ~/.config/systemd/user/restreamer.service.d
+          cp /bin/sleep ~/stand-in/Restreamer
+          printf '[Service]\nExecStart=\nExecStart=%%h/stand-in/Restreamer infinity\n' \
+            > ~/.config/systemd/user/restreamer.service.d/stand-in.conf
+          systemctl --user daemon-reload
+          systemctl --user start restreamer
+          before=$(systemctl --user show -p MainPID --value restreamer)
+          [ "$before" -gt 0 ] || { echo "the stand-in did not start"; exit 1; }
+          sudo /usr/bin/Restreamer --restart-app
+          after=$(systemctl --user show -p MainPID --value restreamer)
+          echo "restreamer unit MainPID: $before -> $after"
+          if [ "$after" -le 0 ] || [ "$after" = "$before" ]; then
+            echo "the root restart did not restart the user's unit"; exit 1
+          fi
       - name: Upload the .deb
         uses: actions/upload-artifact@v4
         with:

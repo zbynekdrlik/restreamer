@@ -45,19 +45,32 @@ paths:
 - **stream-pp upgrades itself (#323, from 0.29.53).** The `.deb` ships a ROOT timer,
   `restreamer-upgrade.timer` (every 15 min), enabled by its `postinst`. It runs
   `Restreamer --upgrade-check` (`crates/rs-runtime/src/self_upgrade.rs`):
-  - it reads the latest GitHub release and acts only on a newer version;
-  - it waits while the box is busy (`rtmp_connected`, or an event receiving or
-    delivering): the restart would cut the stream;
-  - it installs only a `.deb` whose `.deb.sig` verifies with `UPDATER_PUBKEY`, which
-    must equal `tauri.conf.json`'s updater pubkey (a test pins it);
-  - it runs `dpkg -i`, then `systemctl --user -M <gui user>@ restart restreamer`.
+  - it compares the latest GitHub release with the INSTALLED package (`dpkg-query`
+    `${db:Status-Abbrev}`), never with its own compiled version: once dpkg replaced
+    `/usr/bin/Restreamer`, a compiled-version check would call a half-done install
+    (unconfigured, missing Depends) "up to date" forever;
+  - a GUI whose `/proc/<pid>/exe` ends in ` (deleted)` has a restart pending, and the
+    next idle check does it;
+  - it checks "idle" (no `rtmp_connected`, no event receiving or delivering) before the
+    download, again before the install and again before the restart. Nothing listening
+    on 127.0.0.1:8910 counts as idle: the app is down, and the release may fix that;
+  - it installs only a `.deb` whose `.deb.sig` verifies with `UPDATER_PUBKEY` (pinned to
+    `tauri.conf.json`'s updater pubkey by a test) AND whose signed comment names that
+    exact file (`file:Restreamer_<v>_amd64.deb`): a renamed old package cannot pose as
+    a newer release;
+  - it installs with `apt-get install -y -o DPkg::Lock::Timeout=300 <deb>` (a new
+    Depends gets installed), then `systemctl --user -M <gui user>@ daemon-reload` +
+    `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
+    not root and not a CLI mode (`--upgrade-check`, `--verify-update`, `--restart-app`).
 
   Read it with `journalctl -u restreamer-upgrade` (one line per check) and
   `systemctl list-timers restreamer-upgrade.timer`. The release signs the `.deb` with
-  `TAURI_SIGNING_PRIVATE_KEY` and verifies it with the built binary
-  (`Restreamer --verify-update <deb> <sig>`); dev CI does the same, and also installs
-  the `.deb` on the runner and runs the real check. A release now has 5 assets.
-  `self_upgrade_host.rs` (dpkg, systemctl, CLI) is mutation-excluded glue.
+  `TAURI_SIGNING_PRIVATE_KEY` (tauri-cli reads the password from the env; never pass
+  `-p`) and verifies it with the built binary (`Restreamer --verify-update <deb> <sig>`).
+  Dev CI does the same, installs the `.deb` on the runner, runs the real check, and
+  drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
+  unit under a lingering user manager. A release now has 5 assets.
+  `self_upgrade_host.rs` (dpkg, apt, systemctl, CLI) is mutation-excluded glue.
 - **Upgrading stream-pp by hand** (the first 0.29.53 install, or when the timer is
   broken) (`newlevel@10.76.8.204`): `newlevel` has no passwordless
   sudo there. The owner provided the sudo password on 2026-10-19 (#323: the

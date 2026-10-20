@@ -12,6 +12,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/Restreamer --upgrade-check
+# A hung apt-get or systemctl must not stall every later check.
+TimeoutStartSec=30min
 # Root-only download directory (/var/cache/restreamer-upgrade), never /tmp.
 CacheDirectory=restreamer-upgrade
 CacheDirectoryMode=0700
