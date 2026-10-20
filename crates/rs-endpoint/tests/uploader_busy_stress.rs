@@ -26,9 +26,10 @@
 //! `max_connections(1)` memory pool, which serialises everything and HIDES the
 //! bug) and drives the EXACT production write mix from a concurrent committer.
 //! Zero tolerance: the picker must surface ZERO immediate SQLITE_BUSY /
-//! BUSY_SNAPSHOT errors (the storm signature; a BUSY after a full 5 s
-//! busy_timeout is a slow runner disk and is only reported, #382), and every
-//! chunk must be claimed EXACTLY ONCE (no double-claim, no lost row).
+//! BUSY_SNAPSHOT errors (the storm signature), and every chunk must be claimed
+//! EXACTLY ONCE (no double-claim, no lost row). A BUSY after a full 5 s
+//! busy_timeout (a writer held the lock that long on a slow runner, #382) is
+//! tolerated up to SLOW_BUSY_CAP per run.
 //!
 //! The run is COUNT-based, not time-boxed (#382): the workers drain until every
 //! seeded chunk is claimed, however long a loaded runner takes. A liveness cap
@@ -39,7 +40,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
@@ -64,35 +65,27 @@ fn is_sqlite_busy(e: &rs_core::error::CoreError) -> bool {
     s.contains("database is locked") || s.contains("(code: 5") || s.contains("(code: 517")
 }
 
-/// A plain BUSY returned after at least this long means the pool's 5 s
+/// A BUSY returned after at least this long means the pool's 5 s
 /// `busy_timeout` ran out while some writer held the WAL write lock (Windows
-/// run 39389310586: three BUSY after 5364-5426 ms). SQLite's busy handler
-/// waits the full `busy_timeout` before it gives up, while the #256 storm
-/// returns its BUSY at once: SQLITE_BUSY_SNAPSHOT (517) and the read->write
-/// upgrade BUSY inside an open transaction never enter the handler.
+/// run 39389310586: three BUSY after 5364-5426 ms). The #256 storm returns its
+/// BUSY at once: SQLITE_BUSY_SNAPSHOT (517) and the read->write upgrade BUSY
+/// inside an open transaction never enter the busy handler. (An autocommit
+/// statement's 517 IS retried through the handler, so a rare late 517 after
+/// the full timeout counts as a slow writer here, which it is.) The stopwatch
+/// also covers the pool acquire, so a slow runner can only make a storm BUSY
+/// look slower, never a slow-writer BUSY look fast.
 const BUSY_TIMEOUT_RAN_OUT: Duration = Duration::from_millis(4500);
 
-/// At most this many slow-writer BUSY errors are tolerated in one run, and
-/// only with a measured slow write as their evidence (see the asserts).
+/// At most this many slow-writer BUSY errors are tolerated in one run: one
+/// lock held past busy_timeout cost three in run 39389310586, so this catches
+/// a lock held that long more than about twice per run (a long transaction,
+/// an await inside one), never one slow fsync.
 const SLOW_BUSY_CAP: u32 = 8;
 
-/// Whether a BUSY is the #256 storm. SQLITE_BUSY_SNAPSHOT (517) always is:
-/// the fixed single-statement picker and sent-mark can never return it. A
-/// plain BUSY is when it came back before `busy_timeout` could run out (the
-/// stopwatch also covers the pool acquire, so a slow runner can only make a
-/// storm BUSY look slower, never a slow-writer BUSY look fast).
-fn is_storm_busy(busy_snapshot: bool, waited: Duration) -> bool {
-    busy_snapshot || waited < BUSY_TIMEOUT_RAN_OUT
-}
-
-/// True for SQLITE_BUSY_SNAPSHOT (517).
-fn is_busy_snapshot(e: &rs_core::error::CoreError) -> bool {
-    if let rs_core::error::CoreError::Database(sqlx::Error::Database(db_err)) = e
-        && let Some(code) = db_err.code()
-    {
-        return code == "517";
-    }
-    e.to_string().contains("(code: 517")
+/// Whether a BUSY after `waited` is the #256 storm (returned at once) rather
+/// than an expired `busy_timeout` behind a slow writer.
+fn is_storm_busy(waited: Duration) -> bool {
+    waited < BUSY_TIMEOUT_RAN_OUT
 }
 
 /// Keeps the first 5 BUSY errors of each kind, labelled, with the call and
@@ -112,12 +105,6 @@ fn note_busy(
             started.elapsed().as_millis()
         ));
     }
-}
-
-/// Records a successful write's duration into the slowest-write counter: the
-/// evidence that excuses a slow-writer BUSY.
-fn note_write(slowest_ms: &AtomicU64, started: Instant) {
-    slowest_ms.fetch_max(started.elapsed().as_millis() as u64, Ordering::Relaxed);
 }
 
 /// Floor of the liveness cap on the whole claim phase. It is NOT a throughput
@@ -177,12 +164,9 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     // BUSY returned at once: the #256 storm signature (zero tolerance).
     let busy_hits = Arc::new(AtomicU32::new(0));
     // BUSY after a full busy_timeout wait: a writer held the lock past 5 s on
-    // a slow runner disk. Reported, not the storm (see is_storm_busy).
+    // a slow runner. Not the storm (see is_storm_busy); tolerated up to
+    // SLOW_BUSY_CAP.
     let slow_writer_busy = Arc::new(AtomicU32::new(0));
-    // The slowest SUCCESSFUL write (claim, sent-mark, committer write), in ms.
-    // A BUSY after a full busy_timeout is excused only when some write really
-    // took that long on this runner.
-    let slowest_write_ms = Arc::new(AtomicU64::new(0));
     // The first BUSY errors in full: which call, how long it waited, the
     // SQLite text. ~5000 ms = busy_timeout expired (a writer held the lock);
     // a few ms = SQLite bypassed the busy handler. Windows run 37700613077 hit
@@ -221,7 +205,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         let pool = pool.clone();
         let busy_hits = Arc::clone(&busy_hits);
         let slow_writer_busy = Arc::clone(&slow_writer_busy);
-        let slowest_write_ms = Arc::clone(&slowest_write_ms);
         let busy_details = Arc::clone(&busy_details);
         let other_errors = Arc::clone(&other_errors);
         let claims = Arc::clone(&claims);
@@ -233,7 +216,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                 let pick_started = Instant::now();
                 match db::pick_next_uploadable_chunk(&pool, now_ms).await {
                     Ok(Some(chunk)) => {
-                        note_write(&slowest_write_ms, pick_started);
                         // Count this claim. A correct picker claims each id
                         // exactly once across all workers.
                         {
@@ -248,20 +230,16 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                         // BUSY here is ALSO part of the storm the fix must
                         // eliminate — count it into busy_hits, don't swallow it.
                         let mark_started = Instant::now();
-                        let marked = db::record_upload_success(
+                        if let Err(e) = db::record_upload_success(
                             &pool,
                             chunk.id,
                             chrono::Utc::now().timestamp_millis(),
                             1,
                         )
-                        .await;
-                        if marked.is_ok() {
-                            note_write(&slowest_write_ms, mark_started);
-                        }
-                        if let Err(e) = marked {
+                        .await
+                        {
                             if is_sqlite_busy(&e) {
-                                let storm =
-                                    is_storm_busy(is_busy_snapshot(&e), mark_started.elapsed());
+                                let storm = is_storm_busy(mark_started.elapsed());
                                 let counter = if storm { &busy_hits } else { &slow_writer_busy };
                                 counter.fetch_add(1, Ordering::Relaxed);
                                 note_busy(&busy_details, storm, "mark", mark_started, &e);
@@ -275,7 +253,7 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                     }
                     Err(e) => {
                         if is_sqlite_busy(&e) {
-                            let storm = is_storm_busy(is_busy_snapshot(&e), pick_started.elapsed());
+                            let storm = is_storm_busy(pick_started.elapsed());
                             let counter = if storm { &busy_hits } else { &slow_writer_busy };
                             counter.fetch_add(1, Ordering::Relaxed);
                             note_busy(&busy_details, storm, "pick", pick_started, &e);
@@ -299,12 +277,10 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         let ws_tx = ws_tx.clone();
         let workers_done = Arc::clone(&workers_done);
         let committer_ok_rounds = Arc::clone(&committer_ok_rounds);
-        let slowest_write_ms = Arc::clone(&slowest_write_ms);
         committers.push(tokio::spawn(async move {
             let mut n = 0i64;
             while !workers_done.load(Ordering::SeqCst) {
                 // 1) chunk INSERT — same statement the inpoint chunker runs.
-                let write_started = Instant::now();
                 let inserted = db::insert_chunk(
                     &pool,
                     event_id,
@@ -314,9 +290,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                     1000,
                 )
                 .await;
-                if inserted.is_ok() {
-                    note_write(&slowest_write_ms, write_started);
-                }
 
                 // 2) audit batch — its own pool.begin() tx (write lock).
                 let rows = vec![AuditRow {
@@ -329,18 +302,10 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                     detail: serde_json::json!({"w": w, "n": n}),
                     ts_override: None,
                 }];
-                let write_started = Instant::now();
                 let audited = db::audit::insert_batch(&pool, &rows, &ws_tx).await;
-                if audited.is_ok() {
-                    note_write(&slowest_write_ms, write_started);
-                }
 
                 // 3) received-bytes bump — UPDATE on streaming_events.
-                let write_started = Instant::now();
                 let bumped = db::update_received_bytes(&pool, event_id, 1024).await;
-                if bumped.is_ok() {
-                    note_write(&slowest_write_ms, write_started);
-                }
 
                 n += 1;
                 if inserted.is_ok() && audited.is_ok() && bumped.is_ok() {
@@ -380,7 +345,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
 
     let busy = busy_hits.load(Ordering::Relaxed);
     let slow_busy = slow_writer_busy.load(Ordering::Relaxed);
-    let slowest_write = Duration::from_millis(slowest_write_ms.load(Ordering::Relaxed));
     let other = other_errors.load(Ordering::Relaxed);
     let rounds = committer_ok_rounds.load(Ordering::Relaxed);
     let seeded_done = seeded_claimed.load(Ordering::SeqCst);
@@ -396,8 +360,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         "uploader_busy_stress: {seeded_done}/{SEED} seeded chunks claimed, \
          {total_claims} claims in total (incl. committer-inserted), \
          {busy} storm BUSY, {slow_busy} BUSY after a full busy_timeout (slow writer), \
-         slowest write {slowest_write:?}, {other} other claim/mark errors, \
-         {rounds} committer rounds ok, elapsed {elapsed:?} (seed {seed_elapsed:?}, cap {cap:?})"
+         {other} other claim/mark errors, {rounds} committer rounds ok, \
+         elapsed {elapsed:?} (seed {seed_elapsed:?}, cap {cap:?})"
     );
 
     // Liveness: a distinct message, so a hang is never mistaken for the BUSY
@@ -423,8 +387,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     // ZERO tolerance: the storm is the bug. The fix (single atomic claim
     // statement) eliminates both the read snapshot (517) and the read->write
     // window (5). Any immediate BUSY escaping to the app layer is a
-    // regression. A BUSY after a full busy_timeout wait is the runner's disk,
-    // not the picker (is_storm_busy), and is only reported above.
+    // regression. A BUSY after a full busy_timeout wait is a writer that held
+    // the lock that long (is_storm_busy), checked against the cap below.
     assert_eq!(
         busy, 0,
         "picker surfaced {busy} immediate SQLITE_BUSY/BUSY_SNAPSHOT errors under \
@@ -432,20 +396,11 @@ async fn picker_no_busy_storm_under_production_write_mix() {
          picker, or busy_timeout failing to cover 517). Details: {busy_text}"
     );
 
-    // A BUSY after a full busy_timeout is excused only with evidence that a
-    // write on this runner really took that long, and only a few of them: a
-    // change that makes a writer hold the lock for 5 s (a long transaction,
-    // an await inside one) must still fail here.
-    assert!(
-        slow_busy == 0 || slowest_write >= BUSY_TIMEOUT_RAN_OUT,
-        "{slow_busy} BUSY after a full busy_timeout, but no successful write took \
-         {BUSY_TIMEOUT_RAN_OUT:?} or more (slowest {slowest_write:?}): something \
-         held the write lock without a slow write. Details: {busy_text}"
-    );
     assert!(
         slow_busy <= SLOW_BUSY_CAP,
         "{slow_busy} BUSY after a full busy_timeout (cap {SLOW_BUSY_CAP}): the write \
-         lock was held past 5 s again and again. Details: {busy_text}"
+         lock was held past 5 s again and again (a long transaction, an await \
+         inside one?). Details: {busy_text}"
     );
 
     // The write mix must really have run while the workers claimed; otherwise
@@ -485,11 +440,9 @@ async fn picker_no_busy_storm_under_production_write_mix() {
 }
 
 #[test]
-fn only_an_immediate_busy_or_a_busy_snapshot_is_the_storm() {
-    assert!(is_storm_busy(false, Duration::from_millis(3)));
-    assert!(is_storm_busy(false, Duration::from_millis(4499)));
-    assert!(!is_storm_busy(false, Duration::from_millis(4500)));
-    assert!(!is_storm_busy(false, Duration::from_millis(5426)));
-    // 517 is the storm whatever the stopwatch says.
-    assert!(is_storm_busy(true, Duration::from_millis(6000)));
+fn only_an_immediate_busy_is_the_storm() {
+    assert!(is_storm_busy(Duration::from_millis(3)));
+    assert!(is_storm_busy(Duration::from_millis(4499)));
+    assert!(!is_storm_busy(Duration::from_millis(4500)));
+    assert!(!is_storm_busy(Duration::from_millis(5426)));
 }

@@ -242,9 +242,10 @@ pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
 /// lock: Could not get lock ..." on stdout, and a run that then got the lock
 /// and failed for a real reason must stay an error. On stderr apt says "...
 /// is another process using it?" when its wait for the dpkg frontend or
-/// admin-directory lock runs out, and "Could not get lock ..." for the archives
-/// lock (never waited for) and the frontend lock; "... are you root?" is a
-/// missing permission, a real error. apt runs with `LC_ALL=C`
+/// admin-directory lock runs out (each retry's "Could not get lock" only goes
+/// to stdout as progress), and "Could not get lock ..." for the archives lock,
+/// which it never waits for; "... are you root?" is a missing permission, a
+/// real error. apt runs with `LC_ALL=C`
 /// ([`apt_get_install`]), so these are the English texts.
 pub fn dpkg_locked(error: &str) -> bool {
     let stderr = error.split(STDOUT_MARKER).next().unwrap_or(error);
