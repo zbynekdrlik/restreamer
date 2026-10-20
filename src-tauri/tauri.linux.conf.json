@@ -16,8 +16,12 @@
           "xvfb"
         ],
         "files": {
-          "/usr/lib/systemd/user/restreamer.service": "linux/restreamer.service"
-        }
+          "/usr/lib/systemd/user/restreamer.service": "linux/restreamer.service",
+          "/usr/lib/systemd/system/restreamer-upgrade.service": "linux/restreamer-upgrade.service",
+          "/usr/lib/systemd/system/restreamer-upgrade.timer": "linux/restreamer-upgrade.timer"
+        },
+        "postInstallScript": "linux/postinst",
+        "preRemoveScript": "linux/prerm"
       }
     }
   }

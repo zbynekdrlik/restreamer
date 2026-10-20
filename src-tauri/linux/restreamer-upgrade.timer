@@ -1,0 +1,12 @@
+# #323: check for a newer Restreamer release every 15 min (see
+# restreamer-upgrade.service). The package's postinst enables it.
+[Unit]
+Description=Restreamer upgrade check every 15 min (#323)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

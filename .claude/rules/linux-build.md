@@ -2,6 +2,7 @@
 paths:
   - "src-tauri/tauri.linux.conf.json"
   - "src-tauri/linux/**"
+  - "crates/rs-runtime/src/self_upgrade*.rs"
   - "crates/rs-core/src/paths.rs"
   - "crates/rs-runtime/src/www_dir.rs"
   - ".github/workflows/release.yml"
@@ -41,7 +42,61 @@ paths:
 - **A config file must exist** (#112). The minimum is `client_uuid` plus
   `s3.{bucket,region,endpoint,access_key_id,secret_access_key}`. Each box needs its OWN
   `client_uuid`.
-- **Upgrading stream-pp** (`newlevel@10.76.8.204`): `newlevel` has no passwordless
+- **stream-pp upgrades itself (#323, from 0.29.53).** The `.deb` ships a ROOT timer,
+  `restreamer-upgrade.timer` (every 15 min), enabled by its `postinst`. It runs
+  `Restreamer --upgrade-check` (`crates/rs-runtime/src/self_upgrade.rs`):
+  - it compares the latest GitHub release with the INSTALLED package (`dpkg-query`
+    `${db:Status-Want} ${db:Status-Status} ${Version}`), never with its own compiled
+    version: once dpkg replaced `/usr/bin/Restreamer`, a compiled-version check would
+    call a half-done install (unpacked, missing Depends) "up to date" forever. A
+    package on hold or being removed (Status-Want `hold`/`deinstall`/`purge`) is left
+    alone; a newer one is never downgraded; the release's `.deb`/`.sig` are looked up
+    only when an install is due; it restarts only after dpkg reports the new version
+    configured;
+  - a GUI whose `/proc/<pid>/exe` ends in ` (deleted)` has a restart pending, and the
+    next idle check does it;
+  - it checks "idle" (no `rtmp_connected`, no event receiving or delivering) before the
+    download, then does the slow work (download, verify, `apt-get --download-only` for
+    new Depends), checks again, installs, and restarts at once: an old binary serving
+    the new package's files would upload the new bundled VPS binary under the old
+    version. Both apt calls pass `-o DPkg::Lock::Timeout=10` (stream-pp's own apt
+    config says 600); a lock another install holds is a deferral to the next tick
+    (`dpkg_locked`: "is another process using it?", never "are you root?"). So the
+    gap between the last idle check and the restart is at most ~10 s of lock wait
+    plus the apt/dpkg run. A REFUSED status port counts as idle only while no GUI process runs
+    (the app is down; the release may fix it); a timeout, an HTTP error, or a refusal
+    while the GUI runs (another `api.port`/`api.bind`) is an error. The status
+    request has its own 10 s bound;
+  - it installs only a `.deb` whose `.deb.sig` verifies with `UPDATER_PUBKEY` (pinned to
+    `tauri.conf.json`'s updater pubkey by a test) AND whose signed comment names that
+    exact file (`file:Restreamer_<v>_amd64.deb`): a renamed old package cannot pose as
+    a newer release;
+  - it installs with `apt-get install -y -f --no-remove` (a new Depends gets
+    installed; `-f` repairs a hand `dpkg -i` that left the package unpacked, which
+    otherwise blocks every later apt install; `--no-remove` never removes another
+    package unattended), then
+    `systemctl --user -M <gui user>@ daemon-reload` + `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
+    not root and not a CLI mode (`--upgrade-check`, `--verify-update`, `--restart-app`).
+
+  Read it with `journalctl -u restreamer-upgrade` (one line per check) and
+  `systemctl list-timers restreamer-upgrade.timer`. The release signs the `.deb` with
+  `TAURI_SIGNING_PRIVATE_KEY` (tauri-cli reads the password from the env; never pass
+  `-p`) and verifies it with the built binary (`Restreamer --verify-update <deb> <sig>`).
+  **The signing key (2026-10-20, owner decision on #323):** the pair from bf7bb18f was
+  created with an empty password, and the minisign of the time stored it unencrypted
+  but flagged "Sc", so tauri-cli 2.x failed with "Wrong password for that key" for any
+  password. The SAME pair (pubkey unchanged) was re-encrypted with a real password
+  (minisign 0.9.1 `SecretKey::encrypt` + `raw_scrypt_params`, done in Python) and both
+  secrets replaced. The re-encrypted key and its password are the dev1 key files
+  `tauri-updater-signing-key` and `tauri-updater-signing-password` in the secrets
+  store. `~/.tauri/restreamer.key` (mode 600) holds the same re-encrypted key; no
+  unencrypted copy is kept. Never read them inline.
+  Dev CI does the same, installs the `.deb` on the runner, runs the real check (and
+  again under `apt-mark hold`: left alone), and drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
+  unit under a lingering user manager. A release now has 5 assets.
+  `self_upgrade_host.rs` (dpkg, apt, systemctl, CLI) is mutation-excluded glue.
+- **Upgrading stream-pp by hand** (the first 0.29.53 install, or when the timer is
+  broken) (`newlevel@10.76.8.204`): `newlevel` has no passwordless
   sudo there. The owner provided the sudo password on 2026-10-19 (#323: the
   streampp box drifts behind releases). It is the dev1 key file `stream-pp-sudo`
   in the secrets store, and it is used only through

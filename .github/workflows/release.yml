@@ -200,10 +200,27 @@ jobs:
           SQLX_OFFLINE: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # #323: stream-pp's upgrade timer installs only a .deb whose .sig
+      # verifies with the updater key compiled into the app.
+      - name: "Sign the .deb and verify it with the app's own key (#323)"
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb)
+          [ "$(printf '%s\n' "$deb" | wc -l)" -eq 1 ] || { echo "expected one .deb: $deb"; exit 1; }
+          # tauri-cli reads the key and its password from the env (never -p: it
+          # would put the password on a command line). The key was re-encrypted
+          # with a real password on 2026-10-20 (#323).
+          cargo tauri signer sign "$deb"
+          test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
+          src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: tauri-linux-deb
-          path: src-tauri/target/release/bundle/deb/*.deb
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb.sig
           if-no-files-found: error
 
   release:
@@ -235,7 +252,8 @@ jobs:
             ### Assets
             - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (unified app with embedded service + tray icon)
             - `rs-delivery-*-linux-amd64` — Linux delivery VPS binary
-            - `Restreamer_*_amd64.deb` — Linux build (stream-pp): `sudo apt install ./Restreamer_*_amd64.deb`, then `systemctl --user enable --now restreamer`
+            - `Restreamer_*_amd64.deb` — Linux build (stream-pp): `sudo apt install ./Restreamer_*_amd64.deb`, then `systemctl --user enable --now restreamer`. From then on the box upgrades itself while idle (`restreamer-upgrade.timer`, #323)
+            - `Restreamer_*_amd64.deb.sig` — its updater signature; the box's upgrade check installs nothing without it
 
             ### Installation
             ```powershell

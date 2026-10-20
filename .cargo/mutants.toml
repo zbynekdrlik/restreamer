@@ -105,5 +105,8 @@ exclude_globs = [
     "crates/rs-runtime/src/stall_resources_windows.rs",
     "crates/rs-runtime/src/rtmp_bind_windows.rs",
     "crates/rs-runtime/src/ingest_priority_windows.rs",
+    # #323: dpkg, systemctl and the CLI entry points of the upgrade check;
+    # every decision is a tested helper in self_upgrade.rs.
+    "crates/rs-runtime/src/self_upgrade_host.rs",
     "crates/rs-api/src/control_room/spawn_windows.rs",
 ]

@@ -657,9 +657,17 @@ jobs:
           # Tauri writes the paths without a leading "./"; strip it if present.
           dpkg-deb -c "$deb" | awk '{print $6}' | sed 's#^\./##' > deb-files.txt
           for want in usr/bin/Restreamer usr/lib/Restreamer/www/index.html \
-                      usr/lib/Restreamer/rs-delivery-linux usr/lib/systemd/user/restreamer.service; do
+                      usr/lib/Restreamer/rs-delivery-linux usr/lib/systemd/user/restreamer.service \
+                      usr/lib/systemd/system/restreamer-upgrade.service \
+                      usr/lib/systemd/system/restreamer-upgrade.timer; do
             grep -qx "$want" deb-files.txt || { echo "MISSING in .deb: $want"; cat deb-files.txt; exit 1; }
           done
+          # #323: the maintainer scripts enable the root upgrade timer.
+          dpkg-deb -e "$deb" deb-control
+          grep -q 'systemctl enable --now restreamer-upgrade.timer' deb-control/postinst \
+            || { echo "postinst must enable the upgrade timer (#323)"; ls deb-control; exit 1; }
+          grep -q 'systemctl disable --now restreamer-upgrade.timer' deb-control/prerm \
+            || { echo "prerm must disable the upgrade timer (#323)"; ls deb-control; exit 1; }
           dpkg-deb -f "$deb" Depends | grep -q ffmpeg || { echo ".deb does not depend on ffmpeg"; exit 1; }
           # #388: the control-room Chrome draws on Restreamer's own Xvfb display.
           dpkg-deb -f "$deb" Depends | grep -q xvfb || { echo ".deb does not depend on xvfb (#388)"; exit 1; }
@@ -672,6 +680,76 @@ jobs:
           jq -e '.app.windows[0] | .visible == true and .maximized == true and .closable == false' src-tauri/tauri.conf.json \
             || { echo "main window must be visible, maximized and non-closable (#393)"; jq '.app.windows' src-tauri/tauri.conf.json; exit 1; }
           echo "deb contents OK"
+      # #323: stream-pp's upgrade timer installs only a .deb whose minisign
+      # signature verifies with the updater key compiled into the app. Sign it
+      # like the release does, and verify it with that very binary, so a
+      # secret that does not match tauri.conf.json fails here, not on the box.
+      - name: "Sign the .deb and verify it with the app's own key (#323)"
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          # tauri-cli reads the key and its password from the env (never -p: it
+          # would put the password on a command line). The key was re-encrypted
+          # with a real password on 2026-10-20 (#323).
+          cargo tauri signer sign "$deb"
+          test -s "$deb.sig" || { echo "no signature written for $deb"; exit 1; }
+          src-tauri/target/release/Restreamer --verify-update "$deb" "$deb.sig"
+          cp "$deb" tampered.deb
+          printf 'tampered' >> tampered.deb
+          if src-tauri/target/release/Restreamer --verify-update tampered.deb "$deb.sig"; then
+            echo "a tampered .deb verified -- the check is broken"; exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # #323: install the package as the box does, then run the real check
+      # against the GitHub release (this build is never older than it).
+      - name: "Install the .deb and run the upgrade check like the box's timer (#323)"
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          sudo apt-get install -y "./$deb"
+          systemctl is-enabled restreamer-upgrade.timer
+          systemctl is-active restreamer-upgrade.timer
+          # Long past OnBootSec, the enabled timer fires within minutes: stop it
+          # and any check it already started, so only this step's checks run.
+          sudo systemctl stop restreamer-upgrade.timer restreamer-upgrade.service
+          # Real dpkg through the real code: a held package is left alone.
+          sudo apt-mark hold restreamer
+          held=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
+            || { echo "$held"; echo "the upgrade check failed on a held package"; exit 1; }
+          echo "$held"
+          echo "$held" | grep -q 'left alone' \
+            || { echo "a held package must be left alone"; exit 1; }
+          sudo apt-mark unhold restreamer
+          out=$(sudo GITHUB_TOKEN="$GITHUB_TOKEN" /usr/bin/Restreamer --upgrade-check 2>&1) \
+            || { echo "$out"; echo "the upgrade check failed"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q 'up to date: ' \
+            || { echo "expected 'up to date': this build is not older than the latest release"; exit 1; }
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      # #323: the upgrade restarts the GUI user's unit from ROOT
+      # (`systemctl --user -M <user>@`). Drive that exact path here, against a
+      # stand-in: a process named Restreamer run by the packaged user unit.
+      - name: "Restart a user's restreamer unit from root, as the upgrade does (#323)"
+        run: |
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          [ -S "$XDG_RUNTIME_DIR/bus" ] || { echo "the user manager did not start"; exit 1; }
+          mkdir -p ~/stand-in ~/.config/systemd/user/restreamer.service.d
+          cp /bin/sleep ~/stand-in/Restreamer
+          printf '[Service]\nExecStart=\nExecStart=%%h/stand-in/Restreamer infinity\n' \
+            > ~/.config/systemd/user/restreamer.service.d/stand-in.conf
+          systemctl --user daemon-reload
+          systemctl --user start restreamer
+          before=$(systemctl --user show -p MainPID --value restreamer)
+          [ "$before" -gt 0 ] || { echo "the stand-in did not start"; exit 1; }
+          sudo /usr/bin/Restreamer --restart-app
+          after=$(systemctl --user show -p MainPID --value restreamer)
+          echo "restreamer unit MainPID: $before -> $after"
+          if [ "$after" -le 0 ] || [ "$after" = "$before" ]; then
+            echo "the root restart did not restart the user's unit"; exit 1
+          fi
       - name: Upload the .deb
         uses: actions/upload-artifact@v4
         with:
