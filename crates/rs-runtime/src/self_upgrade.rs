@@ -237,14 +237,43 @@ pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
 }
 
 /// Whether an apt-get failure is only an apt/dpkg lock held by another apt
-/// run (unattended-upgrades, apt-daily): a deferral, not an error. apt says
-/// "... is another process using it?" when its wait for the dpkg frontend or
-/// admin-directory lock runs out, and "Could not get lock
-/// /var/cache/apt/archives/lock ..." for the archives lock it never waits
-/// for; "... are you root?" is a missing permission, a real error. apt runs
-/// with `LC_ALL=C`, so these are the English texts.
+/// run (unattended-upgrades, apt-daily): a deferral, not an error. Only the
+/// stderr part counts: while apt WAITS for a lock it prints "Waiting for cache
+/// lock: Could not get lock ..." on stdout, and a run that then got the lock
+/// and failed for a real reason must stay an error. On stderr apt says "...
+/// is another process using it?" when its wait for the dpkg frontend or
+/// admin-directory lock runs out, and "Could not get lock ..." for the archives
+/// lock (never waited for) and the frontend lock; "... are you root?" is a
+/// missing permission, a real error. apt runs with `LC_ALL=C`
+/// ([`apt_get_install`]), so these are the English texts.
 pub fn dpkg_locked(error: &str) -> bool {
-    error.contains("Could not get lock") || error.contains("is another process using it?")
+    let stderr = error.split(STDOUT_MARKER).next().unwrap_or(error);
+    stderr.contains("Could not get lock") || stderr.contains("is another process using it?")
+}
+
+/// `apt-get install` of a local `.deb` (`download_only`: fetch what it needs,
+/// install nothing), not `dpkg -i`: it installs a new Depends too.
+/// - `-f` repairs a half-install (a hand `dpkg -i` with a missing Depends
+///   leaves the package unpacked, and plain apt-get then refuses every later
+///   install); it also completes ANY other broken package on the box (installs
+///   its missing Depends), since such breakage blocked every upgrade;
+/// - `--no-remove` makes apt abort rather than remove another package
+///   unattended;
+/// - `DPkg::Lock::Timeout=10` waits at most 10 s for a held dpkg lock,
+///   whatever the box's apt config says (stream-pp sets 600);
+/// - `LC_ALL=C` keeps the messages [`dpkg_locked`] reads in English.
+pub fn apt_get_install(deb: &Path, download_only: bool) -> Command {
+    let mut command = Command::new("apt-get");
+    command
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .env("LC_ALL", "C")
+        .args(["install", "-y", "-f", "--no-remove"])
+        .args(["-o", "DPkg::Lock::Timeout=10"]);
+    if download_only {
+        command.arg("--download-only");
+    }
+    command.arg(deb);
+    command
 }
 
 /// Whether a reqwest error is a refused connection: nothing listens there.
@@ -341,6 +370,9 @@ pub fn run_command(command: &mut Command) -> Result<(), String> {
 /// Lines of stdout a failure keeps.
 const STDOUT_TAIL_LINES: usize = 20;
 
+/// Separates stderr from the stdout tail in a [`failure_text`].
+pub const STDOUT_MARKER: &str = " | stdout: ";
+
 /// stderr, then the last [`STDOUT_TAIL_LINES`] non-empty lines of stdout:
 /// apt names the package it would remove or cannot satisfy only on stdout
 /// ("The following packages will be REMOVED: ..."), while stderr says just
@@ -354,7 +386,7 @@ pub fn failure_text(stdout: &str, stderr: &str) -> String {
     if tail.is_empty() {
         stderr.trim().to_owned()
     } else {
-        format!("{} | stdout: {}", stderr.trim(), tail.join(" / "))
+        format!("{}{STDOUT_MARKER}{}", stderr.trim(), tail.join(" / "))
     }
 }
 

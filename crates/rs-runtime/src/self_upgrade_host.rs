@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use super::{
     DPKG_QUERY_FORMAT, Host, Installed, LATEST_RELEASE_URL, Outcome, STATUS_TIMEOUT, STATUS_URL,
-    UPDATER_PUBKEY, Upgrader, app_process, exe_replaced, parse_dpkg_query, passwd_user,
-    run_command, verify_signature,
+    UPDATER_PUBKEY, Upgrader, app_process, apt_get_install, exe_replaced, parse_dpkg_query,
+    passwd_user, run_command, verify_signature,
 };
 
 /// One request, the ~22 MB `.deb` included, over the venue's line.
@@ -50,14 +50,14 @@ impl Host for SystemHost {
         // The slow part (new Depends over the network), before the last
         // idle check; installs nothing. It takes the dpkg lock too: wait at
         // most 10 s whatever the box's apt config says (stream-pp sets 600).
-        run_command(apt_get(deb).arg("--download-only"))
+        run_command(&mut apt_get_install(deb, true))
     }
 
     fn install(&self, deb: &Path) -> Result<(), String> {
         // A dpkg lock held by unattended-upgrades fails within 10 s
         // (`dpkg_locked`), and the check tries again at the next tick instead
         // of waiting here, between the idle check and the restart.
-        run_command(&mut apt_get(deb))
+        run_command(&mut apt_get_install(deb, false))
     }
 
     fn restart_app(&self) -> Result<String, String> {
@@ -80,25 +80,6 @@ impl Host for SystemHost {
         ]))?;
         Ok(format!("restarted the restreamer unit of {user}"))
     }
-}
-
-/// `apt-get install` of a local `.deb`, not `dpkg -i`: it installs a new
-/// Depends too. `-f` repairs a half-install (a hand `dpkg -i` with a missing
-/// Depends leaves the package unpacked, and plain apt-get then refuses every
-/// later install); it also completes ANY other broken package on the box
-/// (installs its missing Depends), since such breakage blocked every upgrade.
-/// `--no-remove` makes apt abort rather than remove another package
-/// unattended. Waits at most 10 s for a held dpkg lock. `LC_ALL=C` keeps the
-/// messages `dpkg_locked` reads in English whatever the box's locale.
-fn apt_get(deb: &Path) -> Command {
-    let mut command = Command::new("apt-get");
-    command
-        .env("DEBIAN_FRONTEND", "noninteractive")
-        .env("LC_ALL", "C")
-        .args(["install", "-y", "-f", "--no-remove"])
-        .args(["-o", "DPkg::Lock::Timeout=10"])
-        .arg(deb);
-    command
 }
 
 fn init_journal_log() {

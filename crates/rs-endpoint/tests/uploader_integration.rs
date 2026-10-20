@@ -90,8 +90,6 @@ fn create_s3_config(endpoint: &str) -> S3Config {
     }
 }
 
-/// Run the uploader long enough to drain the queue, then shut it down.
-/// Polls the DB until `predicate` returns true or `max_wait` elapses.
 /// Runs the uploader until `predicate` holds or `max_wait` passes, then stops
 /// it. Returns whether the predicate held.
 async fn run_until<F>(

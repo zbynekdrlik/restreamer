@@ -357,6 +357,70 @@ fn a_failure_keeps_stderr_and_the_end_of_stdout() {
 }
 
 #[test]
+fn a_lock_apt_only_waited_for_on_stdout_is_not_a_deferral() {
+    // apt waited for the lock (stdout progress), got it, and then failed for
+    // a real reason: that stays an error.
+    let waited_then_failed = failure_text(
+        "Waiting for cache lock: Could not get lock /var/lib/dpkg/lock-frontend. It is \
+         held by process 9 (apt)...\nReading package lists...",
+        "E: Unable to locate package libfoo99",
+    );
+    assert!(!dpkg_locked(&waited_then_failed), "{waited_then_failed}");
+    // A lock on stderr is a deferral, with or without a stdout tail.
+    let held = failure_text(
+        "Reading package lists...",
+        "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is \
+         another process using it?",
+    );
+    assert!(dpkg_locked(&held), "{held}");
+}
+
+#[test]
+fn apt_installs_the_deb_repairing_without_removing_in_english() {
+    let deb = Path::new("/var/cache/restreamer-upgrade/Restreamer_0.29.54_amd64.deb");
+    let args = |command: &Command| -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    };
+    let install = apt_get_install(deb, false);
+    assert_eq!(install.get_program(), "apt-get");
+    assert_eq!(
+        args(&install),
+        [
+            "install",
+            "-y",
+            "-f",
+            "--no-remove",
+            "-o",
+            "DPkg::Lock::Timeout=10",
+            "/var/cache/restreamer-upgrade/Restreamer_0.29.54_amd64.deb"
+        ]
+    );
+    let envs: Vec<(String, String)> = install
+        .get_envs()
+        .filter_map(|(key, value)| {
+            Some((
+                key.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert!(envs.contains(&("LC_ALL".into(), "C".into())), "{envs:?}");
+    assert!(
+        envs.contains(&("DEBIAN_FRONTEND".into(), "noninteractive".into())),
+        "{envs:?}"
+    );
+    let fetch = args(&apt_get_install(deb, true));
+    assert!(fetch.contains(&"--download-only".to_owned()), "{fetch:?}");
+    assert_eq!(
+        fetch.last().map(String::as_str),
+        Some(deb.to_str().unwrap())
+    );
+}
+
+#[test]
 fn write_new_replaces_a_stale_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Restreamer_0.29.54_amd64.deb");
