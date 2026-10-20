@@ -48,26 +48,16 @@ impl Host for SystemHost {
 
     fn fetch_dependencies(&self, deb: &Path) -> Result<(), String> {
         // The slow part (new Depends over the network), before the last
-        // idle check; installs nothing.
-        run_command(
-            Command::new("apt-get")
-                .env("DEBIAN_FRONTEND", "noninteractive")
-                .args(["install", "--download-only", "-y"])
-                .arg(deb),
-        )
+        // idle check; installs nothing. It takes the dpkg lock too: wait at
+        // most 10 s whatever the box's apt config says (stream-pp sets 600).
+        run_command(apt_get(deb).arg("--download-only"))
     }
 
     fn install(&self, deb: &Path) -> Result<(), String> {
-        // apt-get, not dpkg -i: it installs a new Depends too. A dpkg lock
-        // held by unattended-upgrades fails within 10 s (`dpkg_locked`), and
-        // the check tries again at the next tick instead of waiting here,
-        // between the idle check and the restart.
-        run_command(
-            Command::new("apt-get")
-                .env("DEBIAN_FRONTEND", "noninteractive")
-                .args(["install", "-y", "-o", "DPkg::Lock::Timeout=10"])
-                .arg(deb),
-        )
+        // A dpkg lock held by unattended-upgrades fails within 10 s
+        // (`dpkg_locked`), and the check tries again at the next tick instead
+        // of waiting here, between the idle check and the restart.
+        run_command(&mut apt_get(deb))
     }
 
     fn restart_app(&self) -> Result<String, String> {
@@ -90,6 +80,21 @@ impl Host for SystemHost {
         ]))?;
         Ok(format!("restarted the restreamer unit of {user}"))
     }
+}
+
+/// `apt-get install` of a local `.deb`, not `dpkg -i`: it installs a new
+/// Depends too. `-f` repairs a half-install (a hand `dpkg -i` with a missing
+/// Depends leaves the package unpacked, and plain apt-get then refuses every
+/// later install); `--no-remove` makes apt abort rather than remove another
+/// package unattended. Waits at most 10 s for a held dpkg lock.
+fn apt_get(deb: &Path) -> Command {
+    let mut command = Command::new("apt-get");
+    command
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .args(["install", "-y", "-f", "--no-remove"])
+        .args(["-o", "DPkg::Lock::Timeout=10"])
+        .arg(deb);
+    command
 }
 
 fn init_journal_log() {

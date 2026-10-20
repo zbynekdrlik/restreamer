@@ -57,10 +57,13 @@ paths:
     next idle check does it;
   - it checks "idle" (no `rtmp_connected`, no event receiving or delivering) before the
     download, then does the slow work (download, verify, `apt-get --download-only` for
-    new Depends), checks again, installs with `DPkg::Lock::Timeout=10` (a held lock is
-    a deferral to the next tick, `dpkg_locked`) and restarts at once: an old binary
-    serving the new package's files would upload the new bundled VPS binary under the
-    old version. So only dpkg runs between the last idle check and the restart. A REFUSED status port counts as idle only while no GUI process runs
+    new Depends), checks again, installs, and restarts at once: an old binary serving
+    the new package's files would upload the new bundled VPS binary under the old
+    version. Both apt calls pass `-o DPkg::Lock::Timeout=10` (stream-pp's own apt
+    config says 600); a lock another install holds is a deferral to the next tick
+    (`dpkg_locked`: "is another process using it?", never "are you root?"). So the
+    gap between the last idle check and the restart is at most ~10 s of lock wait
+    plus the apt/dpkg run. A REFUSED status port counts as idle only while no GUI process runs
     (the app is down; the release may fix it); a timeout, an HTTP error, or a refusal
     while the GUI runs (another `api.port`/`api.bind`) is an error. The status
     request has its own 10 s bound;
@@ -68,7 +71,10 @@ paths:
     `tauri.conf.json`'s updater pubkey by a test) AND whose signed comment names that
     exact file (`file:Restreamer_<v>_amd64.deb`): a renamed old package cannot pose as
     a newer release;
-  - it installs with `apt-get install -y` (a new Depends gets installed), then
+  - it installs with `apt-get install -y -f --no-remove` (a new Depends gets
+    installed; `-f` repairs a hand `dpkg -i` that left the package unpacked, which
+    otherwise blocks every later apt install; `--no-remove` never removes another
+    package unattended), then
     `systemctl --user -M <gui user>@ daemon-reload` + `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
     not root and not a CLI mode (`--upgrade-check`, `--verify-update`, `--restart-app`).
 

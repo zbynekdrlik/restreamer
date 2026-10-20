@@ -12,11 +12,12 @@
 //! 3. stops while the box is busy (an RTMP publisher connected, or an event
 //!    receiving or delivering): the app restart would cut the stream. All the
 //!    slow work (download, verify, fetching new dependencies) comes first; it
-//!    looks again right before the install, installs without waiting for a
-//!    held dpkg lock, and restarts right after: an old binary serving the new
-//!    package's files is worse than a restart (it would upload the new bundled
-//!    VPS binary as the old version). So only dpkg itself runs between the
-//!    last idle check and the restart;
+//!    looks again right before the install, waits at most 10 s for a dpkg lock
+//!    another install holds (else it defers to the next check), and restarts
+//!    right after: an old binary serving the new package's files is worse than
+//!    a restart (it would upload the new bundled VPS binary as the old
+//!    version). So between the last idle check and the restart there is at
+//!    most ~10 s of lock wait plus the apt/dpkg run itself;
 //! 4. downloads the `.deb` and its `.sig`, and verifies the minisign signature
 //!    against [`UPDATER_PUBKEY`] AND that the signature was made for exactly
 //!    that file name (a renamed old package cannot pose as a newer one);
@@ -234,10 +235,12 @@ pub fn install_needed(installed: Option<&Installed>, latest: &Version) -> bool {
 }
 
 /// Whether an apt-get failure is only a dpkg lock held by another install
-/// (unattended-upgrades, apt-daily): a deferral, not an error.
+/// (unattended-upgrades, apt-daily): a deferral, not an error. apt says
+/// "... is another process using it?" for a held lock (frontend or admin
+/// directory) and "... are you root?" for a missing permission, which is a
+/// real error.
 pub fn dpkg_locked(error: &str) -> bool {
-    error.contains("Could not get lock")
-        || error.contains("Unable to acquire the dpkg frontend lock")
+    error.contains("Could not get lock") || error.contains("is another process using it?")
 }
 
 /// Whether a reqwest error is a refused connection: nothing listens there.
@@ -476,7 +479,12 @@ impl<H: Host> Upgrader<H> {
         deb: &Path,
         latest: &Version,
     ) -> Result<Option<Outcome>, String> {
-        self.host.fetch_dependencies(deb)?;
+        // unattended-upgrades holds the lock for minutes, so this first apt
+        // call is the one that usually meets it.
+        match self.host.fetch_dependencies(deb) {
+            Err(e) if dpkg_locked(&e) => return Ok(Some(locked(latest, &e))),
+            fetched => fetched?,
+        }
         if let Some(reason) = self.busy().await? {
             return Ok(Some(Outcome::Busy {
                 latest: latest.clone(),
@@ -484,12 +492,7 @@ impl<H: Host> Upgrader<H> {
             }));
         }
         match self.host.install(deb) {
-            Err(e) if dpkg_locked(&e) => {
-                return Ok(Some(Outcome::Busy {
-                    latest: latest.clone(),
-                    reason: format!("the dpkg lock is held by another install: {e}"),
-                }));
-            }
+            Err(e) if dpkg_locked(&e) => return Ok(Some(locked(latest, &e))),
             installed => installed?,
         }
         match self.host.installed()? {
@@ -556,6 +559,14 @@ impl<H: Host> Upgrader<H> {
             .await
             .map(|bytes| bytes.to_vec())
             .map_err(|e| format!("GET {url}: {e}"))
+    }
+}
+
+/// The deferral for a dpkg lock another install holds.
+fn locked(latest: &Version, error: &str) -> Outcome {
+    Outcome::Busy {
+        latest: latest.clone(),
+        reason: format!("the dpkg lock is held by another install: {error}"),
     }
 }
 

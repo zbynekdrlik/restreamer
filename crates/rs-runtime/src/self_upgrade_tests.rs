@@ -355,6 +355,7 @@ struct FakeHost {
     installed: Mutex<Option<Installed>>,
     app_running: bool,
     restart_pending: bool,
+    fetch_error: Option<String>,
     install_error: Option<String>,
     install_unfinished: bool,
     fetches: Mutex<u32>,
@@ -387,7 +388,10 @@ impl Host for &FakeHost {
     fn fetch_dependencies(&self, deb: &Path) -> Result<(), String> {
         assert!(deb.exists(), "the package is on disk before apt sees it");
         *self.fetches.lock().unwrap() += 1;
-        Ok(())
+        match &self.fetch_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     fn install(&self, deb: &Path) -> Result<(), String> {
@@ -686,11 +690,7 @@ async fn a_held_dpkg_lock_defers_the_install_to_the_next_check() {
     let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
     let dir = tempfile::tempdir().unwrap();
     let host = FakeHost {
-        install_error: Some(
-            "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42 \
-             (unattended-upgr)"
-                .into(),
-        ),
+        install_error: Some(LOCK_HELD.into()),
         ..FakeHost::with("install installed", "0.29.53")
     };
     let outcome = upgrader(&server, dir.path(), &host).run_once().await;
@@ -734,17 +734,66 @@ async fn a_package_being_removed_is_left_alone() {
     assert!(host.installs.lock().unwrap().is_empty());
 }
 
+/// What apt 3.2.0 writes to stderr after its lock wait (the `Could not get
+/// lock` lines go to stdout as progress).
+const LOCK_HELD: &str = "E: Unable to acquire the dpkg frontend lock \
+                         (/var/lib/dpkg/lock-frontend), is another process using it?";
+
+#[tokio::test]
+async fn a_dependency_that_cannot_be_fetched_is_an_error() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        fetch_error: Some("E: Unable to locate package libfoo99".into()),
+        ..FakeHost::with("install installed", "0.29.53")
+    };
+    let err = upgrader(&server, dir.path(), &host)
+        .run_once()
+        .await
+        .unwrap_err();
+    assert_eq!(err, "E: Unable to locate package libfoo99");
+    assert!(host.installs.lock().unwrap().is_empty());
+    assert!(empty(dir.path()));
+}
+
 #[test]
 fn only_a_held_dpkg_lock_is_a_deferral() {
+    assert!(dpkg_locked(LOCK_HELD));
+    assert!(dpkg_locked(
+        "E: Unable to lock the administration directory (/var/lib/dpkg/), is another \
+         process using it?"
+    ));
     assert!(dpkg_locked(
         "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42"
     ));
-    assert!(dpkg_locked(
-        "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend)"
+    // A missing permission is a real error, never a reason to wait.
+    assert!(!dpkg_locked(
+        "E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission \
+         denied)\nE: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), \
+         are you root?"
     ));
     assert!(!dpkg_locked(
         "E: Unable to correct problems, you have held broken packages."
     ));
+}
+
+#[tokio::test]
+async fn a_held_dpkg_lock_while_fetching_dependencies_defers_too() {
+    let server = server("0.29.54", PAYLOAD, 1, &[idle()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = FakeHost {
+        fetch_error: Some(LOCK_HELD.into()),
+        ..FakeHost::with("install installed", "0.29.53")
+    };
+    let outcome = upgrader(&server, dir.path(), &host).run_once().await;
+    assert!(
+        matches!(&outcome, Ok(Outcome::Busy { reason, .. }) if reason.contains("dpkg lock")),
+        "{outcome:?}"
+    );
+    assert_eq!(*host.fetches.lock().unwrap(), 1);
+    assert!(host.installs.lock().unwrap().is_empty());
+    assert_eq!(*host.restarts.lock().unwrap(), 0);
+    assert!(empty(dir.path()));
 }
 
 #[tokio::test]
@@ -851,6 +900,8 @@ async fn any_other_status_failure_is_an_error_with_its_cause() {
     check.status_url = url.clone();
     let err = check.run_once().await.unwrap_err();
     assert!(err.starts_with(&format!("GET {url}: ")), "{err}");
+    // reqwest's own text leaves the cause out; the chain names it.
+    assert!(err.contains(": client error ("), "{err}");
     assert!(host.installs.lock().unwrap().is_empty());
 }
 
