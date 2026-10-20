@@ -147,20 +147,24 @@ async fn uploader_full_flow_success() {
 
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
+    let chunk_path_check = chunk_path.clone();
     run_until(
         uploader,
         &pool,
         move || {
             let s3_state_check = s3_state_check.clone();
             let pool_check = pool_check.clone();
+            let chunk_path_check = chunk_path_check.clone();
+            // The uploader marks the chunk sent, THEN deletes the local file:
+            // wait for that last step itself, never a fixed moment after the
+            // first (a starved Windows runner missed 50 ms, #382).
             Box::pin(async move {
-                if s3_state_check.upload_count.load(Ordering::SeqCst) >= 1 {
-                    // Give a brief moment for DB writes to complete
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    let chunks = db::get_unsent_chunks(&pool_check, 10).await.unwrap();
-                    return chunks.is_empty();
-                }
-                false
+                s3_state_check.upload_count.load(Ordering::SeqCst) >= 1
+                    && db::get_unsent_chunks(&pool_check, 10)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                    && !chunk_path_check.exists()
             })
         },
         Duration::from_secs(5),
