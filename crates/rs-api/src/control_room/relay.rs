@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
+use super::kiosk_picker::pick_for_page;
 use super::page_hooks::{copy_hook_source, hls_cors_hook_source};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
@@ -441,7 +442,6 @@ pub async fn relay_room(
     shown_tabs: ShownTabs,
     picker: Option<Arc<dyn NativeFilePicker>>,
 ) {
-    let _ = picker;
     let (mut client_tx, mut client_rx) = client.split();
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
     let _ = to_client.send(url_message(&start_url));
@@ -478,6 +478,7 @@ pub async fn relay_room(
             uploads: &uploads,
             skip: &done,
             shown_tabs: &shown_tabs,
+            picker: &picker,
         };
         let end = relay_tab(shown, &mut client_rx, navigate_to.take()).await;
         let left = match end {
@@ -562,6 +563,8 @@ struct TabSession<'a> {
     skip: &'a std::collections::HashSet<String>,
     /// The tabs every relay shows now; the others get hidden (#407).
     shown_tabs: &'a ShownTabs,
+    /// The box's own file dialog, for a viewer on the box (#414).
+    picker: &'a Option<Arc<dyn NativeFilePicker>>,
 }
 
 /// Relay the viewer to one tab until the viewer leaves, the tab goes away,
@@ -582,6 +585,7 @@ async fn relay_tab(
         uploads,
         skip,
         shown_tabs,
+        picker,
     } = shown;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(tab)).await {
         Ok((ws, _)) => ws,
@@ -604,6 +608,8 @@ async fn relay_tab(
     // The <input type=file> of a file chooser the page opened that no file
     // went into yet.
     let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
+    // The box's dialog is open for that chooser (#414).
+    let picking = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // The screencast session of the frame the dashboard has not drawn yet.
     // Chrome sends the next frame only after an ack, so acking on "drawn"
     // paces the frames to the viewer (no queue grows behind a slow one).
@@ -675,6 +681,7 @@ async fn relay_tab(
         let view = Arc::clone(view);
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
+        let (picker, picking) = (picker.clone(), Arc::clone(&picking));
         let main_frame = tab.to_string();
         let (hide_cdp, hide_shown) = (cdp.clone(), shown_tabs.clone());
         async move {
@@ -758,6 +765,22 @@ async fn relay_tab(
                             "control rooms: tab {main_frame} opened a file chooser ({mode}, input {node:?})"
                         );
                         *chooser.lock().unwrap_or_else(|p| p.into_inner()) = node;
+                        // #414: on the box's own screen its dialog opens at
+                        // once; a chooser while it is open opens no second one.
+                        if let (Some(picker), Some(_)) = (&picker, node) {
+                            if !picking.swap(true, Ordering::SeqCst) {
+                                let (picker, chooser) = (Arc::clone(picker), Arc::clone(&chooser));
+                                let (call, to_client) = (call.clone(), to_client.clone());
+                                let (picking, tab) = (Arc::clone(&picking), main_frame.clone());
+                                tokio::spawn(async move {
+                                    let reply =
+                                        pick_for_page(picker, mode, chooser, call, picking, tab)
+                                            .await;
+                                    let _ = to_client.send(text_message(&reply));
+                                });
+                            }
+                            continue;
+                        }
                         let m = json!({ "t": "file-chooser", "mode": mode }).to_string();
                         if to_client.send(AxMessage::Text(m.into())).is_err() {
                             break;

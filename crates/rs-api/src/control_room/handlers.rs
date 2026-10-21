@@ -146,8 +146,7 @@ pub fn viewer_picker(
     local: bool,
     installed: Option<std::sync::Arc<dyn rs_core::native_picker::NativeFilePicker>>,
 ) -> Option<std::sync::Arc<dyn rs_core::native_picker::NativeFilePicker>> {
-    let _ = (local, installed);
-    None
+    installed.filter(|_| local)
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +157,8 @@ pub struct WsQuery {
 pub async fn ws(
     State(state): State<AppState>,
     Query(q): Query<WsQuery>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let pages = match state.control_rooms.browser.cdp.pages().await {
@@ -182,6 +183,14 @@ pub async fn ws(
         std::sync::Arc::new(move |url: String| rooms.note_url(&tab, &url));
     let uploads = state.control_rooms.uploads_dir();
     let shown_tabs = state.control_rooms.shown_tabs();
+    let local = crate::access::is_genuinely_local(peer.map(|p| p.0.0).as_ref(), &headers);
+    let picker = viewer_picker(local, rs_core::native_picker::installed());
+    tracing::info!(
+        "control rooms: viewer for tab {} from {} (box dialog: {})",
+        page.target_id,
+        if local { "the box" } else { "elsewhere" },
+        if picker.is_some() { "yes" } else { "no" }
+    );
     // A file (thumbnail, #399) travels base64 in one message: up to ~27 MB. A
     // browser sends each message as ONE frame, so the frame limit (16 MiB by
     // default) must match, or a larger file drops the whole room.
@@ -197,7 +206,7 @@ pub async fn ws(
                 on_url,
                 uploads,
                 shown_tabs,
-                None,
+                picker,
             )
         })
 }

@@ -4,6 +4,9 @@ paths:
   - "leptos-ui/src/components/control_room.rs"
   - "leptos-ui/src/api/control_rooms.rs"
   - "e2e/control-rooms.spec.ts"
+  - "e2e/hls-cors-hook.unit.spec.ts"
+  - "src-tauri/src/native_dialog.rs"
+  - "crates/rs-core/src/native_picker.rs"
 ---
 
 # Control rooms: the YT/FB tabs in the dashboard (#388)
@@ -91,6 +94,47 @@ paths:
     document): the relay sends `{t:file-chooser-closed}` and the room hides the bar.
   - Decoding and writing a file run in `spawn_blocking`, so a 20 MB upload never stalls
     the frames.
+  - **On the box's own screen the box's dialog opens at once (#414).** The kiosk
+    operators never found the bar's second button (7 clicks on "Upload thumbnail" in
+    4 s, stream-pp 2026-10-21). The desktop app installs its native dialog
+    (`src-tauri/src/native_dialog.rs`, tauri-plugin-dialog = rfd's in-process GTK
+    dialog, no portal) into `rs_core::native_picker`. The room socket handler gives it
+    to the relay only for a viewer on the box: `access::is_genuinely_local` (loopback
+    peer, no proxy header), so a notebook or the tunnel never opens a dialog on the
+    box's screen (`handlers::viewer_picker`).
+    - The relay (`kiosk_picker::pick_for_page`) opens it on `Page.fileChooserOpened`,
+      puts the picked file into the chooser BY ITS PATH (`DOM.setFileInputFiles`, no
+      upload), and answers `{t:file-done,how:"picker"}`. A cancel sends the bar.
+    - A chooser while the dialog is open opens no second one (`picking`).
+    - Never take a PATH from a dashboard message instead: any client could then make
+      Chrome upload any file of the box (the config holds credentials).
+    - The dashboard window loads `http://127.0.0.1:8910` as a REMOTE page: it has no
+      Tauri IPC (`window.__TAURI__` is undefined there; only the E2E's tauri-mock sets
+      it). So GUI-side help for the dashboard goes through the backend, as here.
+    - Chrome's OWN chooser (interception off: no viewer attached) goes through the
+      desktop portal with an empty parent (`Unhandled parent window type`): its dialog
+      lands somewhere on `:0`, unattached.
+- **YouTube Studio's live preview needs the HLS hook (#415).** Chrome 151+ plays HLS
+  natively and refuses segments from another origin than the manifest unless the
+  media element asked in CORS mode ("insecure media request",
+  `hls_network_access_impl.cc`; reported over CDP only as
+  `DEMUXER_ERROR_COULD_NOT_PARSE` <- `HlsDemuxerStatus::Network read error`). Studio's
+  manifest is on `www.youtube.com/api/manifest/hls_*`, its segments on
+  `rr*.c.youtube.com`, and its `<video>` had no `crossorigin`: the preview sat at
+  `0:00 / 0:00` (player state 3, `readyState` 0) forever.
+  - `page_hooks.rs` installs `hls_cors_hook.js` next to the copy hook: on YouTube
+    pages an element whose `src` is such a manifest gets `crossOrigin =
+    'use-credentials'` (YouTube answers ACAO `https://studio.youtube.com` + ACAC true;
+    a segment without cookies is 403, so `anonymous` would fail).
+  - `--disable-features=BuiltInHlsPlayer` does nothing since M145 (the flag is gone);
+    hiding HLS from `canPlayType` makes Studio show "An error occurred".
+  - To diagnose a room's media: a second CDP client on the page
+    (`websocket-client` with `suppress_origin=True`, Chrome rejects the Origin
+    header) with `Media.enable` shows `playerErrorsRaised`; the player's
+    `getPlayerState()`, `getStatsForNerds()` and `getPlayerResponse().streamingData`
+    are readable with `Runtime.evaluate`. Read-only on a production room.
+  - `e2e/hls-cors-hook.unit.spec.ts` runs the same file in Chromium on a routed
+    `studio.youtube.com` page.
 - **Popups.** Studio "Switch account" opens `youtube.com/account` in a new tab.
   The relay polls `Target.getTargets` for tabs whose `openerId` is the room tab,
   navigates the room tab there, and closes the popup.

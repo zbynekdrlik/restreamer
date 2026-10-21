@@ -1,5 +1,6 @@
 mod commands;
 mod dashboard_load;
+mod native_dialog;
 mod state;
 mod tray;
 mod tray_icons;
@@ -260,6 +261,9 @@ pub fn run() {
             if let Err(e) = tray::setup_tray(app) {
                 tracing::warn!("System tray unavailable, continuing with the window only: {e}");
             }
+
+            // #414: a room page's file chooser opens this dialog on the box.
+            native_dialog::install(app.handle());
 
             // #393: the window is visible from the start; load the dashboard
             // once the embedded server answers.

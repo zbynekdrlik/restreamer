@@ -59,3 +59,28 @@ fn a_cancel_shows_the_bar_and_keeps_the_chooser() {
         "the bar can still fill it"
     );
 }
+
+struct Cancels;
+
+impl NativeFilePicker for Cancels {
+    fn pick_file(&self) -> rs_core::native_picker::Pick {
+        Box::pin(async { None })
+    }
+}
+
+/// The next "Upload thumbnail" after a closed dialog opens it again.
+#[tokio::test]
+async fn a_closed_dialog_lets_the_next_chooser_open_one() {
+    let picking = Arc::new(AtomicBool::new(true));
+    let reply = pick_for_page(
+        Arc::new(Cancels),
+        "selectSingle".into(),
+        Arc::new(Mutex::new(Some(42))),
+        |_: &str, _: Value| {},
+        Arc::clone(&picking),
+        "T1".into(),
+    )
+    .await;
+    assert_eq!(reply["t"], "file-chooser");
+    assert!(!picking.load(Ordering::SeqCst), "the dialog is closed");
+}

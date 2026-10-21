@@ -8,9 +8,30 @@
 //! by its path, with no upload. A cancel shows the bar.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
+use rs_core::native_picker::NativeFilePicker;
 use serde_json::{Value, json};
+
+use super::relay::file_actions;
+
+/// Opens the box's dialog for the page's pending chooser and returns the
+/// dashboard message once it closed. `picking` was set by the caller and is
+/// cleared when the dialog closes.
+pub async fn pick_for_page(
+    picker: Arc<dyn NativeFilePicker>,
+    mode: String,
+    chooser: Arc<Mutex<Option<i64>>>,
+    call: impl Fn(&str, Value),
+    picking: Arc<AtomicBool>,
+    tab: String,
+) -> Value {
+    tracing::info!("control rooms: tab {tab}: the page wants a file; opening the box dialog");
+    let picked = picker.pick_file().await;
+    picking.store(false, Ordering::SeqCst);
+    picked_reply(picked.as_deref(), &mode, &chooser, &call, &tab)
+}
 
 /// The dashboard message once the box's dialog closed. A chosen file goes
 /// into the page's pending chooser; a cancel shows the bar, for a drop or
@@ -22,8 +43,28 @@ pub fn picked_reply(
     call: &impl Fn(&str, Value),
     tab: &str,
 ) -> Value {
-    let _ = (picked, chooser, call, tab);
-    json!({ "t": "file-chooser", "mode": mode })
+    let Some(path) = picked else {
+        tracing::info!("control rooms: tab {tab}: the box dialog was cancelled; the bar shows");
+        return json!({ "t": "file-chooser", "mode": mode });
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(node) = chooser.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+        tracing::warn!(
+            "control rooms: tab {tab}: {name} was picked, but the page no longer waits for a file"
+        );
+        return json!({
+            "t": "file-error",
+            "error": "stránka už súbor nečaká (medzitým sa zmenila); klikni na nahranie znova",
+        });
+    };
+    tracing::info!("control rooms: tab {tab}: {name} into the page by the box dialog");
+    for (method, params) in file_actions(&path.to_string_lossy(), Some(node), 0.0, 0.0) {
+        call(method, params);
+    }
+    json!({ "t": "file-done", "name": name, "how": "picker" })
 }
 
 #[cfg(test)]
