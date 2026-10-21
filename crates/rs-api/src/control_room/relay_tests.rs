@@ -205,6 +205,9 @@ async fn relay_streams_frames_and_forwards_input() {
             "Page.enable",
             "Runtime.enable",
             "Runtime.addBinding",
+            // The copy hook, then the HLS hook (#415).
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Runtime.evaluate",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.evaluate",
             "Page.setInterceptFileChooserDialog",
