@@ -630,7 +630,7 @@ async fn relay_tab(
         let to_page = to_page.clone();
         let seq = Arc::clone(&seq);
         move |method: &str, params: Value| {
-            let id = seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let id = cdp::next_id(&seq);
             let _ = to_page.send(cdp::request(id, method, params));
         }
     };

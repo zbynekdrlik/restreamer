@@ -74,7 +74,7 @@ pub fn spawn_pick(dialog: BoxDialog, mode: String, to: PickTarget) {
     tokio::spawn(async move {
         let call = |method: &str, params: Value| match page.upgrade() {
             Some(page) => {
-                let id = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                let id = cdp::next_id(&seq);
                 let _ = page.send(cdp::request(id, method, params));
             }
             None => tracing::info!("control rooms: tab {tab}: left before the dialog closed"),
