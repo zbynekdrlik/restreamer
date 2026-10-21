@@ -22,13 +22,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::ws::{Message as AxMessage, WebSocket};
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use rs_core::native_picker::NativeFilePicker;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
-use super::kiosk_picker::pick_for_page;
+use super::kiosk_picker::{BoxDialog, pick_for_page};
 use super::page_hooks::{copy_hook_source, hls_cors_hook_source};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
@@ -440,7 +439,7 @@ pub async fn relay_room(
     on_url: UrlSink,
     uploads: std::path::PathBuf,
     shown_tabs: ShownTabs,
-    picker: Option<Arc<dyn NativeFilePicker>>,
+    dialog: Option<BoxDialog>,
 ) {
     let (mut client_tx, mut client_rx) = client.split();
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
@@ -478,7 +477,7 @@ pub async fn relay_room(
             uploads: &uploads,
             skip: &done,
             shown_tabs: &shown_tabs,
-            picker: &picker,
+            dialog: &dialog,
         };
         let end = relay_tab(shown, &mut client_rx, navigate_to.take()).await;
         let left = match end {
@@ -564,7 +563,7 @@ struct TabSession<'a> {
     /// The tabs every relay shows now; the others get hidden (#407).
     shown_tabs: &'a ShownTabs,
     /// The box's own file dialog, for a viewer on the box (#414).
-    picker: &'a Option<Arc<dyn NativeFilePicker>>,
+    dialog: &'a Option<BoxDialog>,
 }
 
 /// Relay the viewer to one tab until the viewer leaves, the tab goes away,
@@ -585,7 +584,7 @@ async fn relay_tab(
         uploads,
         skip,
         shown_tabs,
-        picker,
+        dialog,
     } = shown;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(tab)).await {
         Ok((ws, _)) => ws,
@@ -681,7 +680,7 @@ async fn relay_tab(
         let view = Arc::clone(view);
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
-        let (picker, picking) = (picker.clone(), Arc::clone(&picking));
+        let (dialog, picking) = (dialog.clone(), Arc::clone(&picking));
         let main_frame = tab.to_string();
         let (hide_cdp, hide_shown) = (cdp.clone(), shown_tabs.clone());
         async move {
@@ -767,9 +766,10 @@ async fn relay_tab(
                         *chooser.lock().unwrap_or_else(|p| p.into_inner()) = node;
                         // #414: on the box's own screen its dialog opens at
                         // once; a chooser while it is open opens no second one.
-                        if let (Some(picker), Some(_)) = (&picker, node) {
+                        if let (Some(dialog), Some(_)) = (&dialog, node) {
                             if !picking.swap(true, Ordering::SeqCst) {
-                                let (picker, chooser) = (Arc::clone(picker), Arc::clone(&chooser));
+                                let (picker, chooser) =
+                                    (Arc::clone(&dialog.picker), Arc::clone(&chooser));
                                 let (call, to_client) = (call.clone(), to_client.clone());
                                 let (picking, tab) = (Arc::clone(&picking), main_frame.clone());
                                 tokio::spawn(async move {

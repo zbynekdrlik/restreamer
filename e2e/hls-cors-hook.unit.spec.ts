@@ -71,6 +71,63 @@ test("on YouTube an HLS manifest is loaded with credentials in CORS mode", async
   expect(consoleMessages).toEqual([]);
 });
 
+// The relay also runs the hook in a page that is already open (a room's
+// first document, or a tab that outlived a Restreamer restart): a preview
+// whose manifest was set before the hook came is repaired and reloaded.
+test("a preview set before the hook arrived is repaired", async ({ page }) => {
+  const consoleMessages = collectConsole(page);
+  await page.route("https://www.youtube.com/**", (r) => r.fulfill({ status: 204, body: "" }));
+  await page.route("https://studio.youtube.com/**", (r) =>
+    r.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>room</title>" }),
+  );
+  await page.goto("https://studio.youtube.com/video/x/livestreaming");
+  await page.evaluate(
+    ({ hls, mp4 }) => {
+      for (const [id, src, preset] of [["hls", hls, ""], ["mp4", mp4, ""], ["own", hls, "anonymous"]]) {
+        const v = document.createElement("video");
+        v.id = id;
+        v.preload = "none";
+        if (preset) v.setAttribute("crossorigin", preset);
+        v.src = src;
+        document.body.appendChild(v);
+      }
+    },
+    { hls: HLS, mp4: MP4 },
+  );
+  await page.evaluate(HOOK);
+  const modes = await page.evaluate(() =>
+    ["hls", "mp4", "own"].map((id) => (document.getElementById(id) as HTMLVideoElement).crossOrigin),
+  );
+  expect(modes).toEqual(["use-credentials", null, "anonymous"]);
+
+  expect(consoleMessages).toEqual([]);
+});
+
+// The mode follows the source: an element the hook marked that then gets
+// anything but an HLS manifest is back to the page's own (no) mode.
+test("an element reused for another source drops the hook's mode", async ({ page }) => {
+  const consoleMessages = collectConsole(page);
+  await openWithHook(page, "https://studio.youtube.com/video/x/livestreaming");
+  const modes = await page.evaluate(
+    ({ hls, mp4 }) => {
+      const v = document.createElement("video");
+      v.preload = "none";
+      v.src = hls;
+      const first = v.crossOrigin;
+      v.src = mp4;
+      const second = v.crossOrigin;
+      v.setAttribute("src", hls);
+      const third = v.crossOrigin;
+      v.setAttribute("src", mp4);
+      return [first, second, third, v.crossOrigin];
+    },
+    { hls: HLS, mp4: MP4 },
+  );
+  expect(modes).toEqual(["use-credentials", null, "use-credentials", null]);
+
+  expect(consoleMessages).toEqual([]);
+});
+
 test("other sites are left alone", async ({ page }) => {
   const consoleMessages = collectConsole(page);
   await openWithHook(page, "https://www.facebook.com/live/producer/");

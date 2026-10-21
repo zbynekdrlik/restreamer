@@ -206,7 +206,10 @@ pub async fn ws(
                 on_url,
                 uploads,
                 shown_tabs,
-                picker,
+                picker.map(|picker| super::kiosk_picker::BoxDialog {
+                    picker,
+                    open: std::sync::Arc::default(),
+                }),
             )
         })
 }

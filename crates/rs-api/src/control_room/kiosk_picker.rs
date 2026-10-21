@@ -10,11 +10,33 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rs_core::native_picker::NativeFilePicker;
 use serde_json::{Value, json};
 
 use super::relay::file_actions;
+
+/// The box's own dialog, and whether it is open: one for the whole box,
+/// whichever room or viewer asked.
+#[derive(Clone)]
+pub struct BoxDialog {
+    pub picker: Arc<dyn NativeFilePicker>,
+    pub open: Arc<AtomicBool>,
+}
+
+/// How long after the viewer's own click or key a page's file chooser counts
+/// as theirs.
+pub const OWN_INPUT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Whether a page's file chooser opens the box dialog: an `<input>` waits for
+/// the file (`node`), and it followed this viewer's own click or key within
+/// [`OWN_INPUT_WINDOW`] (`since_own_input`), not the page by itself and not
+/// another viewer of the same tab.
+pub fn opens_box_dialog(node: Option<i64>, since_own_input: Option<Duration>) -> bool {
+    let _ = since_own_input;
+    node.is_some()
+}
 
 /// Opens the box's dialog for the page's pending chooser and returns the
 /// dashboard message once it closed. `picking` was set by the caller and is

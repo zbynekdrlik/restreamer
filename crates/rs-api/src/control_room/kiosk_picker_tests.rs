@@ -84,3 +84,15 @@ async fn a_closed_dialog_lets_the_next_chooser_open_one() {
     assert_eq!(reply["t"], "file-chooser");
     assert!(!picking.load(Ordering::SeqCst), "the dialog is closed");
 }
+
+/// #414 review: only a chooser that followed this viewer's own click or key
+/// opens the box dialog, and only for an `<input>`.
+#[test]
+fn the_box_dialog_opens_only_after_the_viewers_own_input() {
+    let s = |ms: u64| Some(std::time::Duration::from_millis(ms));
+    assert!(opens_box_dialog(Some(42), s(0)));
+    assert!(opens_box_dialog(Some(42), s(3_000)), "the window's edge");
+    assert!(!opens_box_dialog(Some(42), s(3_001)), "too long after");
+    assert!(!opens_box_dialog(Some(42), None), "the page by itself");
+    assert!(!opens_box_dialog(None, s(0)), "no <input> to fill");
+}
