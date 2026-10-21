@@ -19,6 +19,7 @@ pub mod cdp;
 #[cfg(test)]
 pub(crate) mod fake_chrome;
 pub mod handlers;
+pub mod page_hooks;
 pub mod popups;
 pub mod relay;
 #[cfg(windows)]

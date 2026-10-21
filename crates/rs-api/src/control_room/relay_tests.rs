@@ -703,6 +703,40 @@ async fn a_copy_in_the_page_reaches_the_dashboard() {
 }
 
 #[test]
+fn the_hls_hook_puts_youtube_hls_into_cors_mode() {
+    let src = crate::control_room::page_hooks::hls_cors_hook_source();
+    assert!(src.contains("use-credentials"), "YouTube needs its cookies");
+    assert!(src.contains("api\\/manifest\\/hls_"), "only HLS manifests");
+    assert!(src.contains("youtube\\.com"), "only on YouTube pages");
+}
+
+/// #415: Chrome 151+ refuses the Studio preview's HLS segments unless the
+/// media element asks in CORS mode, so every room page gets the HLS hook, in
+/// later documents AND the one already open.
+#[tokio::test]
+async fn every_room_page_gets_the_hls_hook() {
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let page_addr = fake_page_copying(seen_tx).await;
+    let addr = serve_relay(Cdp::new(page_addr), "T1").await;
+    let (_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let src = crate::control_room::page_hooks::hls_cors_hook_source();
+    let (mut later, mut open) = (false, false);
+    let hooked = async {
+        while !(later && open) {
+            let r = seen.recv().await.unwrap();
+            later |= r["method"] == "Page.addScriptToEvaluateOnNewDocument"
+                && r["params"]["source"] == src;
+            open |= r["method"] == "Runtime.evaluate" && r["params"]["expression"] == src;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), hooked)
+        .await
+        .expect("the HLS hook was not installed for later documents and the open one");
+}
+
+#[test]
 fn reload_reloads_the_page_in_chrome() {
     // F5 sent as a key never reloads: Chrome handles it in the browser UI,
     // which a CDP key event does not reach.
