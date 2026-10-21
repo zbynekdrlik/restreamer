@@ -96,3 +96,14 @@ fn the_box_dialog_opens_only_after_the_viewers_own_input() {
     assert!(!opens_box_dialog(Some(42), None), "the page by itself");
     assert!(!opens_box_dialog(None, s(0)), "no <input> to fill");
 }
+
+#[test]
+fn a_press_is_the_viewers_own_click_or_key() {
+    assert!(is_own_press(&json!({"t": "m", "type": "mousePressed"})));
+    assert!(is_own_press(&json!({"t": "k", "type": "keyDown"})));
+    assert!(is_own_press(&json!({"t": "k", "type": "rawKeyDown"})));
+    assert!(!is_own_press(&json!({"t": "m", "type": "mouseMoved"})));
+    assert!(!is_own_press(&json!({"t": "m", "type": "mouseReleased"})));
+    assert!(!is_own_press(&json!({"t": "k", "type": "keyUp"})));
+    assert!(!is_own_press(&json!({"t": "paste", "type": "keyDown"})));
+}

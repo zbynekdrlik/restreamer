@@ -185,6 +185,7 @@ pub async fn ws(
     let shown_tabs = state.control_rooms.shown_tabs();
     let local = crate::access::is_genuinely_local(peer.map(|p| p.0.0).as_ref(), &headers);
     let picker = viewer_picker(local, rs_core::native_picker::installed());
+    let open = state.control_rooms.dialog_open();
     tracing::info!(
         "control rooms: viewer for tab {} from {} (box dialog: {})",
         page.target_id,
@@ -206,10 +207,7 @@ pub async fn ws(
                 on_url,
                 uploads,
                 shown_tabs,
-                picker.map(|picker| super::kiosk_picker::BoxDialog {
-                    picker,
-                    open: std::sync::Arc::default(),
-                }),
+                picker.map(|picker| super::kiosk_picker::BoxDialog { picker, open }),
             )
         })
 }

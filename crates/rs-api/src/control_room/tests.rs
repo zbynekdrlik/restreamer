@@ -866,6 +866,22 @@ fn every_relay_shares_one_shown_tabs_set() {
     assert!(rooms.shown_tabs().is_shown("T1"));
 }
 
+/// #414: every room relay gets the SAME "box dialog open" flag, so a second
+/// room asking while the dialog is open gets the bar, not a second dialog.
+#[test]
+fn every_relay_shares_one_box_dialog_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let rooms = ControlRooms::new(dir.path());
+    rooms
+        .dialog_open()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        rooms
+            .dialog_open()
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
 /// #405 follow-up: a page saved by an older release that `remember_url`
 /// rejects today (YT-BB-RTMP on stream-pp kept `studio.youtube.com/reauth`
 /// from 0.29.47) is never reopened: the room opens at its default page.

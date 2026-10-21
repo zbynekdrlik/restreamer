@@ -356,6 +356,8 @@ pub struct ControlRooms {
     open_lock: Mutex<()>,
     /// The tabs a viewer watches now; every other room is hidden (#407).
     shown_tabs: visibility::ShownTabs,
+    /// The box's file dialog is open (#414): one for the whole box.
+    dialog_open: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ControlRooms {
@@ -373,7 +375,13 @@ impl ControlRooms {
             open_lock: Mutex::new(()),
             tabs_path,
             shown_tabs: visibility::ShownTabs::default(),
+            dialog_open: std::sync::Arc::default(),
         }
+    }
+
+    /// Whether the box's file dialog is open, shared by every relay (#414).
+    pub fn dialog_open(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.dialog_open)
     }
 
     /// The tabs a viewer watches now (#407), shared by every relay.

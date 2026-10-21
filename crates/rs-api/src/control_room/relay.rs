@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
-use super::kiosk_picker::{BoxDialog, pick_for_page};
+use super::kiosk_picker::{BoxDialog, PickTarget, is_own_press, opens_box_dialog, spawn_pick};
 use super::page_hooks::{copy_hook_source, hls_cors_hook_source};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
@@ -607,8 +607,9 @@ async fn relay_tab(
     // The <input type=file> of a file chooser the page opened that no file
     // went into yet.
     let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
-    // The box's dialog is open for that chooser (#414).
-    let picking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // When the viewer last clicked or pressed a key in the page: only a
+    // chooser that followed it opens the box's dialog (#414).
+    let last_press: Arc<std::sync::Mutex<Option<std::time::Instant>>> = Arc::default();
     // The screencast session of the frame the dashboard has not drawn yet.
     // Chrome sends the next frame only after an ack, so acking on "drawn"
     // paces the frames to the viewer (no queue grows behind a slow one).
@@ -680,7 +681,8 @@ async fn relay_tab(
         let view = Arc::clone(view);
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
-        let (dialog, picking) = (dialog.clone(), Arc::clone(&picking));
+        let (dialog, last_press, seq) = (dialog.clone(), Arc::clone(&last_press), Arc::clone(&seq));
+        let (page_weak, viewer_weak) = (to_page.downgrade(), to_client.downgrade());
         let main_frame = tab.to_string();
         let (hide_cdp, hide_shown) = (cdp.clone(), shown_tabs.clone());
         async move {
@@ -764,21 +766,25 @@ async fn relay_tab(
                             "control rooms: tab {main_frame} opened a file chooser ({mode}, input {node:?})"
                         );
                         *chooser.lock().unwrap_or_else(|p| p.into_inner()) = node;
-                        // #414: on the box's own screen its dialog opens at
-                        // once; a chooser while it is open opens no second one.
-                        if let (Some(dialog), Some(_)) = (&dialog, node) {
-                            if !picking.swap(true, Ordering::SeqCst) {
-                                let (picker, chooser) =
-                                    (Arc::clone(&dialog.picker), Arc::clone(&chooser));
-                                let (call, to_client) = (call.clone(), to_client.clone());
-                                let (picking, tab) = (Arc::clone(&picking), main_frame.clone());
-                                tokio::spawn(async move {
-                                    let reply =
-                                        pick_for_page(picker, mode, chooser, call, picking, tab)
-                                            .await;
-                                    let _ = to_client.send(text_message(&reply));
-                                });
-                            }
+                        // #414: a chooser this viewer's own click or key caused
+                        // opens the box's dialog; while it is open (for any
+                        // room) the bar shows instead.
+                        let since = last_press
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .map(|t| t.elapsed());
+                        if let Some(dialog) = &dialog
+                            && opens_box_dialog(node, since)
+                            && !dialog.open.swap(true, Ordering::SeqCst)
+                        {
+                            let to = PickTarget {
+                                chooser: Arc::clone(&chooser),
+                                page: page_weak.clone(),
+                                seq: Arc::clone(&seq),
+                                viewer: viewer_weak.clone(),
+                                tab: main_frame.clone(),
+                            };
+                            spawn_pick(dialog.clone(), mode, to);
                             continue;
                         }
                         let m = json!({ "t": "file-chooser", "mode": mode }).to_string();
@@ -895,6 +901,10 @@ async fn relay_tab(
                     break;
                 }
                 continue;
+            }
+            if is_own_press(&v) {
+                *last_press.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(std::time::Instant::now());
             }
             if let Some((method, params)) = client_to_cdp(&v) {
                 if method == SET_VIEWPORT {

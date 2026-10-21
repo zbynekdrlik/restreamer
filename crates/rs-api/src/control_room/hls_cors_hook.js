@@ -16,8 +16,19 @@
   window.__restreamerHlsCors = true;
   if (!/(^|\.)youtube\.com$/.test(location.hostname)) return;
   const isHls = (url) => /\/api\/manifest\/hls_/.test(String(url));
+  // The elements this hook put into CORS mode: another source takes it back
+  // off, so a reused element never loads a non-HLS source as CORS.
+  const marked = new WeakSet();
   const mark = (el, url) => {
-    if (isHls(url) && !el.hasAttribute('crossorigin')) el.crossOrigin = 'use-credentials';
+    if (isHls(url)) {
+      if (!el.hasAttribute('crossorigin')) {
+        el.crossOrigin = 'use-credentials';
+        marked.add(el);
+      }
+    } else if (marked.has(el)) {
+      el.removeAttribute('crossorigin');
+      marked.delete(el);
+    }
   };
   const src = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
   Object.defineProperty(HTMLMediaElement.prototype, 'src', {
@@ -32,4 +43,15 @@
     if (this instanceof HTMLMediaElement && String(name).toLowerCase() === 'src') mark(this, value);
     return setAttribute.call(this, name, value);
   };
+  // The relay also runs this in the page already open (a room's first
+  // document, a tab that outlived a Restreamer restart): a preview whose
+  // manifest was set before the hook came is put into CORS mode and loaded
+  // again.
+  for (const el of document.querySelectorAll('video, audio')) {
+    if (el.readyState === 0 && isHls(el.getAttribute('src')) && !el.hasAttribute('crossorigin')) {
+      el.crossOrigin = 'use-credentials';
+      marked.add(el);
+      el.load();
+    }
+  }
 })();

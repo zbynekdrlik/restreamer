@@ -8,13 +8,16 @@
 //! by its path, with no upload. A cancel shows the bar.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::extract::ws::Message as AxMessage;
 use rs_core::native_picker::NativeFilePicker;
 use serde_json::{Value, json};
+use tokio::sync::mpsc::WeakUnboundedSender;
 
+use super::cdp;
 use super::relay::file_actions;
 
 /// The box's own dialog, and whether it is open: one for the whole box,
@@ -34,8 +37,54 @@ pub const OWN_INPUT_WINDOW: Duration = Duration::from_secs(3);
 /// [`OWN_INPUT_WINDOW`] (`since_own_input`), not the page by itself and not
 /// another viewer of the same tab.
 pub fn opens_box_dialog(node: Option<i64>, since_own_input: Option<Duration>) -> bool {
-    let _ = since_own_input;
-    node.is_some()
+    node.is_some() && since_own_input.is_some_and(|d| d <= OWN_INPUT_WINDOW)
+}
+
+/// A dashboard message that is the viewer's own click or key in the page.
+pub fn is_own_press(v: &Value) -> bool {
+    matches!(
+        (v["t"].as_str(), v["type"].as_str()),
+        (Some("m"), Some("mousePressed")) | (Some("k"), Some("keyDown" | "rawKeyDown"))
+    )
+}
+
+/// Where a pick goes: the tab's pending chooser, the page (weakly, with the
+/// relay's CDP request ids) and the viewer (weakly).
+pub struct PickTarget {
+    pub chooser: Arc<Mutex<Option<i64>>>,
+    pub page: WeakUnboundedSender<String>,
+    pub seq: Arc<AtomicU64>,
+    pub viewer: WeakUnboundedSender<AxMessage>,
+    pub tab: String,
+}
+
+/// Opens the box's dialog in its own task and answers the viewer when it
+/// closed. The task holds the page and the viewer only weakly: a relay that
+/// ended while the dialog was open lets its CDP session go at once (no
+/// screencast or focus emulation kept on a room nobody views), and a late
+/// pick then goes nowhere. `dialog.open` was set by the caller.
+pub fn spawn_pick(dialog: BoxDialog, mode: String, to: PickTarget) {
+    let PickTarget {
+        chooser,
+        page,
+        seq,
+        viewer,
+        tab,
+    } = to;
+    tokio::spawn(async move {
+        let call = |method: &str, params: Value| match page.upgrade() {
+            Some(page) => {
+                let id = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = page.send(cdp::request(id, method, params));
+            }
+            None => tracing::info!("control rooms: tab {tab}: left before the dialog closed"),
+        };
+        let reply =
+            pick_for_page(dialog.picker, mode, chooser, call, dialog.open, tab.clone()).await;
+        if let Some(viewer) = viewer.upgrade() {
+            let _ = viewer.send(AxMessage::Text(reply.to_string().into()));
+        }
+    });
 }
 
 /// Opens the box's dialog for the page's pending chooser and returns the

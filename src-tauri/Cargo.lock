@@ -4800,6 +4800,7 @@ version = "0.29.54"
 dependencies = [
  "anyhow",
  "clap",
+ "gtk",
  "local-ip-address",
  "rs-core",
  "rs-runtime",
