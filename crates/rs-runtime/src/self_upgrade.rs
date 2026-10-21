@@ -447,6 +447,40 @@ pub enum Outcome {
     },
 }
 
+impl Outcome {
+    /// The journal line of a check that did not fail.
+    pub fn summary(&self) -> String {
+        match self {
+            Outcome::UpToDate { latest } => {
+                format!("up to date: nothing newer than the latest release {latest} to install")
+            }
+            Outcome::Busy { latest, reason } => {
+                format!("{latest} is waiting for an idle box: {reason}")
+            }
+            Outcome::LeftAlone {
+                latest,
+                installed,
+                want,
+            } => format!(
+                "restreamer {installed} is marked {want:?} (apt-mark hold or a removal): \
+                 left alone; the latest release is {latest}"
+            ),
+            Outcome::Upgraded {
+                latest,
+                installed,
+                restart,
+            } => {
+                let what = if *installed {
+                    "installed"
+                } else {
+                    "already installed"
+                };
+                format!("upgraded to {latest} ({what}); {restart}")
+            }
+        }
+    }
+}
+
 /// One upgrade check, with every endpoint a parameter so a test can point
 /// it at a local server.
 pub struct Upgrader<H> {

@@ -481,5 +481,59 @@ fn the_deb_ships_and_enables_the_upgrade_timer() {
     );
 }
 
+/// The journal line of a restart onto a package that was already installed
+/// (a hand `dpkg -i` replaced the running binary) named the latest RELEASE
+/// as an upgrade: "upgraded to 0.29.52 (already installed)" on stream-pp,
+/// whose installed package was 0.29.54 (2026-10-21).
+#[test]
+fn a_restart_onto_the_installed_package_claims_no_upgrade() {
+    let line = Outcome::Upgraded {
+        latest: Version::new(0, 29, 52),
+        installed: false,
+        restart: "restarted the restreamer unit of newlevel".into(),
+    }
+    .summary();
+    assert!(!line.contains("upgraded to"), "{line}");
+    assert!(line.contains("the installed package"), "{line}");
+    assert!(line.contains("latest release 0.29.52"), "{line}");
+    assert!(
+        line.ends_with("restarted the restreamer unit of newlevel"),
+        "{line}"
+    );
+}
+
+#[test]
+fn every_outcome_line_names_what_happened() {
+    let installed = Outcome::Upgraded {
+        latest: Version::new(0, 29, 55),
+        installed: true,
+        restart: "restarted X".into(),
+    };
+    assert_eq!(installed.summary(), "installed 0.29.55; restarted X");
+    let up = Outcome::UpToDate {
+        latest: Version::new(0, 29, 55),
+    };
+    assert!(up.summary().starts_with("up to date"), "{}", up.summary());
+    assert!(up.summary().contains("0.29.55"));
+    let busy = Outcome::Busy {
+        latest: Version::new(0, 29, 55),
+        reason: "an event is delivering".into(),
+    };
+    assert_eq!(
+        busy.summary(),
+        "0.29.55 is waiting for an idle box: an event is delivering"
+    );
+    let held = Outcome::LeftAlone {
+        latest: Version::new(0, 29, 55),
+        installed: Version::new(0, 29, 50),
+        want: "hold".into(),
+    };
+    let line = held.summary();
+    assert!(
+        line.contains("0.29.50") && line.contains("\"hold\"") && line.contains("0.29.55"),
+        "{line}"
+    );
+}
+
 #[path = "self_upgrade_check_tests.rs"]
 mod check;

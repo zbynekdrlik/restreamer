@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::{
-    DPKG_QUERY_FORMAT, Host, Installed, LATEST_RELEASE_URL, Outcome, STATUS_TIMEOUT, STATUS_URL,
+    DPKG_QUERY_FORMAT, Host, Installed, LATEST_RELEASE_URL, STATUS_TIMEOUT, STATUS_URL,
     UPDATER_PUBKEY, Upgrader, app_process, apt_get_install, exe_replaced, parse_dpkg_query,
     passwd_user, run_command, verify_signature,
 };
@@ -160,36 +160,8 @@ pub fn run_cli() -> i32 {
         let _ = std::fs::remove_dir_all(&download_dir);
     }
     match outcome {
-        Ok(Outcome::UpToDate { latest }) => {
-            tracing::info!("up to date: nothing newer than the latest release {latest} to install");
-            0
-        }
-        Ok(Outcome::Busy { latest, reason }) => {
-            tracing::info!("{latest} is waiting for an idle box: {reason}");
-            0
-        }
-        Ok(Outcome::LeftAlone {
-            latest,
-            installed,
-            want,
-        }) => {
-            tracing::info!(
-                "restreamer {installed} is marked {want:?} (apt-mark hold or a removal): \
-                 left alone; the latest release is {latest}"
-            );
-            0
-        }
-        Ok(Outcome::Upgraded {
-            latest,
-            installed,
-            restart,
-        }) => {
-            let what = if installed {
-                "installed"
-            } else {
-                "already installed"
-            };
-            tracing::info!("upgraded to {latest} ({what}); {restart}");
+        Ok(outcome) => {
+            tracing::info!("{}", outcome.summary());
             0
         }
         Err(e) => {
