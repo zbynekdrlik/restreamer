@@ -467,16 +467,20 @@ impl Outcome {
             ),
             Outcome::Upgraded {
                 latest,
-                installed,
+                installed: true,
                 restart,
-            } => {
-                let what = if *installed {
-                    "installed"
-                } else {
-                    "already installed"
-                };
-                format!("upgraded to {latest} ({what}); {restart}")
-            }
+            } => format!("installed {latest}; {restart}"),
+            // The running binary was replaced (a hand `dpkg -i`, or an
+            // install whose restart failed): the package may be newer than
+            // the latest release.
+            Outcome::Upgraded {
+                latest,
+                installed: false,
+                restart,
+            } => format!(
+                "the app ran a replaced binary: restarted onto the installed package \
+                 (latest release {latest}); {restart}"
+            ),
         }
     }
 }
