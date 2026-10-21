@@ -139,6 +139,17 @@ pub async fn set_account(
     }
 }
 
+/// #414: the box's own file dialog serves only a viewer that is the box
+/// itself (the kiosk window). A viewer elsewhere (a notebook, the tunnel)
+/// gets the bar, never a dialog on the box's screen.
+pub fn viewer_picker(
+    local: bool,
+    installed: Option<std::sync::Arc<dyn rs_core::native_picker::NativeFilePicker>>,
+) -> Option<std::sync::Arc<dyn rs_core::native_picker::NativeFilePicker>> {
+    let _ = (local, installed);
+    None
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
     pub target: String,
@@ -186,6 +197,7 @@ pub async fn ws(
                 on_url,
                 uploads,
                 shown_tabs,
+                None,
             )
         })
 }

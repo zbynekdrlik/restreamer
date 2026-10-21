@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::ws::{Message as AxMessage, WebSocket};
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
+use rs_core::native_picker::NativeFilePicker;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
@@ -433,6 +434,7 @@ pub async fn relay_with(
         on_url,
         uploads,
         ShownTabs::default(),
+        None,
     )
     .await;
 }
@@ -475,7 +477,9 @@ pub async fn relay_room(
     on_url: UrlSink,
     uploads: std::path::PathBuf,
     shown_tabs: ShownTabs,
+    picker: Option<Arc<dyn NativeFilePicker>>,
 ) {
+    let _ = picker;
     let (mut client_tx, mut client_rx) = client.split();
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
     let _ = to_client.send(url_message(&start_url));

@@ -1,0 +1,61 @@
+use std::path::PathBuf;
+
+use super::*;
+
+/// The CDP calls `picked_reply` made.
+fn calls_of(picked: Option<&Path>, chooser: &Mutex<Option<i64>>) -> (Value, Vec<(String, Value)>) {
+    let calls = Mutex::new(Vec::new());
+    let reply = picked_reply(
+        picked,
+        "selectSingle",
+        chooser,
+        &|m: &str, p: Value| calls.lock().unwrap().push((m.to_string(), p)),
+        "T1",
+    );
+    (reply, calls.into_inner().unwrap())
+}
+
+#[test]
+fn a_chosen_file_goes_into_the_pending_chooser_by_its_path() {
+    let path = PathBuf::from("/home/op/Obrázky/náhľad 1.png");
+    let chooser = Mutex::new(Some(42));
+    let (reply, calls) = calls_of(Some(&path), &chooser);
+    assert_eq!(
+        calls,
+        vec![(
+            "DOM.setFileInputFiles".to_string(),
+            json!({"files": ["/home/op/Obrázky/náhľad 1.png"], "backendNodeId": 42})
+        )]
+    );
+    assert_eq!(
+        reply,
+        json!({"t": "file-done", "name": "náhľad 1.png", "how": "picker"})
+    );
+    assert_eq!(*chooser.lock().unwrap(), None, "the chooser is used up");
+}
+
+#[test]
+fn a_chooser_the_page_dropped_meanwhile_gets_nothing() {
+    // The page navigated while the dialog was open: its input is gone.
+    let chooser = Mutex::new(None);
+    let (reply, calls) = calls_of(Some(Path::new("/x/a.png")), &chooser);
+    assert!(
+        calls.is_empty(),
+        "nothing is sent to a gone input: {calls:?}"
+    );
+    assert_eq!(reply["t"], "file-error");
+    assert!(reply["error"].as_str().is_some_and(|e| !e.is_empty()));
+}
+
+#[test]
+fn a_cancel_shows_the_bar_and_keeps_the_chooser() {
+    let chooser = Mutex::new(Some(42));
+    let (reply, calls) = calls_of(None, &chooser);
+    assert!(calls.is_empty());
+    assert_eq!(reply, json!({"t": "file-chooser", "mode": "selectSingle"}));
+    assert_eq!(
+        *chooser.lock().unwrap(),
+        Some(42),
+        "the bar can still fill it"
+    );
+}

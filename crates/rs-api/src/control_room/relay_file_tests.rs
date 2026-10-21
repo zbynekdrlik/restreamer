@@ -127,6 +127,14 @@ fn old_uploads_are_pruned() {
 /// chooser interception it reports a chooser for node 42, as Chrome does when
 /// the operator clicks "Upload thumbnail".
 async fn fake_page_with_chooser(seen: mpsc::UnboundedSender<Value>) -> String {
+    let opened = json!({"method": "Page.fileChooserOpened", "params": {
+        "frameId": "T1", "mode": "selectSingle", "backendNodeId": 42}});
+    fake_page_events(seen, vec![opened]).await
+}
+
+/// A fake page that answers every request and sends `events` once the relay
+/// turned on file chooser interception.
+async fn fake_page_events(seen: mpsc::UnboundedSender<Value>, events: Vec<Value>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move {
@@ -142,11 +150,11 @@ async fn fake_page_with_chooser(seen: mpsc::UnboundedSender<Value>) -> String {
             .unwrap();
             if req["method"] == "Page.setInterceptFileChooserDialog" {
                 assert_eq!(req["params"]["enabled"], true);
-                let ev = json!({"method": "Page.fileChooserOpened", "params": {
-                    "frameId": "T1", "mode": "selectSingle", "backendNodeId": 42}});
-                ws.send(TgMessage::Text(ev.to_string().into()))
-                    .await
-                    .unwrap();
+                for ev in &events {
+                    ws.send(TgMessage::Text(ev.to_string().into()))
+                        .await
+                        .unwrap();
+                }
             }
         }
     });
@@ -190,6 +198,7 @@ async fn a_file_goes_into_the_chooser_then_a_second_one_is_dropped() {
                         Arc::new(|_| {}),
                         dir,
                         super::ShownTabs::default(),
+                        None,
                     )
                 })
             }
@@ -338,6 +347,7 @@ async fn a_navigation_ends_a_pending_file_chooser() {
                         Arc::new(|_| {}),
                         dir,
                         super::ShownTabs::default(),
+                        None,
                     )
                 })
             }
@@ -374,4 +384,192 @@ async fn a_navigation_ends_a_pending_file_chooser() {
     tokio::time::timeout(std::time::Duration::from_secs(10), run)
         .await
         .expect("the relay never handled the navigation");
+}
+
+/// #414: the box's own dialog, answering `file` (`None`: the operator
+/// cancelled) once `gate` lets it, and counting how often it was opened.
+struct BoxDialog {
+    file: Option<std::path::PathBuf>,
+    opened: Arc<std::sync::atomic::AtomicUsize>,
+    gate: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl BoxDialog {
+    fn answering(
+        file: Option<std::path::PathBuf>,
+    ) -> (Arc<Self>, Arc<std::sync::atomic::AtomicUsize>) {
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialog = BoxDialog {
+            file,
+            opened: Arc::clone(&opened),
+            gate: None,
+        };
+        (Arc::new(dialog), opened)
+    }
+}
+
+impl NativeFilePicker for BoxDialog {
+    fn pick_file(&self) -> rs_core::native_picker::Pick {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        let (file, gate) = (self.file.clone(), self.gate.clone());
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            file
+        })
+    }
+}
+
+/// The relay of tab T1 of `page_addr` for a viewer on the box, whose dialog
+/// is `dialog`.
+async fn serve_box_viewer(page_addr: String, dialog: Arc<BoxDialog>) -> std::net::SocketAddr {
+    use axum::extract::WebSocketUpgrade;
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let cdp = Cdp::new(page_addr.clone());
+            let picker: Arc<dyn NativeFilePicker> = dialog.clone();
+            async move {
+                ws.on_upgrade(move |s| {
+                    relay_room(
+                        s,
+                        cdp,
+                        "T1".into(),
+                        "https://start/".into(),
+                        Arc::new(|_| {}),
+                        std::env::temp_dir().join("restreamer-room-uploads"),
+                        super::ShownTabs::default(),
+                        Some(picker),
+                    )
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// The dashboard's text messages up to (and with) the first one of type `t`.
+async fn texts_until(
+    client: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    t: &str,
+) -> Vec<Value> {
+    let mut texts = Vec::new();
+    loop {
+        if let TgMessage::Text(m) = client.next().await.unwrap().unwrap() {
+            let v: Value = serde_json::from_str(&m).unwrap();
+            let last = v["t"] == t;
+            texts.push(v);
+            if last {
+                return texts;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_box_viewer_picks_the_file_with_the_box_dialog() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("náhľad 1.png");
+    std::fs::write(&file, b"PNG1").unwrap();
+    let (dialog, opened) = BoxDialog::answering(Some(file.clone()));
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let addr = serve_box_viewer(fake_page_with_chooser(seen_tx).await, dialog).await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let run = async {
+        let texts = texts_until(&mut client, "file-done").await;
+        assert_eq!(
+            texts.last().unwrap(),
+            &json!({"t": "file-done", "name": "náhľad 1.png", "how": "picker"})
+        );
+        assert!(
+            !texts.iter().any(|v| v["t"] == "file-chooser"),
+            "no bar for a viewer on the box: {texts:?}"
+        );
+        let set = loop {
+            let r = seen.recv().await.unwrap();
+            if r["method"] == "DOM.setFileInputFiles" {
+                break r;
+            }
+        };
+        assert_eq!(
+            set["params"],
+            json!({"files": [file.to_string_lossy()], "backendNodeId": 42})
+        );
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the box dialog's file never reached the page");
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_cancelled_box_dialog_shows_the_bar() {
+    let (dialog, opened) = BoxDialog::answering(None);
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let addr = serve_box_viewer(fake_page_with_chooser(seen_tx).await, dialog).await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let bar = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        next_text(&mut client, "file-chooser"),
+    )
+    .await
+    .expect("no bar after the cancel");
+    assert_eq!(bar, json!({"t": "file-chooser", "mode": "selectSingle"}));
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "the dialog was opened");
+    while let Ok(r) = seen.try_recv() {
+        assert_ne!(r["method"], "DOM.setFileInputFiles", "nothing was chosen");
+    }
+}
+
+/// The operators clicked "Upload thumbnail" 7 times in 4 s (stream-pp,
+/// 2026-10-21): a chooser while the dialog is open opens no second dialog.
+#[tokio::test]
+async fn a_second_chooser_while_the_dialog_is_open_opens_no_second_dialog() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("t.png");
+    std::fs::write(&file, b"PNG").unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dialog = Arc::new(BoxDialog {
+        file: Some(file),
+        opened: Arc::clone(&opened),
+        gate: Some(Arc::clone(&gate)),
+    });
+    let chooser = json!({"method": "Page.fileChooserOpened", "params": {
+        "frameId": "T1", "mode": "selectSingle", "backendNodeId": 42}});
+    // A copy after both choosers: once it reached the dashboard, the relay
+    // has handled both (it reads the page in order).
+    let marker = json!({"method": "Runtime.bindingCalled", "params": {
+        "name": CLIP_BINDING, "payload": "both choosers handled", "executionContextId": 1}});
+    let (seen_tx, _seen) = mpsc::unbounded_channel();
+    let page = fake_page_events(seen_tx, vec![chooser.clone(), chooser, marker]).await;
+    let addr = serve_box_viewer(page, dialog).await;
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let run = async {
+        let texts = texts_until(&mut client, "clip").await;
+        assert!(
+            !texts.iter().any(|v| v["t"] == "file-chooser"),
+            "no bar while the dialog is open: {texts:?}"
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 1, "one dialog only");
+        gate.notify_one();
+        let done = next_text(&mut client, "file-done").await;
+        assert_eq!(done["how"], "picker");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the relay did not handle the two choosers");
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
 }
