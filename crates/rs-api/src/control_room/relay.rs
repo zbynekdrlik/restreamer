@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
-use super::page_hooks::copy_hook_source;
+use super::page_hooks::{copy_hook_source, hls_cors_hook_source};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
 
@@ -631,14 +631,17 @@ async fn relay_tab(
 
     call("Page.enable", json!({}));
     // Copies in the page come back through a binding (Runtime.bindingCalled).
-    let hook = copy_hook_source();
     call("Runtime.enable", json!({}));
     call("Runtime.addBinding", json!({ "name": CLIP_BINDING }));
-    call(
-        "Page.addScriptToEvaluateOnNewDocument",
-        json!({ "source": hook }),
-    );
-    call("Runtime.evaluate", json!({ "expression": hook }));
+    // The page scripts go into later documents AND the one already open; the
+    // HLS one lets Studio's live preview play (#415).
+    for hook in [copy_hook_source(), hls_cors_hook_source().to_string()] {
+        call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": hook }),
+        );
+        call("Runtime.evaluate", json!({ "expression": hook }));
+    }
     // The page's file choosers ("Upload thumbnail") come to the operator.
     call(
         "Page.setInterceptFileChooserDialog",
