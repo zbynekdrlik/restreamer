@@ -96,24 +96,35 @@ paths:
     the frames.
   - **On the box's own screen the box's dialog opens at once (#414).** The kiosk
     operators never found the bar's second button (7 clicks on "Upload thumbnail" in
-    4 s, stream-pp 2026-10-21). The desktop app installs its native dialog
-    (`src-tauri/src/native_dialog.rs`, tauri-plugin-dialog = rfd's in-process GTK
-    dialog, no portal) into `rs_core::native_picker`. The room socket handler gives it
-    to the relay only for a viewer on the box: `access::is_genuinely_local` (loopback
-    peer, no proxy header), so a notebook or the tunnel never opens a dialog on the
-    box's screen (`handlers::viewer_picker`).
-    - The relay (`kiosk_picker::pick_for_page`) opens it on `Page.fileChooserOpened`,
-      puts the picked file into the chooser BY ITS PATH (`DOM.setFileInputFiles`, no
-      upload), and answers `{t:file-done,how:"picker"}`. A cancel sends the bar.
-    - A chooser while the dialog is open opens no second one (`picking`).
+    4 s, stream-pp 2026-10-21).
+    - The desktop app installs its dialog into `rs_core::native_picker`
+      (`src-tauri/src/native_dialog.rs`). On Linux it is our own GTK
+      `FileChooserDialog` on the main thread: transient for, modal over and kept
+      above the dashboard window. rfd's GTK backend (tauri-plugin-dialog) ignores
+      the parent there, and the desktop portal cannot attach its dialog at all.
+      Windows keeps the plugin's dialog, which takes the window as its owner.
+    - The room socket hands the dialog to the relay only for a viewer on the box,
+      `access::is_genuinely_local` (loopback peer, no proxy header), via
+      `handlers::viewer_picker`. A notebook or the tunnel never opens a dialog on the
+      box's screen.
+    - The relay opens it only for a chooser that followed THIS viewer's own click or
+      key within 3 s (`kiosk_picker::opens_box_dialog`, `is_own_press`). It never
+      opens for the page by itself or for a second viewer of the same tab.
+    - One dialog serves the whole box: the `ControlRooms::dialog_open` flag is
+      shared by every relay. A chooser while the dialog is open shows the bar, so
+      the operator never gets nothing.
+    - `spawn_pick` holds the page and the viewer only weakly. A relay that ends with
+      the dialog open lets its CDP session go at once, and a late pick goes nowhere.
+    - The picked file goes into the chooser BY ITS PATH (`DOM.setFileInputFiles`, no
+      upload), answered with `{t:file-done,how:"picker"}`. A cancel sends the bar.
     - Never take a PATH from a dashboard message instead: any client could then make
       Chrome upload any file of the box (the config holds credentials).
-    - The dashboard window loads `http://127.0.0.1:8910` as a REMOTE page: it has no
-      Tauri IPC (`window.__TAURI__` is undefined there; only the E2E's tauri-mock sets
-      it). So GUI-side help for the dashboard goes through the backend, as here.
-    - Chrome's OWN chooser (interception off: no viewer attached) goes through the
-      desktop portal with an empty parent (`Unhandled parent window type`): its dialog
-      lands somewhere on `:0`, unattached.
+    - The dashboard window loads `http://127.0.0.1:8910` as a REMOTE page with no
+      Tauri IPC (`window.__TAURI__` is undefined there; only the E2E's tauri-mock
+      sets it). So GUI-side help for the dashboard goes through the backend, as here.
+    - Chrome's OWN chooser (interception off, no viewer attached) goes through the
+      desktop portal with an empty parent (`Unhandled parent window type`): its
+      dialog lands somewhere on `:0`, unattached.
 - **YouTube Studio's live preview needs the HLS hook (#415).** Chrome 151+ plays HLS
   natively and refuses segments from another origin than the manifest unless the
   media element asked in CORS mode ("insecure media request",
@@ -126,6 +137,10 @@ paths:
     pages an element whose `src` is such a manifest gets `crossOrigin =
     'use-credentials'` (YouTube answers ACAO `https://studio.youtube.com` + ACAC true;
     a segment without cookies is 403, so `anonymous` would fail).
+  - In the page already open (a room's first document, a tab that outlived a
+    restart) the hook repairs a preview whose manifest was set before it came: CORS
+    mode, then `load()`. An element it marked gets its own mode back when it gets
+    another source.
   - `--disable-features=BuiltInHlsPlayer` does nothing since M145 (the flag is gone);
     hiding HLS from `canPlayType` makes Studio show "An error occurred".
   - To diagnose a room's media: a second CDP client on the page
