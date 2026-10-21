@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
+use super::page_hooks::copy_hook_source;
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
 
@@ -76,45 +77,6 @@ pub fn viewport(w: f64, h: f64) -> Value {
 pub const CLIP_BINDING: &str = "__restreamerCopy";
 /// The longest copied text relayed to the dashboard, in bytes.
 pub const CLIP_MAX: usize = 64 * 1024;
-
-/// The script that reports the page's copies through [`CLIP_BINDING`]: a
-/// `copy` event (Ctrl+C, a page's `execCommand('copy')`) and
-/// `navigator.clipboard.writeText` (YT Studio's "Copy" buttons). The copy
-/// lands in the box Chrome's own clipboard, which the operator never sees.
-pub fn copy_hook_source() -> String {
-    const HOOK: &str = r#"(() => {
-  if (window.__restreamerCopyHooked) return;
-  window.__restreamerCopyHooked = true;
-  const report = (t) => { try { if (typeof t === 'string' && t) BINDING(t); } catch (_) {} };
-  const selected = () => {
-    const a = document.activeElement;
-    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && typeof a.selectionStart === 'number') {
-      return a.value.slice(a.selectionStart, a.selectionEnd);
-    }
-    return String(window.getSelection() || '');
-  };
-  // A page handler may set its own data during the event: read it after the
-  // event reached the window; a handler that stops it gets the selection.
-  let pending = null;
-  document.addEventListener('copy', () => {
-    const sel = selected();
-    pending = sel;
-    setTimeout(() => { if (pending !== null) { pending = null; report(sel); } }, 0);
-  }, true);
-  window.addEventListener('copy', (e) => {
-    const data = e.clipboardData && e.clipboardData.getData('text/plain');
-    const sel = pending;
-    pending = null;
-    report(data || sel || selected());
-  });
-  const c = navigator.clipboard;
-  if (c && c.writeText) {
-    const write = c.writeText.bind(c);
-    c.writeText = (t) => { report(String(t)); return write(t); };
-  }
-})()"#;
-    HOOK.replace("BINDING", CLIP_BINDING)
-}
 
 /// The largest file the operator can put into a room (a thumbnail is a few MB).
 pub const FILE_MAX: usize = 20 * 1024 * 1024;
