@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
 use super::cdp::{self, Cdp, TargetInfo};
+use super::kiosk_picker::{BoxDialog, PickTarget, is_own_press, opens_box_dialog, spawn_pick};
+use super::page_hooks::{copy_hook_source, hls_cors_hook_source};
 use super::popups::{PopupEnd, PopupMove, popup_end, popup_message, popup_moves, switch_notices};
 use super::visibility::{ShownTabs, hide_if_visible, hide_others};
 
@@ -75,45 +77,6 @@ pub fn viewport(w: f64, h: f64) -> Value {
 pub const CLIP_BINDING: &str = "__restreamerCopy";
 /// The longest copied text relayed to the dashboard, in bytes.
 pub const CLIP_MAX: usize = 64 * 1024;
-
-/// The script that reports the page's copies through [`CLIP_BINDING`]: a
-/// `copy` event (Ctrl+C, a page's `execCommand('copy')`) and
-/// `navigator.clipboard.writeText` (YT Studio's "Copy" buttons). The copy
-/// lands in the box Chrome's own clipboard, which the operator never sees.
-pub fn copy_hook_source() -> String {
-    const HOOK: &str = r#"(() => {
-  if (window.__restreamerCopyHooked) return;
-  window.__restreamerCopyHooked = true;
-  const report = (t) => { try { if (typeof t === 'string' && t) BINDING(t); } catch (_) {} };
-  const selected = () => {
-    const a = document.activeElement;
-    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && typeof a.selectionStart === 'number') {
-      return a.value.slice(a.selectionStart, a.selectionEnd);
-    }
-    return String(window.getSelection() || '');
-  };
-  // A page handler may set its own data during the event: read it after the
-  // event reached the window; a handler that stops it gets the selection.
-  let pending = null;
-  document.addEventListener('copy', () => {
-    const sel = selected();
-    pending = sel;
-    setTimeout(() => { if (pending !== null) { pending = null; report(sel); } }, 0);
-  }, true);
-  window.addEventListener('copy', (e) => {
-    const data = e.clipboardData && e.clipboardData.getData('text/plain');
-    const sel = pending;
-    pending = null;
-    report(data || sel || selected());
-  });
-  const c = navigator.clipboard;
-  if (c && c.writeText) {
-    const write = c.writeText.bind(c);
-    c.writeText = (t) => { report(String(t)); return write(t); };
-  }
-})()"#;
-    HOOK.replace("BINDING", CLIP_BINDING)
-}
 
 /// The largest file the operator can put into a room (a thumbnail is a few MB).
 pub const FILE_MAX: usize = 20 * 1024 * 1024;
@@ -433,6 +396,7 @@ pub async fn relay_with(
         on_url,
         uploads,
         ShownTabs::default(),
+        None,
     )
     .await;
 }
@@ -475,6 +439,7 @@ pub async fn relay_room(
     on_url: UrlSink,
     uploads: std::path::PathBuf,
     shown_tabs: ShownTabs,
+    dialog: Option<BoxDialog>,
 ) {
     let (mut client_tx, mut client_rx) = client.split();
     let (to_client, mut to_client_rx) = mpsc::unbounded_channel::<AxMessage>();
@@ -512,6 +477,7 @@ pub async fn relay_room(
             uploads: &uploads,
             skip: &done,
             shown_tabs: &shown_tabs,
+            dialog: &dialog,
         };
         let end = relay_tab(shown, &mut client_rx, navigate_to.take()).await;
         let left = match end {
@@ -596,6 +562,8 @@ struct TabSession<'a> {
     skip: &'a std::collections::HashSet<String>,
     /// The tabs every relay shows now; the others get hidden (#407).
     shown_tabs: &'a ShownTabs,
+    /// The box's own file dialog, for a viewer on the box (#414).
+    dialog: &'a Option<BoxDialog>,
 }
 
 /// Relay the viewer to one tab until the viewer leaves, the tab goes away,
@@ -616,6 +584,7 @@ async fn relay_tab(
         uploads,
         skip,
         shown_tabs,
+        dialog,
     } = shown;
     let page = match tokio_tungstenite::connect_async(cdp.page_ws_url(tab)).await {
         Ok((ws, _)) => ws,
@@ -638,6 +607,9 @@ async fn relay_tab(
     // The <input type=file> of a file chooser the page opened that no file
     // went into yet.
     let chooser: Arc<std::sync::Mutex<Option<i64>>> = Arc::default();
+    // When the viewer last clicked or pressed a key in the page: only a
+    // chooser that followed it opens the box's dialog (#414).
+    let last_press: Arc<std::sync::Mutex<Option<std::time::Instant>>> = Arc::default();
     // The screencast session of the frame the dashboard has not drawn yet.
     // Chrome sends the next frame only after an ack, so acking on "drawn"
     // paces the frames to the viewer (no queue grows behind a slow one).
@@ -658,21 +630,24 @@ async fn relay_tab(
         let to_page = to_page.clone();
         let seq = Arc::clone(&seq);
         move |method: &str, params: Value| {
-            let id = seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let id = cdp::next_id(&seq);
             let _ = to_page.send(cdp::request(id, method, params));
         }
     };
 
     call("Page.enable", json!({}));
     // Copies in the page come back through a binding (Runtime.bindingCalled).
-    let hook = copy_hook_source();
     call("Runtime.enable", json!({}));
     call("Runtime.addBinding", json!({ "name": CLIP_BINDING }));
-    call(
-        "Page.addScriptToEvaluateOnNewDocument",
-        json!({ "source": hook }),
-    );
-    call("Runtime.evaluate", json!({ "expression": hook }));
+    // The page scripts go into later documents AND the one already open; the
+    // HLS one lets Studio's live preview play (#415).
+    for hook in [copy_hook_source(), hls_cors_hook_source().to_string()] {
+        call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": hook }),
+        );
+        call("Runtime.evaluate", json!({ "expression": hook }));
+    }
     // The page's file choosers ("Upload thumbnail") come to the operator.
     call(
         "Page.setInterceptFileChooserDialog",
@@ -706,6 +681,8 @@ async fn relay_tab(
         let view = Arc::clone(view);
         let chooser = Arc::clone(&chooser);
         let unacked = Arc::clone(&unacked);
+        let (dialog, last_press, seq) = (dialog.clone(), Arc::clone(&last_press), Arc::clone(&seq));
+        let (page_weak, viewer_weak) = (to_page.downgrade(), to_client.downgrade());
         let main_frame = tab.to_string();
         let (hide_cdp, hide_shown) = (cdp.clone(), shown_tabs.clone());
         async move {
@@ -789,6 +766,27 @@ async fn relay_tab(
                             "control rooms: tab {main_frame} opened a file chooser ({mode}, input {node:?})"
                         );
                         *chooser.lock().unwrap_or_else(|p| p.into_inner()) = node;
+                        // #414: a chooser this viewer's own click or key caused
+                        // opens the box's dialog; while it is open (for any
+                        // room) the bar shows instead.
+                        let since = last_press
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .map(|t| t.elapsed());
+                        if let Some(dialog) = &dialog
+                            && opens_box_dialog(node, since)
+                            && !dialog.open.swap(true, Ordering::SeqCst)
+                        {
+                            let to = PickTarget {
+                                chooser: Arc::clone(&chooser),
+                                page: page_weak.clone(),
+                                seq: Arc::clone(&seq),
+                                viewer: viewer_weak.clone(),
+                                tab: main_frame.clone(),
+                            };
+                            spawn_pick(dialog.clone(), mode, to);
+                            continue;
+                        }
                         let m = json!({ "t": "file-chooser", "mode": mode }).to_string();
                         if to_client.send(AxMessage::Text(m.into())).is_err() {
                             break;
@@ -903,6 +901,10 @@ async fn relay_tab(
                     break;
                 }
                 continue;
+            }
+            if is_own_press(&v) {
+                *last_press.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(std::time::Instant::now());
             }
             if let Some((method, params)) = client_to_cdp(&v) {
                 if method == SET_VIEWPORT {

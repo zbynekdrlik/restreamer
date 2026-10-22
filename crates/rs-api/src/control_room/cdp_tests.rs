@@ -139,3 +139,9 @@ fn target_info_reads_whether_a_popup_can_reach_its_opener() {
             .unwrap();
     assert!(!tab.can_access_opener);
 }
+
+#[test]
+fn request_ids_count_up_from_one() {
+    let seq = std::sync::atomic::AtomicU64::new(0);
+    assert_eq!([next_id(&seq), next_id(&seq), next_id(&seq)], [1, 2, 3]);
+}

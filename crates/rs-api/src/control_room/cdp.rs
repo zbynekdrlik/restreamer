@@ -38,6 +38,12 @@ pub fn page_targets(all: Vec<TargetInfo>) -> Vec<TargetInfo> {
         .collect()
 }
 
+/// The next CDP request id of a page session: 1, 2, 3, ... Every sender on
+/// one session takes its ids from the same counter, so they never repeat.
+pub fn next_id(seq: &std::sync::atomic::AtomicU64) -> u64 {
+    seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// Build the JSON text of one CDP request.
 pub fn request(id: u64, method: &str, params: Value) -> String {
     json!({ "id": id, "method": method, "params": params }).to_string()

@@ -304,3 +304,23 @@ async fn the_room_route_takes_a_20_mb_file_in_one_frame() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].metadata().unwrap().len(), 20 * 1024 * 1024);
 }
+
+struct NoDialog;
+
+impl rs_core::native_picker::NativeFilePicker for NoDialog {
+    fn pick_file(&self) -> rs_core::native_picker::Pick {
+        Box::pin(async { None })
+    }
+}
+
+/// #414: the box's dialog opens only for a viewer on the box itself.
+#[test]
+fn only_a_viewer_on_the_box_gets_the_box_dialog() {
+    let dialog: Arc<dyn rs_core::native_picker::NativeFilePicker> = Arc::new(NoDialog);
+    assert!(viewer_picker(true, Some(Arc::clone(&dialog))).is_some());
+    assert!(
+        viewer_picker(false, Some(dialog)).is_none(),
+        "a notebook or the tunnel must never open a dialog on the box's screen"
+    );
+    assert!(viewer_picker(true, None).is_none(), "no GUI, no dialog");
+}

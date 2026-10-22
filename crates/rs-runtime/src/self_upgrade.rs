@@ -447,6 +447,44 @@ pub enum Outcome {
     },
 }
 
+impl Outcome {
+    /// The journal line of a check that did not fail.
+    pub fn summary(&self) -> String {
+        match self {
+            Outcome::UpToDate { latest } => {
+                format!("up to date: nothing newer than the latest release {latest} to install")
+            }
+            Outcome::Busy { latest, reason } => {
+                format!("{latest} is waiting for an idle box: {reason}")
+            }
+            Outcome::LeftAlone {
+                latest,
+                installed,
+                want,
+            } => format!(
+                "restreamer {installed} is marked {want:?} (apt-mark hold or a removal): \
+                 left alone; the latest release is {latest}"
+            ),
+            Outcome::Upgraded {
+                latest,
+                installed: true,
+                restart,
+            } => format!("installed {latest}; {restart}"),
+            // The running binary was replaced (a hand `dpkg -i`, or an
+            // install whose restart failed): the package may be newer than
+            // the latest release.
+            Outcome::Upgraded {
+                latest,
+                installed: false,
+                restart,
+            } => format!(
+                "the app ran a replaced binary: restarted onto the installed package \
+                 (latest release {latest}); {restart}"
+            ),
+        }
+    }
+}
+
 /// One upgrade check, with every endpoint a parameter so a test can point
 /// it at a local server.
 pub struct Upgrader<H> {

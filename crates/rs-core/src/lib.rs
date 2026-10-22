@@ -10,6 +10,7 @@ pub mod log_buffer;
 pub mod log_capture;
 pub mod long_stream;
 pub mod models;
+pub mod native_picker;
 pub mod notify;
 pub mod paths;
 pub mod stable_since;

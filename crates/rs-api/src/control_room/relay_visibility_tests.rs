@@ -47,6 +47,7 @@ async fn serve(cdp: Cdp, shown: ShownTabs) -> std::net::SocketAddr {
                         Arc::new(|_| {}),
                         std::env::temp_dir().join("restreamer-room-uploads"),
                         shown,
+                        None,
                     )
                 })
             }
