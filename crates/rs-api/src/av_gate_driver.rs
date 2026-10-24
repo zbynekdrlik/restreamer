@@ -92,17 +92,16 @@ enum VodStep {
     Pending,
 }
 
+/// Done = the live archive is there: a live archive is fetchable (1080p +
+/// audio) while YouTube still reads `processing`, often for 30+ minutes
+/// (stream-snv, 24.10.2026), and the caller checks the formats itself.
 fn vod_step(status: &VodStatus) -> VodStep {
-    let processing = status.processing.as_deref();
-    let upload = status.upload.as_deref();
-    if processing == Some("succeeded") || upload == Some("processed") {
-        return VodStep::Done;
-    }
-    match (processing, upload) {
+    match (status.processing.as_deref(), status.upload.as_deref()) {
         (Some(s @ ("failed" | "terminated")), _)
         | (_, Some(s @ ("failed" | "rejected" | "deleted"))) => {
             VodStep::Failed(format!("YouTube could not process the VOD ({s})"))
         }
+        (Some("succeeded"), _) | (_, Some("processed" | "uploaded")) => VodStep::Done,
         _ => VodStep::Pending,
     }
 }

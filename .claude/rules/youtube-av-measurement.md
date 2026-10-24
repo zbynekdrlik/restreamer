@@ -82,9 +82,12 @@ measurement.
   Completing a broadcast and reading its life cycle are charged without being refused
   (`QuotaTracker::charge`, the bucket goes into debt): a broadcast must never stay live
   because the health polling used the quota.
-- **VOD done** = `processingDetails.processingStatus == succeeded` OR
-  `status.uploadStatus == processed` (both read: which one a live archive reports is
-  undocumented). UNVERIFIED against the real channel until part 2's first run.
+- **VOD done** = the live archive is THERE: `processingStatus == succeeded`, OR
+  `uploadStatus` `processed` or `uploaded` (any `failed`/`terminated`/`rejected`/`deleted`
+  wins first). Measured on stream-snv, 24.10.2026 (session cdc43ca4, vr2JmFSu8dc): a live
+  archive reads `uploaded` + `processing` for 26+ min after the stop, while yt-dlp
+  already lists 1080p (137/248) + audio (140). So `succeeded` is NOT the bar. The caller
+  (camera-box issue 1404) checks the formats itself.
 - **Config** (`av_gate`, immutable through `PATCH /config`): `oauth_file`,
   `api_token_file`, `event_name` ("E2E-Test"), `stream_title` ("e2e rtmp"),
   `idle_timeout_secs`, `processing_timeout_secs` (2 h), `daily_quota_budget`.
