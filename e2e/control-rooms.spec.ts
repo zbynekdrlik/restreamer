@@ -167,6 +167,37 @@ test("a drag in a room holds the button down to Chrome, also when it ends outsid
   expect(unexpected(consoleMessages)).toEqual([]);
 });
 
+test("a drag released outside the browser window still ends in the room", async ({ page, request }) => {
+  // #419 review: a release outside the browser window sends no mouseup. The
+  // next move with no button held must end the drag, or the page stays pressed.
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  const canvas = page.getByTestId("cr-canvas");
+  await expect(canvas).toHaveAttribute("data-frames", /^[1-9]/);
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width - 6, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 6, box.y + 60, { steps: 3 });
+  // The pointer comes back with the button already up: a plain move, no mouseup.
+  await page.waitForTimeout(60);
+  await page.evaluate(({ x, y }) => {
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y, buttons: 0, bubbles: true }));
+  }, { x: box.x + 30, y: box.y + box.height + 20 });
+
+  type Input = { type?: string; button?: string; buttons?: number };
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return (s.inputs as Input[]).filter((i) => i.type === "mouseReleased").length;
+    }, { message: "the drag ends with a release although no mouseup came" })
+    .toBe(1);
+  await page.mouse.up();
+  expect(unexpected(consoleMessages)).toEqual([]);
+});
+
 test("the account of a destination is set from its room", async ({ page, request }) => {
   const consoleMessages = collectConsole(page);
   await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
