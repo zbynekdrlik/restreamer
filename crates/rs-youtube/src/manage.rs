@@ -319,9 +319,13 @@ impl ManageClient {
             .request(method.clone(), format!("{}/{path}", self.api_base))
             .bearer_auth(token)
             .query(query);
-        if let Some(b) = body {
-            req = req.json(b);
-        }
+        req = match body {
+            Some(b) => req.json(b),
+            // A request with no body still says so: Google's front end answers a
+            // bare POST (bind, transition) with 411 Length Required (stream-snv,
+            // 24.10.2026), and reqwest sends no Content-Length for it.
+            None => req.header(reqwest::header::CONTENT_LENGTH, "0"),
+        };
         let resp = req.send().await?;
         let status = resp.status().as_u16();
         Ok((status, resp.text().await.unwrap_or_default()))
