@@ -91,9 +91,7 @@ pub fn restart_stale(procs: &[Proc], user_data: &Path) -> Vec<u32> {
             );
             match std::process::Command::new("kill").arg(pid.to_string()).status() {
                 Ok(s) => {
-                    if !s.success() {
-                        tracing::warn!("control rooms: kill {pid} (audio service) exited {s}");
-                    }
+                    tracing::info!("control rooms: kill {pid} (audio service): {s}");
                     s.success()
                 }
                 Err(e) => {
