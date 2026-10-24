@@ -115,6 +115,56 @@ test("active event: tabs per destination, a room shows the screencast and forwar
   expect(unexpected(consoleMessages)).toEqual([]);
 });
 
+test("a drag in a room holds the button down to Chrome, also when it ends outside the room", async ({
+  page,
+  request,
+}) => {
+  // #419: dragging the page's scrollbar did nothing. The moves went out as a
+  // hover (button "none", no buttons), and a release outside the canvas was lost.
+  const consoleMessages = collectConsole(page);
+  await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
+  await page.addInitScript(tauriMockScript);
+  await page.goto("/");
+  await page.getByTestId("cr-tab-11").click();
+  const canvas = page.getByTestId("cr-canvas");
+  await expect(canvas).toHaveAttribute("data-frames", /^[1-9]/);
+  const box = (await canvas.boundingBox())!;
+
+  const x = box.x + box.width - 6;
+  await page.mouse.move(x, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(x, box.y + 60, { steps: 4 });
+  await page.waitForTimeout(60);
+  await page.mouse.move(x, box.y + box.height + 40, { steps: 4 });
+  await page.mouse.up();
+
+  type Input = { type?: string; button?: string; buttons?: number };
+  await expect
+    .poll(async () => {
+      const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+      return s.inputs.filter((i: Input) => i.type === "mouseReleased").length;
+    }, { message: "the release outside the room still reaches Chrome" })
+    .toBe(1);
+  const s = await (await request.get(`${API}/_test/control-rooms`)).json();
+  const inputs: Input[] = s.inputs;
+  const pressed = inputs.findIndex((i) => i.type === "mousePressed");
+  const released = inputs.findIndex((i) => i.type === "mouseReleased");
+  const drag = inputs.slice(pressed + 1, released).filter((i) => i.type === "mouseMoved");
+  expect(drag.length).toBeGreaterThan(0);
+  expect(drag.every((i) => i.button === "left" && i.buttons === 1)).toBe(true);
+  // Afterwards the pointer hovers again: no button held.
+  await page.mouse.move(box.x + 30, box.y + 30);
+  await expect
+    .poll(async () => {
+      const t = await (await request.get(`${API}/_test/control-rooms`)).json();
+      const after = (t.inputs as Input[]).slice(released + 1).filter((i) => i.type === "mouseMoved");
+      return after.length > 0 && after.every((i) => i.button === "none" && i.buttons === 0);
+    })
+    .toBe(true);
+
+  expect(unexpected(consoleMessages)).toEqual([]);
+});
+
 test("the account of a destination is set from its room", async ({ page, request }) => {
   const consoleMessages = collectConsole(page);
   await request.post(`${API}/_test/control-rooms`, { data: ROOMS });
