@@ -99,8 +99,11 @@ export function cr_attach(canvas, url, onText) {
   // A press in the room: its moves and its release go to the page even once
   // the pointer has left the canvas (a scrollbar drag runs past its edge).
   let dragging = false;
+  // A release outside the browser window sends no mouseup: the next move with
+  // no button held ends the drag, so the page is never left pressed.
+  const releasedElsewhere = (e) => { if (!dragging || e.buttons !== 0) return false; dragging = false; send(release(e)); return true; };
   const outside = {
-    mousemove: (e) => { if (!dragging || e.target === canvas) return; const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
+    mousemove: (e) => { if (!dragging || e.target === canvas || releasedElsewhere(e)) return; const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
     mouseup: (e) => { if (!dragging || e.target === canvas) return; dragging = false; send(release(e)); },
   };
   // Keys the room handles itself (reload, copy): their keyup stays here too.
@@ -124,7 +127,7 @@ export function cr_attach(canvas, url, onText) {
   const h = {
     mousedown: (e) => { canvas.focus(); dragging = true; send({ t: 'm', type: 'mousePressed', ...pos(e), button: btn(e.button), buttons: e.buttons, clickCount: e.detail || 1, modifiers: mods(e) }); e.preventDefault(); },
     mouseup: (e) => { dragging = e.buttons !== 0; send(release(e)); },
-    mousemove: (e) => { lastPos = pos(e); const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
+    mousemove: (e) => { lastPos = pos(e); if (releasedElsewhere(e)) return; const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
     dragover: (e) => e.preventDefault(),
     drop: (e) => { e.preventDefault(); canvas.focus(); lastPos = pos(e); sendFile(e.dataTransfer && e.dataTransfer.files[0], lastPos); },
     wheel: (e) => { send({ t: 'm', type: 'mouseWheel', ...pos(e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: mods(e) }); e.preventDefault(); },
