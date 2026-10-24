@@ -596,12 +596,13 @@ impl Session {
         let waited = std::time::Instant::now();
         let ingest_end_seen = self.await_ingest_end().await;
         let ingest_end_wait_ms = waited.elapsed().as_millis() as u64;
-        if !ingest_end_seen {
-            warn!(
-                session = %self.row.id,
-                "av-gate: YouTube still reads the stream active after {ingest_end_wait_ms} ms; completing anyway"
-            );
-        }
+        // false = YouTube still read the stream active at the bound: the
+        // broadcast is completed anyway (it must never stay live).
+        info!(
+            session = %self.row.id,
+            ingest_end_seen,
+            "av-gate: waited {ingest_end_wait_ms} ms for YouTube to see the ingest end"
+        );
         tokio::time::sleep(self.ctx.timings.archive_settle).await;
         let problems = self.teardown(false).await;
         if !problems.is_empty() {
