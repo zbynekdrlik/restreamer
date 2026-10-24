@@ -72,3 +72,69 @@ fn the_newest_pipewire_pulse_decides() {
     let procs = vec![pulse(1, 50), audio(71529, 100, UD), pulse(2, 700)];
     assert_eq!(stale_audio_services(&procs, Path::new(UD)), vec![71529]);
 }
+
+#[test]
+fn proc_lists_this_test_process_with_its_start_time() {
+    let me = std::process::id();
+    let procs = read_procs();
+    let mine = procs
+        .iter()
+        .find(|p| p.pid == me)
+        .expect("own pid in /proc");
+    assert!(mine.start > 0);
+    assert!(!mine.cmdline.is_empty());
+    assert!(!mine.cmdline.contains('\0'));
+}
+
+#[test]
+fn a_stale_audio_service_is_ended_and_a_fresh_one_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let ud = format!("--user-data-dir={}", dir.path().display());
+    let spawn = || {
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30",
+                "sh",
+                "--utility-sub-type=audio.mojom.AudioService",
+                &ud,
+            ])
+            .spawn()
+            .unwrap()
+    };
+    let mut stale = spawn();
+    let mut fresh = spawn();
+    let mut procs: Vec<Proc> = read_procs()
+        .into_iter()
+        .filter(|p| p.pid == stale.id() || p.pid == fresh.id())
+        .collect();
+    assert_eq!(procs.len(), 2, "both test children are in /proc");
+    // pipewire-pulse restarted after the first, before the second.
+    let first = procs.iter().find(|p| p.pid == stale.id()).unwrap().start;
+    for p in &mut procs {
+        if p.pid == fresh.id() {
+            p.start = first + 10;
+        }
+    }
+    procs.push(pulse(1, first + 5));
+
+    assert_eq!(restart_stale(&procs, dir.path()), vec![stale.id()]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = stale.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stale service was not ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(!status.success(), "ended by a signal");
+    assert!(
+        fresh.try_wait().unwrap().is_none(),
+        "the fresh service keeps running"
+    );
+    fresh.kill().unwrap();
+    fresh.wait().unwrap();
+}

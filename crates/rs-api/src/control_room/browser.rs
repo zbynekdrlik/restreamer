@@ -165,6 +165,18 @@ impl Browser {
     pub async fn ensure_running(&self) -> Result<()> {
         let _guard = self.start_lock.lock().await;
         if self.cdp.browser_ws_url().await.is_ok() {
+            #[cfg(not(windows))]
+            {
+                let user_data = self.user_data.clone();
+                // /proc reads and a kill: off the async worker.
+                let _ = tokio::task::spawn_blocking(move || {
+                    super::audio_service::restart_stale(
+                        &super::audio_service::read_procs(),
+                        &user_data,
+                    )
+                })
+                .await;
+            }
             return Ok(());
         }
         let chrome = self.chrome()?;
