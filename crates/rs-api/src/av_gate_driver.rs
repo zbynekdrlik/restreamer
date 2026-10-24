@@ -558,7 +558,31 @@ impl Session {
         }
     }
 
-    /// The caller's stop: drain, teardown, `processing`, then the VOD.
+    /// After the drain: wait until YouTube reports the bound stream not
+    /// `active`, i.e. our publish ended and YouTube saw it (a read error counts
+    /// as not seen yet). `false` once `ingest_end_timeout` passed without it.
+    async fn await_ingest_end(&self) -> bool {
+        let (Some(yt), Some(sid)) = (self.yt.as_ref(), self.row.stream_id.clone()) else {
+            return false;
+        };
+        let deadline = tokio::time::Instant::now() + self.ctx.timings.ingest_end_timeout;
+        loop {
+            match yt.stream_status(&sid).await {
+                Ok(status) if status.as_deref() != Some("active") => return true,
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(session = %self.row.id, "av-gate: reading the stream status failed: {e}")
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(self.ctx.timings.poll).await;
+        }
+    }
+
+    /// The caller's stop: drain, the ingest end, the archive settle, teardown,
+    /// `processing`, then the VOD.
     async fn stop_flow(&mut self, drain: Duration) {
         let drain = drain + self.ctx.timings.drain_extra;
         self.row.stop_requested_at = Some(now_ts());
@@ -569,6 +593,16 @@ impl Session {
             json!({ "drain_secs": drain.as_secs() }),
         );
         tokio::time::sleep(drain).await;
+        let waited = std::time::Instant::now();
+        let ingest_end_seen = self.await_ingest_end().await;
+        let ingest_end_wait_ms = waited.elapsed().as_millis() as u64;
+        if !ingest_end_seen {
+            warn!(
+                session = %self.row.id,
+                "av-gate: YouTube still reads the stream active after {ingest_end_wait_ms} ms; completing anyway"
+            );
+        }
+        tokio::time::sleep(self.ctx.timings.archive_settle).await;
         let problems = self.teardown(false).await;
         if !problems.is_empty() {
             return self
@@ -580,7 +614,11 @@ impl Session {
         self.audit(
             Severity::Info,
             Action::AvGateSessionProcessing,
-            json!({ "broadcast_id": self.row.broadcast_id }),
+            json!({
+                "broadcast_id": self.row.broadcast_id,
+                "ingest_end_seen": ingest_end_seen,
+                "ingest_end_wait_ms": ingest_end_wait_ms,
+            }),
         );
         self.ctx.registry.release(&self.row.id);
         self.await_vod().await;
