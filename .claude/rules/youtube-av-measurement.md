@@ -36,8 +36,12 @@ measurement.
 - `POST /api/v1/av-gate/session/{id}/stop` -> `202` (handed to the session); `200` when it
   is already past the stop (a retry is harmless); `409` for an unfinished row nobody
   runs (the boot reconcile owns it). The stop drains the event cache (`cache_delay_secs`
-  + 15 s) BEFORE completing the broadcast, so `done` arrives ~2.5 min + YouTube's
-  processing after the stop.
+  + 15 s), then waits until YouTube reads the bound stream not `active`
+  (`ingest_end_timeout`, 120 s; completes anyway after it), then `archive_settle` (30 s),
+  and only then completes the broadcast. YouTube archives ~15-20 s behind its ingest:
+  a `complete` 8.6 s after our last byte left the VOD ~9 s short (session 2b50f118,
+  stream-snv, 24.10.2026). The `processing` audit row carries `ingest_end_seen` and
+  `ingest_end_wait_ms`.
 - `GET /api/v1/av-gate/status` -> `{reconciled, holder, cleanup_pending: [ids]}`: why a
   POST would be refused. `POST /api/v1/av-gate/session/{id}/clear-cleanup` drops a
   pending cleanup WITHOUT retrying it (audited, `reaped.cause = operator_clear`): the
