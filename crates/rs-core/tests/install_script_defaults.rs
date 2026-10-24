@@ -546,7 +546,9 @@ fn install_script_registers_the_task_at_normal_priority() {
 fn ci_deploy_runs_the_packaged_unit_at_normal_priority() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-        .expect(".github/workflows/ci.yml must be readable");
+        .expect(".github/workflows/ci.yml must be readable")
+        // A Windows checkout has CRLF line ends.
+        .replace("\r\n", "\n");
     let start = ci
         .find("\n  deploy-stream-lan:\n")
         .expect("ci.yml must have the deploy-stream-lan job");
