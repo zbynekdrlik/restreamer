@@ -174,7 +174,9 @@ impl Default for YtState {
             life: StdMutex::new("ready".to_string()),
             live_lands_as: StdMutex::new("live".to_string()),
             video: StdMutex::new("succeeded".to_string()),
-            upload: StdMutex::new("uploaded".to_string()),
+            // No upload status until a test sets one: `uploaded` already means
+            // the archive is there (the VOD wait ends).
+            upload: StdMutex::new(String::new()),
             fail: StdMutex::new(HashSet::new()),
             transitions: StdMutex::new(Vec::new()),
             inserts: AtomicU32::new(0),
@@ -544,10 +546,17 @@ fn vod_step_reads_both_processing_and_upload_status() {
             "{p:?} {u:?}"
         );
     }
+    // A live archive is fetchable while YouTube still reads `processing`: on
+    // stream-snv, 24.10.2026, vr2JmFSu8dc read processing/uploaded 26 min after
+    // the stop while yt-dlp already listed 1080p + audio (camera-box issue 1404).
+    // So `uploaded` is done; fetching the formats is the caller's own check.
     assert_eq!(
         vod_step(&vod(Some("processing"), Some("uploaded"))),
-        VodStep::Pending
+        VodStep::Done
     );
+    assert_eq!(vod_step(&vod(None, Some("uploaded"))), VodStep::Done);
+    // Nothing reported yet is still pending.
+    assert_eq!(vod_step(&vod(Some("processing"), None)), VodStep::Pending);
     assert_eq!(vod_step(&vod(None, None)), VodStep::Pending);
 }
 
