@@ -95,8 +95,16 @@ paths:
   again under `apt-mark hold`: left alone), and drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
   unit under a lingering user manager. A release now has 5 assets.
   `self_upgrade_host.rs` (dpkg, apt, systemctl, CLI) is mutation-excluded glue.
-- **Upgrading stream-pp by hand** (the first 0.29.53 install, or when the timer is
-  broken) (`newlevel@10.76.8.204`): `newlevel` has no passwordless
+- **Upgrading a Linux box by hand** (stream-pp `newlevel@10.76.8.204`, stream-snv
+  `10.77.9.204`, Linux since 22.10.2026). Since 24.10.2026 (owner) `newlevel` has
+  PASSWORDLESS sudo on both: stage the CI `.deb` (artifact `restreamer-linux-deb`) on
+  the box, check its sha256, `sudo -n dpkg -i`, then `systemctl --user daemon-reload` +
+  `restart restreamer`, all through the box's MCP. dev1 has no ssh to stream-snv: serve
+  the file from dev1 with a short-lived `python3 -m http.server --bind 10.77.9.109` and
+  `curl` it on the box. `airuleset.py share` hands out a Cloudflare Access page, not the
+  file. Before 24.10 stream-pp needed a password:
+- *(History)* Upgrading stream-pp by hand (the first 0.29.53 install, or when the timer is
+  broken) (`newlevel@10.76.8.204`): `newlevel` had no passwordless
   sudo there. The owner provided the sudo password on 2026-10-19 (#323: the
   streampp box drifts behind releases). It is the dev1 key file `stream-pp-sudo`
   in the secrets store, and it is used only through
