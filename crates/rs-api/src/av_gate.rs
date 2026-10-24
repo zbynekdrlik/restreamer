@@ -281,6 +281,13 @@ pub struct AvGateTimings {
     pub poll: Duration,
     /// Added to the event's cache delay before the broadcast is completed.
     pub drain_extra: Duration,
+    /// After the drain, how long to wait for YouTube to report the bound
+    /// stream no longer `active` (our publish ended and YouTube saw it).
+    pub ingest_end_timeout: Duration,
+    /// Then, before `complete`: YouTube archives a live stream ~15-20 s
+    /// behind its ingest, and a broadcast completed sooner loses its tail
+    /// (stream-snv, 24.10.2026: ~9 s missing from the VOD).
+    pub archive_settle: Duration,
     /// No stop this long after creation: the session is reaped.
     pub idle_timeout: Duration,
     /// How long the teardown waits for the Hetzner servers to disappear.
@@ -298,6 +305,8 @@ impl AvGateTimings {
         Self {
             poll: Duration::from_secs(15),
             drain_extra: Duration::from_secs(15),
+            ingest_end_timeout: Duration::from_secs(120),
+            archive_settle: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(cfg.idle_timeout_secs),
             servers_gone_timeout: Duration::from_secs(180),
             processing_poll: Duration::from_secs(30),

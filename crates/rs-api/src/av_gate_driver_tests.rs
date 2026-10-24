@@ -353,6 +353,8 @@ pub(crate) fn timings() -> AvGateTimings {
     AvGateTimings {
         poll: Duration::from_millis(5),
         drain_extra: Duration::ZERO,
+        ingest_end_timeout: Duration::from_millis(150),
+        archive_settle: Duration::ZERO,
         idle_timeout: Duration::from_secs(10),
         servers_gone_timeout: Duration::from_millis(150),
         processing_poll: Duration::from_millis(5),
@@ -475,6 +477,15 @@ impl Harness {
                 self.row(id).await
             ),
         }
+    }
+
+    /// The audit rows emitted so far, in order.
+    pub fn audit_rows(&mut self) -> Vec<(Action, serde_json::Value)> {
+        let mut out = Vec::new();
+        while let Ok(row) = self.audit_rx.try_recv() {
+            out.push((row.action, row.detail));
+        }
+        out
     }
 
     /// The audit actions emitted so far, in order.
