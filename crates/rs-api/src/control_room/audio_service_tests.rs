@@ -138,3 +138,38 @@ fn a_stale_audio_service_is_ended_and_a_fresh_one_kept() {
     fresh.kill().unwrap();
     fresh.wait().unwrap();
 }
+
+#[test]
+fn pipewire_pulse_is_matched_by_its_program_name_only() {
+    let bare = Proc {
+        pid: 2,
+        cmdline: "pipewire-pulse".into(),
+        start: 500,
+    };
+    assert_eq!(
+        stale_audio_services(&[audio(7, 100, UD), bare], Path::new(UD)),
+        vec![7]
+    );
+    // pipewire itself (or a filter-chain) restarting is not the pulse server.
+    let pipewire = Proc {
+        pid: 3,
+        cmdline: "/usr/bin/pipewire -c filter-chain.conf".into(),
+        start: 500,
+    };
+    assert!(stale_audio_services(&[audio(7, 100, UD), pipewire], Path::new(UD)).is_empty());
+}
+
+#[test]
+fn a_service_started_in_the_same_tick_as_pipewire_pulse_is_not_stale() {
+    let procs = vec![audio(7, 500, UD), pulse(2, 500)];
+    assert!(stale_audio_services(&procs, Path::new(UD)).is_empty());
+}
+
+#[test]
+fn a_kill_that_fails_is_not_reported_as_ended() {
+    // A pid that is not there (a child already reaped): kill fails.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    let gone = audio(child.id(), 100, UD);
+    assert!(restart_stale(&[gone, pulse(2, 500)], Path::new(UD)).is_empty());
+}

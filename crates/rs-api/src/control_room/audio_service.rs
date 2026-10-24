@@ -34,10 +34,9 @@ pub fn stale_audio_services(procs: &[Proc], user_data: &Path) -> Vec<u32> {
     let Some(pulse) = procs
         .iter()
         .filter(|p| {
-            p.cmdline
-                .split(' ')
-                .next()
-                .is_some_and(|exe| exe.ends_with("/pipewire-pulse") || exe == "pipewire-pulse")
+            p.cmdline.split(' ').next().is_some_and(|exe| {
+                Path::new(exe).file_name() == Some(std::ffi::OsStr::new("pipewire-pulse"))
+            })
         })
         .map(|p| p.start)
         .max()
@@ -81,24 +80,29 @@ pub fn read_procs() -> Vec<Proc> {
 
 /// End the room Chrome's audio services that predate pipewire-pulse; Chrome
 /// starts a fresh one, connected to the running sound server, on the next
-/// sound. `procs` is [`read_procs`]. Returns the pids it signalled.
+/// sound. `procs` is [`read_procs`]. Returns the pids it ended.
 pub fn restart_stale(procs: &[Proc], user_data: &Path) -> Vec<u32> {
-    let stale = stale_audio_services(procs, user_data);
-    for pid in &stale {
-        tracing::info!(
-            "control rooms: Chrome's audio service (pid {pid}) is older than pipewire-pulse, \
-             so its sound goes nowhere; ending it, Chrome starts a new one on the next sound (#420)"
-        );
-        match std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .status()
-        {
-            Ok(s) if s.success() => {}
-            Ok(s) => tracing::warn!("control rooms: kill {pid} (audio service) exited {s}"),
-            Err(e) => tracing::warn!("control rooms: kill {pid} (audio service): {e}"),
-        }
-    }
-    stale
+    stale_audio_services(procs, user_data)
+        .into_iter()
+        .filter(|pid| {
+            tracing::info!(
+                "control rooms: Chrome's audio service (pid {pid}) is older than pipewire-pulse, \
+                 so its sound goes nowhere; ending it, Chrome starts a new one on the next sound (#420)"
+            );
+            match std::process::Command::new("kill").arg(pid.to_string()).status() {
+                Ok(s) => {
+                    if !s.success() {
+                        tracing::warn!("control rooms: kill {pid} (audio service) exited {s}");
+                    }
+                    s.success()
+                }
+                Err(e) => {
+                    tracing::warn!("control rooms: kill {pid} (audio service): {e}");
+                    false
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
