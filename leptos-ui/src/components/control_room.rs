@@ -90,7 +90,19 @@ export function cr_attach(canvas, url, onText) {
   const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left - canvas.clientLeft) * meta.w / canvas.clientWidth, y: (e.clientY - r.top - canvas.clientTop) * meta.h / canvas.clientHeight }; };
   const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   const btn = (b) => ['left', 'middle', 'right'][b] || 'none';
+  // #419: a move names the button held down (`buttons` bit 1 left, 4 middle,
+  // 2 right): Chrome drags a scrollbar thumb only then, a bare move is a hover.
+  const held = (b) => (b & 1 ? 'left' : b & 4 ? 'middle' : b & 2 ? 'right' : 'none');
+  const move = (e) => ({ t: 'm', type: 'mouseMoved', ...pos(e), button: held(e.buttons), buttons: e.buttons, modifiers: mods(e) });
+  const release = (e) => ({ t: 'm', type: 'mouseReleased', ...pos(e), button: btn(e.button), buttons: e.buttons, clickCount: e.detail || 1, modifiers: mods(e) });
   let lastMove = 0;
+  // A press in the room: its moves and its release go to the page even once
+  // the pointer has left the canvas (a scrollbar drag runs past its edge).
+  let dragging = false;
+  const outside = {
+    mousemove: (e) => { if (!dragging || e.target === canvas) return; const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
+    mouseup: (e) => { if (!dragging || e.target === canvas) return; dragging = false; send(release(e)); },
+  };
   // Keys the room handles itself (reload, copy): their keyup stays here too.
   const local = new Set();
   // Where the pointer last was over the room: a pasted file is dropped there.
@@ -110,9 +122,9 @@ export function cr_attach(canvas, url, onText) {
     r.readAsDataURL(file);
   };
   const h = {
-    mousedown: (e) => { canvas.focus(); send({ t: 'm', type: 'mousePressed', ...pos(e), button: btn(e.button), clickCount: e.detail || 1, modifiers: mods(e) }); e.preventDefault(); },
-    mouseup: (e) => send({ t: 'm', type: 'mouseReleased', ...pos(e), button: btn(e.button), clickCount: e.detail || 1, modifiers: mods(e) }),
-    mousemove: (e) => { lastPos = pos(e); const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send({ t: 'm', type: 'mouseMoved', ...lastPos, button: 'none', modifiers: mods(e) }); },
+    mousedown: (e) => { canvas.focus(); dragging = true; send({ t: 'm', type: 'mousePressed', ...pos(e), button: btn(e.button), buttons: e.buttons, clickCount: e.detail || 1, modifiers: mods(e) }); e.preventDefault(); },
+    mouseup: (e) => { dragging = e.buttons !== 0; send(release(e)); },
+    mousemove: (e) => { lastPos = pos(e); const n = Date.now(); if (n - lastMove < 30) return; lastMove = n; send(move(e)); },
     dragover: (e) => e.preventDefault(),
     drop: (e) => { e.preventDefault(); canvas.focus(); lastPos = pos(e); sendFile(e.dataTransfer && e.dataTransfer.files[0], lastPos); },
     wheel: (e) => { send({ t: 'm', type: 'mouseWheel', ...pos(e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: mods(e) }); e.preventDefault(); },
@@ -137,6 +149,7 @@ export function cr_attach(canvas, url, onText) {
     keyup: (e) => { if (local.delete(e.code)) { e.preventDefault(); return; } send({ t: 'k', type: 'keyUp', key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: mods(e) }); e.preventDefault(); },
   };
   for (const [k, f] of Object.entries(h)) canvas.addEventListener(k, f, k === 'wheel' ? { passive: false } : undefined);
+  for (const [k, f] of Object.entries(outside)) window.addEventListener(k, f);
   const paste = (e) => {
     if (document.activeElement !== canvas) return;
     const file = e.clipboardData.files && e.clipboardData.files[0];
@@ -150,6 +163,7 @@ export function cr_attach(canvas, url, onText) {
     sendInput: (input) => { sendFile(input.files && input.files[0], lastPos); input.value = ''; },
     close: () => {
       for (const [k, f] of Object.entries(h)) canvas.removeEventListener(k, f);
+      for (const [k, f] of Object.entries(outside)) window.removeEventListener(k, f);
       document.removeEventListener('paste', paste);
       ro.disconnect();
       window.removeEventListener('resize', refit);
