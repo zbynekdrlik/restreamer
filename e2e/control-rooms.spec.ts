@@ -152,8 +152,10 @@ test("a drag in a room holds the button down to Chrome, also when it ends outsid
   const drag = inputs.slice(pressed + 1, released).filter((i) => i.type === "mouseMoved");
   expect(drag.length).toBeGreaterThan(0);
   expect(drag.every((i) => i.button === "left" && i.buttons === 1)).toBe(true);
-  // Afterwards the pointer hovers again: no button held.
-  await page.mouse.move(box.x + 30, box.y + 30);
+  // Afterwards the pointer hovers again: no button held. The room sends at most
+  // one move per 30 ms, so a single move right after the drag may be dropped.
+  await page.waitForTimeout(60);
+  await page.mouse.move(box.x + 30, box.y + 30, { steps: 3 });
   await expect
     .poll(async () => {
       const t = await (await request.get(`${API}/_test/control-rooms`)).json();
