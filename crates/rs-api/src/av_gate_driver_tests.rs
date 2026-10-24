@@ -611,6 +611,8 @@ async fn a_session_goes_starting_ready_processing_done_and_cleans_up() {
         Some("s-happy")
     );
 
+    // Our publish ended: YouTube reads the stream inactive at the first check.
+    *h.yt_state.stream_status.lock().unwrap() = VecDeque::from(["inactive".to_string()]);
     assert!(h.ctx.registry.request_stop("s-happy"));
     let done = h.wait_state("s-happy", SessionState::Done).await;
     assert_eq!(done.vod_id.as_deref(), Some("bc-1"));
@@ -619,8 +621,9 @@ async fn a_session_goes_starting_ready_processing_done_and_cleans_up() {
     assert!(done.finished_at.is_some());
     assert_eq!(done.reason, None);
     // lookup 1 + insert 50 + bind 50; poll 1: life 1 + stream 1 + live 50;
-    // poll 2: life 1; the teardown's life 1 + complete 50; one VOD poll 1.
-    assert_eq!(done.quota_units, 206);
+    // poll 2: life 1; the ingest-end check's stream 1; the teardown's life 1 +
+    // complete 50; one VOD poll 1.
+    assert_eq!(done.quota_units, 207);
     assert_eq!(h.yt_state.transitions(), vec!["live", "complete"]);
     assert_eq!(h.ctx.registry.holder(), None);
     let calls = h.rig.calls();
