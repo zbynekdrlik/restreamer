@@ -26,6 +26,7 @@
 function Find-JobOwnerProcess {
   $override = $env:CI_JOB_OWNER_PID -as [int]
   if ($override -gt 0) { return Get-Process -Id $override -ErrorAction SilentlyContinue }
+  if ($IsLinux) { return Find-JobOwnerProcessLinux }
   if ($PSVersionTable.PSEdition -ne "Desktop" -and -not $IsWindows) { return $null }
   $id = $PID
   for ($i = 0; $i -lt 12 -and $id -gt 0; $i++) {
@@ -37,6 +38,24 @@ function Find-JobOwnerProcess {
     if ($null -eq $row) { return $null }
     if ($row.Name -eq "Runner.Worker.exe") { return Get-Process -Id $id -ErrorAction SilentlyContinue }
     $id = [int]$row.ParentProcessId
+  }
+  return $null
+}
+
+# Linux (the stream.lan box since 22.10.2026, #417): walk /proc/<pid>/stat's ppid
+# (field 4) up to the Runner.Worker process.
+function Find-JobOwnerProcessLinux {
+  $id = $PID
+  for ($i = 0; $i -lt 12 -and $id -gt 1; $i++) {
+    try {
+      $stat = [System.IO.File]::ReadAllText("/proc/$id/stat")
+    } catch {
+      return $null    # a vanished parent must not fail the step that takes the lease
+    }
+    $close = $stat.LastIndexOf(")")
+    $comm = $stat.Substring($stat.IndexOf("(") + 1, $close - $stat.IndexOf("(") - 1)
+    if ($comm -eq "Runner.Worker") { return Get-Process -Id $id -ErrorAction SilentlyContinue }
+    $id = [int]($stat.Substring($close + 2).Split(" ")[1])
   }
   return $null
 }

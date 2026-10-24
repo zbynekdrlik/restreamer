@@ -1247,7 +1247,7 @@ jobs:
           # in test-integrity (earlier in the file), so it is OUTSIDE the sed
           # range and can never self-match its own grep pattern (#325).
           DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
-          if ! echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-Protocol TCP.*-LocalPort 1234.*-Action Allow'; then
+          if ! echo "$DEPLOY_BLOCK" | grep -qE 'sudo -n ufw allow 1234/tcp'; then
             echo "ERROR: deploy-stream-lan firewall block has no inbound ALLOW rule for RTMP TCP 1234 (#363)."
             echo "Remote OBS cannot push RTMP to the CI-deployed stream box without it."
             exit 1
@@ -1722,18 +1722,18 @@ jobs:
             fi
           done
           FINALLY=$(awk '/^          \} finally \{ *$/{f=1; next} f && /^          \}$/{exit} f' <<<"$GATE")
-          if ! grep -qF 'NtResumeProcess($rsHandle)' <<<"$FINALLY"; then
-            echo "ERROR: the late-join gate must resume Restreamer (NtResumeProcess) in its finally block (#367)."
+          if ! grep -qF 'kill -CONT $rs.Id' <<<"$FINALLY"; then
+            echo "ERROR: the late-join gate must resume Restreamer (kill -CONT \$rs.Id) in its finally block (#367)."
             exit 1
           fi
-          if ! grep -qE '^        if: always\(\)$' <<<"$SAFETY" || ! grep -qF 'NtResumeProcess' <<<"$SAFETY"; then
-            echo "ERROR: the step after the late-join gate must be 'if: always()' and resume Restreamer with NtResumeProcess (#367)."
+          if ! grep -qE '^        if: always\(\)$' <<<"$SAFETY" || ! grep -qF 'kill -CONT' <<<"$SAFETY"; then
+            echo "ERROR: the step after the late-join gate must be 'if: always()' and resume Restreamer with kill -CONT (#367)."
             exit 1
           fi
           for s in "$GATE" "$SAFETY"; do
             for f in latejoin-367-restreamer-suspended.txt latejoin-367-publisher1.txt; do
-              if ! grep -qF "Join-Path \$env:TEMP \"$f\"" <<<"$s"; then
-                echo "ERROR: the late-join gate and the resume step must share the PID marker Join-Path \$env:TEMP \"$f\" (#367)."
+              if ! grep -qF "Join-Path \$env:RUNNER_TEMP \"$f\"" <<<"$s"; then
+                echo "ERROR: the late-join gate and the resume step must share the PID marker Join-Path \$env:RUNNER_TEMP \"$f\" (#367)."
                 exit 1
               fi
             done
@@ -1742,12 +1742,13 @@ jobs:
             echo "ERROR: the resume step must also kill a frozen publisher 1 left behind (#367)."
             exit 1
           fi
-          # The dead-man must be created through WMI (outside the runner's
-          # process tree) and armed BEFORE Restreamer is suspended.
+          # The dead-man must run outside the runner's process tree and cgroup
+          # (a systemd-run --user transient unit) and be armed BEFORE Restreamer
+          # is suspended.
           ARM=$(grep -nE '^\s*\$deadManPid = Start-DeadMan\s*$' <<<"$GATE" | head -1 | cut -d: -f1 || true)
-          SUSPEND=$(grep -nF 'NtSuspendProcess($rsHandle)' <<<"$GATE" | head -1 | cut -d: -f1 || true)
-          if ! grep -qF 'Invoke-CimMethod -ClassName Win32_Process -MethodName Create' <<<"$GATE" || [ -z "$ARM" ] || [ -z "$SUSPEND" ] || [ "$ARM" -ge "$SUSPEND" ]; then
-            echo "ERROR: the late-join gate must arm its WMI-created dead-man (Start-DeadMan) before NtSuspendProcess(\$rsHandle) (#367)."
+          SUSPEND=$(grep -nF 'Suspend-Pid $rs.Id' <<<"$GATE" | head -1 | cut -d: -f1 || true)
+          if ! grep -qF 'systemd-run --user' <<<"$GATE" || [ -z "$ARM" ] || [ -z "$SUSPEND" ] || [ "$ARM" -ge "$SUSPEND" ]; then
+            echo "ERROR: the late-join gate must arm its systemd-run dead-man (Start-DeadMan) before Suspend-Pid \$rs.Id (#367)."
             exit 1
           fi
           if grep -nE 'ws://|:4455|obs-e2e-test|/obs/' <<<"$GATE"; then
@@ -1835,13 +1836,14 @@ jobs:
     name: OBS scripts vs mock obs-websocket (#374)
     # #374: stream OBS is camera-box's, so the scripts that start/stop it
     # (scripts/ci/obs-stream.ps1, obs-readiness-check.ps1, obs-ws.ps1) are executed
-    # here first, in Windows PowerShell 5.1 (what the stream box runs), against a
-    # mock obs-websocket + rig lease + fake obs64 process. Every scenario also
-    # asserts the scripts sent only Start/Stop streaming and read-only requests.
-    runs-on: windows-latest
+    # here first, in pwsh on Linux (what both stream boxes run since 2026-10,
+    # #417), against a mock obs-websocket + rig lease + fake `obs` process. Every
+    # scenario also asserts the scripts sent only Start/Stop streaming and
+    # read-only requests.
+    runs-on: ubuntu-latest
     # 10 -> 20 with #379: the program-audio guard suite (57 scenarios: a detached
     # watchdog, real poll intervals, delivery-cut budgets) takes ~4 min on dev1's pwsh
-    # on top of the ~2 min OBS suite, and Windows PowerShell 5.1 starts slower.
+    # on top of the ~2 min OBS suite.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -1960,8 +1962,8 @@ jobs:
 
   deploy-stream-lan:
     name: Deploy to stream.lan
-    needs: [rust-ci-gate, build-tauri]
-    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
+    needs: [rust-ci-gate, build-tauri-linux]
+    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri-linux.result == 'success'
     # Cross-RUN serialization: every job that touches the single stream.lan
     # box / YouTube test stream shares this group, so a main run and a dev
     # run can never interleave deploys or E2E on the shared machine
@@ -1976,81 +1978,44 @@ jobs:
       group: stream-lan-box
       queue: max
       cancel-in-progress: false
-    runs-on: [self-hosted, windows, stream-lan]
+    # stream.lan (stream-snv) is Ubuntu since 22.10.2026 (#417): the runner is
+    # the systemd service of user newlevel, Restreamer is the .deb plus the
+    # `restreamer` systemd --user unit (.claude/rules/linux-build.md). The
+    # runner's .env carries XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS so
+    # `systemctl --user` reaches the kiosk user's manager.
+    runs-on: [self-hosted, linux, stream-lan]
     steps:
       - name: Clean old artifacts
-        shell: powershell
+        shell: pwsh
         run: |
           # Remove old artifacts to prevent version mix-ups on self-hosted runner
           Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
           Write-Host "Cleaned artifacts directory"
 
-      - name: Download Tauri installer
+      - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
-          name: restreamer-tauri-installer
-          path: artifacts/tauri
-
-      - name: Download WASM frontend
-        uses: actions/download-artifact@v4
-        with:
-          name: restreamer-www
-          path: artifacts/www
+          name: restreamer-linux-deb
+          path: artifacts/deb
 
       - name: List artifacts
+        shell: pwsh
         run: |
-          Write-Host "=== Tauri installer (unified app with embedded service) ==="
-          Get-ChildItem artifacts/tauri/
-          Write-Host "=== WASM frontend (for LAN serving) ==="
-          Get-ChildItem artifacts/www/
-        shell: powershell
-
-      - name: Install WebView2 runtime
-        shell: powershell
-        run: |
-          # Check if WebView2 is already installed (check both known GUIDs and file path)
-          function Get-WebView2Version {
-            foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
-              $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
-              if ($reg -and $reg.pv) { return $reg.pv }
-            }
-            # Fallback: check if the runtime directory exists
-            $dir = "C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
-            if (Test-Path $dir) { return "installed (detected from filesystem)" }
-            return $null
-          }
-
-          $version = Get-WebView2Version
-          if ($version) {
-            Write-Host "WebView2 already installed: $version"
-          } else {
-            Write-Host "WebView2 not found - installing Evergreen Runtime..."
-            $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
-            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
-            Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
-            Remove-Item $bootstrapper -ErrorAction SilentlyContinue
-
-            $version = Get-WebView2Version
-            if (-not $version) {
-              Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
-              exit 1
-            }
-            Write-Host "WebView2 installed: $version"
-          }
+          Write-Host "=== Linux package (Restreamer + embedded service + www) ==="
+          Get-ChildItem artifacts/deb/
 
       # Live-delivery guard (#229). A late CI deploy must NEVER restart the app
       # while the VPS is actively delivering a live event -- that bounces the
-      # tray app, empties the local buffer, and caused the 2026-05-20 outage.
-      # We gate ONLY on delivering_activated (the real "VPS pushing to YT/FB"
-      # signal), NOT receiving_activated -- operators routinely run ingest
-      # tests with receiving=true and expect deploys to proceed (the reason the
-      # old receiving-based guard was removed). When live, the restart steps are
-      # skipped and the job still passes green; the new build deploys on the
-      # next push after the event. API unreachable => app is down => cannot be
-      # live-delivering => safe to deploy.
+      # operator window, empties the local buffer, and caused the 2026-05-20
+      # outage. We gate ONLY on delivering_activated (the real "VPS pushing to
+      # YT/FB" signal), NOT receiving_activated -- operators routinely run
+      # ingest tests with receiving=true and expect deploys to proceed. When
+      # live, the restart steps are skipped and the job still passes green;
+      # the new build deploys on the next push after the event. API
+      # unreachable => app is down => cannot be live-delivering => safe.
       - name: Live-delivery guard
         id: live_guard
-        shell: powershell
+        shell: pwsh
         run: |
           $live = $false
           $eventName = ""
@@ -2071,211 +2036,124 @@ jobs:
           $liveStr = $live.ToString().ToLower()
           Add-Content -Path $env:GITHUB_OUTPUT -Value "live=$liveStr"
 
-      - name: Deploy Tauri app
-        if: steps.live_guard.outputs.live != 'true'
-        shell: powershell
-        run: |
-          # Deploy single unified Tauri binary (contains embedded service + tray icon)
-          $ErrorActionPreference = "Continue"
-
-          $stagingDir = "C:\ProgramData\Restreamer\staging"
-          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-
-          $installer = Get-ChildItem "artifacts/tauri/*.exe" | Select-Object -First 1
-          Copy-Item $installer.FullName "$stagingDir\Restreamer-Setup.exe" -Force
-          Write-Host "Staged: $($installer.Name)"
-
-          # Stop running processes
-          Write-Host "=== Stopping old processes ==="
-          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
-          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
-
-          # Remove legacy Windows service if it exists
-          Write-Host "=== Removing legacy Windows service ==="
-          foreach ($name in @("RestreamerService", "restreamer-service")) {
-            sc.exe stop $name 2>&1 | Out-Null
-            sc.exe delete $name 2>&1 | Out-Null
-          }
-
-          # CRITICAL: Stop and disable old Python NSSM services that block RTMP port 1234
-          Write-Host "=== Disabling legacy Python services ==="
-          foreach ($svc in @("inpoint_service", "endpoint_service")) {
-            $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
-            if ($service) {
-              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
-              Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
-              Write-Host "Disabled: $svc"
-            }
-          }
-          # Kill any ffmpeg processes spawned by old services (they hold RTMP port 1234)
-          taskkill /F /IM "ffmpeg.exe" 2>&1 | Out-Null
-          # Wait for ports 1234 (RTMP) and 8910 (API) to be free (up to 30 seconds)
-          $timeout = 30
-          $elapsed = 0
-          while ($elapsed -lt $timeout) {
-            $portInUse = netstat -an | Select-String ":1234 |:8910 " | Select-String "LISTENING|TIME_WAIT"
-            if (-not $portInUse) { break }
-            Start-Sleep -Seconds 2
-            $elapsed += 2
-            Write-Host "Waiting for ports to be released... ($elapsed s)"
-          }
-          if ($elapsed -ge $timeout) {
-            Write-Host "WARNING: Ports still in use after ${timeout}s"
-          }
-
-          Start-Sleep -Seconds 2
-
-          # Clean up old files
-          Write-Host "=== Cleaning up old files ==="
-          $InstallDir = "C:\Program Files\Restreamer"
-          Remove-Item "$InstallDir\restreamer-tray.exe" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$stagingDir\deploy.ps1" -Force -ErrorAction SilentlyContinue
-
-          # Run NSIS installer (installs unified Tauri app)
-          Write-Host "=== Installing unified Tauri app ==="
-          Start-Process -FilePath "$stagingDir\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
-
-          # Verify install
-          Write-Host "=== Verifying install ==="
-          Get-ChildItem "$InstallDir\*.exe"
-
-          Write-Host "=== Deployment complete ==="
-          exit 0
-
-      - name: Deploy WASM frontend for LAN access
-        if: steps.live_guard.outputs.live != 'true'
-        shell: powershell
-        run: |
-          $wwwDir = "C:\Program Files\Restreamer\www"
-          # Remove old www directory
-          Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
-          # Copy new WASM frontend files
-          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
-          Write-Host "=== WASM frontend deployed to $wwwDir ==="
-          Get-ChildItem $wwwDir
-
-          # Allow LAN access through Windows Firewall
-          Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
-          Write-Host "=== Firewall rule created for port 8910 ==="
-
-          # Allow HTTPS access through Windows Firewall
-          Remove-NetFirewallRule -DisplayName "Restreamer HTTPS" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "Restreamer HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
-          Write-Host "=== Firewall rule created for port 443 ==="
-
-          # #363: Allow RTMP ingest (remote OBS push) through Windows Firewall.
-          # This CI deploy block previously opened only 8910 + 443, so remote OBS
-          # pushing RTMP to :1234 was firewall-blocked even though ServiceCore
-          # listens on 1234 (CHECK 3b). Idempotent Remove-then-New, same pattern
-          # as the rules above.
-          Remove-NetFirewallRule -DisplayName "Restreamer RTMP" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "Restreamer RTMP" -Direction Inbound -Protocol TCP -LocalPort 1234 -Action Allow | Out-Null
-          Write-Host "=== Firewall rule created for port 1234 (RTMP) ==="
-
       - name: Deploy TLS certificates
         if: env.TLS_CERT_PEM != ''
-        shell: powershell
+        shell: pwsh
         env:
           TLS_CERT_PEM: ${{ secrets.TLS_CERT_PEM }}
           TLS_KEY_PEM: ${{ secrets.TLS_KEY_PEM }}
         run: |
-          $configDir = "C:\ProgramData\Restreamer"
+          # A relative tls_cert/tls_key (the default cert.pem/key.pem) resolves
+          # against config.json's folder (rs-api resolve_tls_path).
+          $configDir = Join-Path $HOME ".config/restreamer"
           New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-          [System.IO.File]::WriteAllText("$configDir\cert.pem", $env:TLS_CERT_PEM)
-          [System.IO.File]::WriteAllText("$configDir\key.pem", $env:TLS_KEY_PEM)
+          [System.IO.File]::WriteAllText((Join-Path $configDir "cert.pem"), $env:TLS_CERT_PEM)
+          [System.IO.File]::WriteAllText((Join-Path $configDir "key.pem"), $env:TLS_KEY_PEM)
+          chmod 600 (Join-Path $configDir "key.pem")
           Write-Host "TLS certificates deployed to $configDir"
 
       - name: Deploy and start Restreamer
         if: steps.live_guard.outputs.live != 'true'
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
-          $TaskName = "RestreamerGUI"
-          $InstallDir = "C:\Program Files\Restreamer"
+          $deb = Get-ChildItem "artifacts/deb/*.deb" | Select-Object -First 1
+          if (-not $deb) { throw "no .deb in artifacts/deb" }
+          Write-Host "Package: $($deb.Name)"
 
-          Write-Host "=== Step 1: Stop any existing instances ==="
-          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          # Wait for process to fully exit and release DB locks
-          $elapsed = 0
-          while ($elapsed -lt 10) {
-            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-            if (-not $proc) { break }
-            Start-Sleep -Seconds 1
-            $elapsed++
-            Write-Host "Waiting for process to exit... ($elapsed s)"
-          }
-          Start-Sleep -Seconds 2
+          Write-Host "=== Step 1: Stop Restreamer ==="
+          # A clean stop: the unit's KillMode=control-group takes its ffmpeg
+          # children too, while the control-room Chrome/Xvfb live in their own
+          # scopes and survive (control-rooms.md).
+          systemctl --user stop restreamer
+          if ($LASTEXITCODE -ne 0) { throw "systemctl --user stop restreamer failed ($LASTEXITCODE)" }
 
           Write-Host "=== Step 1.5: Clean stale chunk files (preserve database AND WAL) ==="
-          $DataDir = "C:\ProgramData\Restreamer"
           # WAL/SHM files are part of the live database in journal_mode=WAL.
-          # Deleting them between a forced kill and the next process start
-          # destroys uncheckpointed transactions (e.g. OAuth grants created
-          # seconds before the redeploy). SQLite replays WAL safely on open.
-
-          $chunksDir = "$DataDir\chunks"
+          # Deleting them between a stop and the next start destroys
+          # uncheckpointed transactions. SQLite replays WAL safely on open.
+          $chunksDir = Join-Path $HOME ".local/share/restreamer/chunks"
           if (Test-Path $chunksDir) {
             $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
-            Remove-Item "$chunksDir\*" -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $chunksDir "*") -Force -ErrorAction SilentlyContinue
             Write-Host "Removed $count stale chunk files"
           }
 
-          Write-Host "=== Step 2: Remove old scheduled tasks ==="
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
-            Write-Host "Removing task: $($_.TaskName)"
-            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
-          }
+          Write-Host "=== Step 2: Install the package ==="
+          # The runner user has passwordless sudo on the box (owner, 24.10.2026).
+          sudo -n dpkg -i $deb.FullName
+          if ($LASTEXITCODE -ne 0) { throw "dpkg -i $($deb.Name) failed ($LASTEXITCODE)" }
+          dpkg-query -W restreamer
 
-          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
-          # -Priority 4 = Normal (#368), same as scripts/install.ps1. The
-          # default 7 starts Restreamer BelowNormal and OBS drops frames.
-          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
-          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
-          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -Priority 4
-
-          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Created scheduled task: $TaskName"
-
-          Write-Host "=== Step 4: Start Restreamer in user session ==="
-          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
-          schtasks.exe /run /tn $TaskName
-          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Write-Host "=== Step 3: Start Restreamer in the kiosk session ==="
+          # The package ships the user unit; reload so a changed unit applies.
+          systemctl --user daemon-reload
+          if ($LASTEXITCODE -ne 0) { throw "systemctl --user daemon-reload failed ($LASTEXITCODE)" }
+          systemctl --user enable restreamer
+          if ($LASTEXITCODE -ne 0) { throw "systemctl --user enable restreamer failed ($LASTEXITCODE)" }
+          systemctl --user start restreamer
+          if ($LASTEXITCODE -ne 0) { throw "systemctl --user start restreamer failed ($LASTEXITCODE)" }
           Start-Sleep -Seconds 10
-
           Write-Host "=== Deployment steps complete ==="
 
+      - name: Allow LAN access to the API, HTTPS and RTMP (#363)
+        if: steps.live_guard.outputs.live != 'true'
+        shell: pwsh
+        run: |
+          # #363: remote OBS pushes RTMP to :1234, the LAN dashboard is :8910,
+          # HTTPS :443. Only an ACTIVE ufw blocks them; stream-snv ships with it
+          # inactive, so this is a no-op there until someone enables it.
+          $ErrorActionPreference = "Stop"
+          $status = (sudo -n ufw status 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "sudo -n ufw status failed: $status" }
+          if ($status -match "Status: active") {
+            sudo -n ufw allow 8910/tcp
+            if ($LASTEXITCODE -ne 0) { throw "ufw allow 8910/tcp failed" }
+            sudo -n ufw allow 443/tcp
+            if ($LASTEXITCODE -ne 0) { throw "ufw allow 443/tcp failed" }
+            sudo -n ufw allow 1234/tcp
+            if ($LASTEXITCODE -ne 0) { throw "ufw allow 1234/tcp failed" }
+            Write-Host "ufw active: opened 8910, 443 and 1234 (RTMP) TCP"
+          } else {
+            Write-Host "ufw inactive: 8910, 443 and 1234 (RTMP) are not filtered"
+          }
+
       - name: Verify Restreamer is running correctly
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "=== CHECK 1: Process is running ==="
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $proc) {
-            Write-Host "Process not running, showing recent event log entries:"
-            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
-            Write-Error "FAIL: Restreamer.exe is not running"
+          Write-Host "=== CHECK 1: The user unit is active ==="
+          $active = (systemctl --user is-active restreamer)
+          $mainPid = [int](systemctl --user show -p MainPID --value restreamer)
+          if ($active -ne "active" -or $mainPid -le 0) {
+            journalctl --user -u restreamer --since "-5min" -n 50 --no-pager
+            Write-Error "FAIL: restreamer.service is '$active' (MainPID $mainPid)"
             exit 1
           }
-          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+          $rss = [math]::Round((Get-Process -Id $mainPid).WorkingSet64 / 1MB)
+          Write-Host "OK: restreamer.service active (PID: $mainPid, Memory: ${rss}MB)"
 
-          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
-          if ($proc.SessionId -eq 0) {
-            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+          Write-Host "=== CHECK 2: Running as the kiosk user with its display (the operator window) ==="
+          $owner = (ps -o user= -p $mainPid).Trim()
+          if ($owner -ne "newlevel") {
+            Write-Error "FAIL: Restreamer runs as '$owner', not newlevel - the operator window cannot show"
             exit 1
           }
-          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
+          $envVars = [System.IO.File]::ReadAllText("/proc/$mainPid/environ") -split "`0"
+          if (-not ($envVars | Where-Object { $_ -like "DISPLAY=*" -or $_ -like "WAYLAND_DISPLAY=*" })) {
+            Write-Error "FAIL: Restreamer has no DISPLAY - the operator window cannot show"
+            exit 1
+          }
+          Write-Host "OK: running as newlevel with a display"
 
+          $log = Join-Path $HOME ".local/share/restreamer/restreamer.log"
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
-          # Large SQLite DB from accumulated CI chunks can make startup slow
+          # A large SQLite DB from accumulated CI chunks can make startup slow
           $maxWait = 30
           $listener = $null
           for ($w = 1; $w -le $maxWait; $w++) {
-            $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+            $listener = ss -Hltn "sport = :8910"
             if ($listener) {
               Write-Host "OK: Port 8910 is listening (attempt $w/$maxWait)"
               Write-Host $listener
@@ -2285,21 +2163,17 @@ jobs:
             Start-Sleep -Seconds 2
           }
           if (-not $listener) {
-            Write-Host "Current port status:"
-            netstat -ano | Select-String "\b:8910\b"
             Write-Host "Recent log file:"
-            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Get-Content $log -Tail 50 -ErrorAction SilentlyContinue
             Write-Error "FAIL: Port 8910 is NOT listening after 60s - ServiceCore did not start"
             exit 1
           }
 
           Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
-          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          $rtmpListener = ss -Hltn "sport = :1234"
           if (-not $rtmpListener) {
-            Write-Host "Current port 1234 status:"
-            netstat -ano | Select-String ":1234"
             Write-Host "Recent log file:"
-            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Get-Content $log -Tail 50 -ErrorAction SilentlyContinue
             Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
             exit 1
           }
@@ -2343,43 +2217,44 @@ jobs:
             exit 1
           }
 
+          Write-Host "=== CHECK 7: The operator window is open ==="
+          $win = $null
+          for ($w = 1; $w -le 15; $w++) {
+            $env:DISPLAY = ":0"
+            $win = (wmctrl -l 2>$null) | Select-String "Restreamer Dashboard"
+            if ($win) { break }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $win) {
+            Write-Error "FAIL: no 'Restreamer Dashboard' window on :0 (#393)"
+            exit 1
+          }
+          Write-Host "OK: $win"
+
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
           Write-Host "=========================================="
 
-      - name: Verify WebView2 runtime installed
-        shell: powershell
+      - name: Verify the WebKitGTK runtime is installed
+        shell: pwsh
         run: |
-          $found = $false
-          foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
-            $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
-            if ($reg -and $reg.pv) {
-              Write-Host "WebView2 version: $($reg.pv)"
-              $found = $true
-              break
-            }
-          }
-          if (-not $found) {
-            if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
-              Write-Host "WebView2 detected from filesystem"
-              $found = $true
-            }
-          }
-          if (-not $found) {
-            Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
+          # The Linux build's webview (WebView2's counterpart): a .deb Depends.
+          dpkg-query -W -f '${Status} ${Version}\n' libwebkit2gtk-4.1-0
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "libwebkit2gtk-4.1-0 is NOT installed - the dashboard window will be empty"
             exit 1
           }
 
       - name: Verify dashboard renders via HTTP
-        shell: powershell
+        shell: pwsh
         run: |
           # The WASM frontend is served by Axum on the same port
           $maxRetries = 3
           $success = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10
               if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
                 Write-Host "Dashboard accessible - contains expected frontend content"
                 $success = $true
@@ -2411,31 +2286,24 @@ jobs:
       group: stream-lan-box
       queue: max
       cancel-in-progress: false
-    runs-on: [self-hosted, windows, stream-lan]
+    runs-on: [self-hosted, linux, stream-lan]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Verify Restreamer is running
-        shell: powershell
+        shell: pwsh
         run: |
-          $TaskName = "RestreamerGUI"
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($proc) {
-            Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
+          $ErrorActionPreference = "Stop"
+          . scripts/ci/restreamer-box.ps1
+          $restreamerPid = Get-RestreamerPid
+          if ($restreamerPid -gt 0) {
+            Assert-RestreamerDesktop $restreamerPid
+            Write-Host "Restreamer is running (PID: $restreamerPid)"
           } else {
-            Write-Host "Restreamer not running, starting via scheduled task..."
-            schtasks.exe /run /tn $TaskName
-            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
-            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $proc) {
-              throw "Failed to start Restreamer via scheduled task"
-            }
-            if ($proc.SessionId -eq 0) {
-              throw "Restreamer started in Session 0 (SYSTEM) - must run in user session"
-            }
-            Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
+            Write-Host "Restreamer not running, starting the user unit..."
+            $restreamerPid = Start-Restreamer
+            Write-Host "Restreamer started (PID: $restreamerPid)"
           }
 
       # OBS streaming into the inpoint would keep the global rtmp_connected flag
@@ -2443,16 +2311,16 @@ jobs:
       # OBS is camera-box's; CI never stops a stream it did not start. Read-only:
       # streaming -> FAIL with the reason; OBS unreachable -> warning (streams nothing).
       - name: "Ensure stream OBS is not streaming (read-only, #374)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         env:
           OBS_WS_HOST: "127.0.0.1"
           OBS_WS_PORT: "4455"
           OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action AssertNotStreaming
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action AssertNotStreaming
 
       - name: Verify API is responding
-        shell: powershell
+        shell: pwsh
         run: |
           $maxRetries = 5
           for ($i = 1; $i -le $maxRetries; $i++) {
@@ -2468,7 +2336,7 @@ jobs:
           }
 
       - name: Create and activate E2E-Test event
-        shell: powershell
+        shell: pwsh
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
 
@@ -2502,7 +2370,7 @@ jobs:
           Write-Host "E2E-Test event activated: receiving_activated=$($event.receiving_activated)"
 
       - name: Clear chunks from previous test runs
-        shell: powershell
+        shell: pwsh
         run: |
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks" -Method Delete
           $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
@@ -2512,21 +2380,21 @@ jobs:
           Write-Host "Chunks cleared, starting fresh"
 
       - name: Start 10-minute stability test stream
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 14
         run: |
           $ErrorActionPreference = 'Continue'
-          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
+          $ffmpegPath = "/usr/bin/ffmpeg"
           if (-not (Test-Path $ffmpegPath)) {
             throw "FAILED: ffmpeg not found at $ffmpegPath"
           }
           $streamDuration = 600  # 10 minutes
 
           # Clear any stale snapshot from a prior run -- self-hosted runner
-          # keeps $env:TEMP across runs, so a leftover audio-test-chunk.bin
+          # keeps $env:RUNNER_TEMP across runs, so a leftover audio-test-chunk.bin
           # would let the audio cadence gate read a chunk produced by a
           # different binary (false negative).
-          Remove-Item "$env:TEMP\audio-test-chunk.bin" -ErrorAction SilentlyContinue
+          Remove-Item "$env:RUNNER_TEMP/audio-test-chunk.bin" -ErrorAction SilentlyContinue
 
           Write-Host "Starting ${streamDuration}s stability test stream..."
           Write-Host "This test catches freeze bugs that only appear after minutes of streaming."
@@ -2570,7 +2438,7 @@ jobs:
 
                   # Dump last log lines for diagnosis
                   try {
-                    $logLines = Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 20 -Encoding utf8
+                    $logLines = Get-Content "$HOME/.local/share/restreamer/restreamer.log" -Tail 20 -Encoding utf8
                     Write-Host "=== LAST 20 LOG LINES ==="
                     $logLines | ForEach-Object { Write-Host $_ }
                     Write-Host "========================="
@@ -2596,14 +2464,14 @@ jobs:
             # catch a transient file. Read bytes into memory before
             # writing so a mid-read deletion can be retried instead of
             # producing a corrupt snapshot.
-            if ($elapsed -ge 30 -and -not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+            if ($elapsed -ge 30 -and -not (Test-Path "$env:RUNNER_TEMP/audio-test-chunk.bin")) {
               for ($attempt = 0; $attempt -lt 100; $attempt++) {
-                $latestChunk = Get-ChildItem "C:\ProgramData\Restreamer\chunks\" -File -ErrorAction SilentlyContinue |
+                $latestChunk = Get-ChildItem "$HOME/.local/share/restreamer/chunks" -File -ErrorAction SilentlyContinue |
                                Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($latestChunk) {
                   try {
                     $bytes = [System.IO.File]::ReadAllBytes($latestChunk.FullName)
-                    [System.IO.File]::WriteAllBytes("$env:TEMP\audio-test-chunk.bin", $bytes)
+                    [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP/audio-test-chunk.bin", $bytes)
                     Write-Host "Audio gate snapshot at ${elapsed}s after $($attempt + 1) attempt(s): $($latestChunk.Name) ($($bytes.Length) bytes)"
                     break
                   } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException], [System.UnauthorizedAccessException] {
@@ -2613,7 +2481,7 @@ jobs:
                 }
                 Start-Sleep -Milliseconds 30
               }
-              if (-not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+              if (-not (Test-Path "$env:RUNNER_TEMP/audio-test-chunk.bin")) {
                 Write-Host "Audio gate snapshot: no chunk caught at ${elapsed}s after 100 attempts (uploader may be saturating local disk); will retry next loop iteration"
               }
             }
@@ -2626,7 +2494,7 @@ jobs:
           Write-Host "Stability test stream completed"
 
       - name: Wait for final chunk upload
-        shell: powershell
+        shell: pwsh
         run: |
           Write-Host "Waiting for all chunks to upload..."
           $maxWait = 20
@@ -2660,7 +2528,7 @@ jobs:
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
       - name: GATE audio PTS cadence matches AAC sample clock
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 3
         run: |
           # Regression for the 2026-04-26 live-event failure: audio over
@@ -2675,9 +2543,9 @@ jobs:
           # cadence dynamically. We assert median delta is within +/-1 ms
           # of the AAC frame duration and no individual gap exceeds 50 ms.
           $ErrorActionPreference = 'Stop'
-          # ffprobe is installed next to ffmpeg on the stream-lan runner (#366: C:\ProgramData\Restreamer\ci-tools, copied from the deleted legacy Python client).
-          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
-          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          # ffprobe comes with the distro ffmpeg on the stream-lan box (apt ffmpeg, #417).
+          $ffmpegPath = "/usr/bin/ffmpeg"
+          $ffprobe = "/usr/bin/ffprobe"
           if (-not (Test-Path $ffprobe)) {
             throw "FAILED: ffprobe not found at $ffprobe"
           }
@@ -2685,7 +2553,7 @@ jobs:
           # The streaming step snapshots a chunk to this path while files
           # still exist locally -- the uploader prunes each chunk after S3
           # upload, so by the time this gate runs the chunks dir is empty.
-          $chunkPath = "$env:TEMP\audio-test-chunk.bin"
+          $chunkPath = "$env:RUNNER_TEMP/audio-test-chunk.bin"
           if (-not (Test-Path $chunkPath)) {
             throw "FAILED: snapshot chunk not at $chunkPath -- streaming step did not capture one (check earlier log for 'Audio gate snapshot' line)"
           }
@@ -2750,7 +2618,7 @@ jobs:
           Write-Host "=== Audio PTS cadence GATE PASSED ==="
 
       - name: GATE late-join republish keeps chunk A/V aligned (#367)
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 5
         run: |
           # Regression for the 2026-10-01 live A/V desync (#367). Thursday's
@@ -2761,7 +2629,7 @@ jobs:
           # as a burst (0.29.27 stamped video by arrival time, audio by source
           # ts -> a constant A/V offset in every chunk).
           #
-          # Repro (ROZHODNUTE issuecomment-6004626859): suspend Restreamer.exe
+          # Repro (ROZHODNUTE issuecomment-6004626859): suspend Restreamer
           # itself for 35 s. Suspending only the PUBLISHER can never reach the
           # stall path: xiu's session drops a publisher idle >= 2 s
           # (read_timeout), so the receiver sees a closed channel instead.
@@ -2788,18 +2656,18 @@ jobs:
           # force-cancel (which skips both). The YouTube VOD-measured gate stays
           # camera-box #357. Never touches OBS.
           $ErrorActionPreference = 'Stop'
-          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
-          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          $ffmpegPath = "/usr/bin/ffmpeg"
+          $ffprobe = "/usr/bin/ffprobe"
           if (-not (Test-Path $ffprobe)) { throw "FAILED: ffprobe not found at $ffprobe" }
-          $chunkDir = "C:\ProgramData\Restreamer\chunks"
-          $logPath = "C:\ProgramData\Restreamer\restreamer.log"
-          $snapDir = Join-Path $env:TEMP "latejoin-367"
+          $chunkDir = "$HOME/.local/share/restreamer/chunks"
+          $logPath = "$HOME/.local/share/restreamer/restreamer.log"
+          $snapDir = Join-Path $env:RUNNER_TEMP "latejoin-367"
           # PID + start time (UTC ticks) of a Restreamer this step suspended and
           # has not resumed yet, and of a publisher 1 not killed yet. The
           # always() step after this one and the dead-man act on what is left.
-          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
-          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
-          $deadManLog = Join-Path $env:TEMP "latejoin-367-deadman.log"
+          $suspendMarker = Join-Path $env:RUNNER_TEMP "latejoin-367-restreamer-suspended.txt"
+          $p1Marker = Join-Path $env:RUNNER_TEMP "latejoin-367-publisher1.txt"
+          $deadManLog = Join-Path $env:RUNNER_TEMP "latejoin-367-deadman.log"
           if (Test-Path $deadManLog) {
             Write-Host "::warning::The late-join gate's dead-man acted after an earlier run was killed mid-freeze:"
             Get-Content $deadManLog | ForEach-Object { Write-Host "  $_" }
@@ -2818,14 +2686,8 @@ jobs:
           $stepStartMs = $stepStart.ToUnixTimeMilliseconds()
           $stepStartIso = $stepStart.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff", $inv)
 
-          Add-Type -TypeDefinition @"
-          using System;
-          using System.Runtime.InteropServices;
-          public static class LateJoin367 {
-            [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);
-            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
-          }
-          "@
+          # Suspend-Pid / Resume-Pid (SIGSTOP / SIGCONT), Get-RestreamerPid.
+          . scripts/ci/restreamer-box.ps1
 
           function Start-Publisher([int]$seconds) {
             Start-Process -FilePath $ffmpegPath -ArgumentList @(
@@ -2884,9 +2746,10 @@ jobs:
 
           # Dead-man switch. A force-cancel (or a runner death) kills this step
           # without running its finally AND skips if: always() steps, which
-          # would leave Restreamer frozen until the next deploy. A process
-          # created through WMI is parented to WmiPrvSE, outside the runner's
-          # process tree, so it survives that kill. 75 s from now (the freeze
+          # would leave Restreamer frozen until the next deploy. The dead-man
+          # runs as its own transient unit of the kiosk user's systemd manager
+          # (systemd-run --user), outside the runner's process tree and
+          # cgroup, so it survives that kill. 75 s from now (the freeze
           # is over after ~36 s) it resumes Restreamer if the suspend marker is
           # still there, and kills a publisher 1 whose marker is still there.
           # The gate deletes each marker once it resumed / killed the process
@@ -2907,9 +2770,9 @@ jobs:
           }
           $rs = Get-Marked '__RS_MARKER__' 'Restreamer'
           if ($rs) {
-            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LateJoin367DeadMan { [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle); }'
-            $rc = [LateJoin367DeadMan]::NtResumeProcess($rs.Handle)
-            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: NtResumeProcess(Restreamer PID $($rs.Id)) returned $rc"
+            kill -CONT $rs.Id
+            $rc = $LASTEXITCODE
+            Add-Content -Path '__LOG__' -Value "$((Get-Date).ToUniversalTime().ToString('o')) dead-man: kill -CONT (Restreamer PID $($rs.Id)) returned $rc"
             if ($rc -eq 0) { Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue }
           } else {
             Remove-Item '__RS_MARKER__' -Force -ErrorAction SilentlyContinue
@@ -2925,17 +2788,23 @@ jobs:
               $script = $script.Replace($kv[0], $kv[1].Replace("'", "''"))
             }
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-            $cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
-            $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
-            if ($r.ReturnValue -ne 0) { throw "FAILED: could not start the dead-man process (Win32_Process.Create returned $($r.ReturnValue))" }
-            Write-Host "Dead-man process PID $($r.ProcessId) armed (75 s)"
-            return [int]$r.ProcessId
+            $unit = "latejoin-367-deadman-$PID"
+            systemd-run --user --collect --quiet "--unit=$unit" (Get-Command pwsh).Source -NoProfile -NonInteractive -EncodedCommand $encoded
+            if ($LASTEXITCODE -ne 0) { throw "FAILED: could not start the dead-man unit $unit (systemd-run exited $LASTEXITCODE)" }
+            $dmPid = 0
+            for ($i = 0; $i -lt 20 -and $dmPid -le 0; $i++) {
+              $dmPid = [int](systemctl --user show -p MainPID --value $unit)
+              if ($dmPid -le 0) { Start-Sleep -Milliseconds 100 }
+            }
+            if ($dmPid -le 0) { throw "FAILED: the dead-man unit $unit has no process" }
+            Write-Host "Dead-man process PID $dmPid ($unit) armed (75 s)"
+            return $dmPid
           }
 
-          $rs = @(Get-Process -Name Restreamer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
-          if ($rs.Count -ne 1) { throw "FAILED: expected exactly one desktop-session Restreamer.exe, found $($rs.Count)" }
-          $rs = $rs[0]
-          $rsHandle = $rs.Handle
+          $rsPid = Get-RestreamerPid
+          if ($rsPid -le 0) { throw "FAILED: restreamer.service is not running" }
+          Assert-RestreamerDesktop $rsPid
+          $rs = Get-Process -Id $rsPid
           $rsSuspended = $false
           $p1 = $null
           $p2 = $null
@@ -2952,20 +2821,17 @@ jobs:
             # suspended process.
             $deadManPid = Start-DeadMan
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $rc = [LateJoin367]::NtSuspendProcess($p1.Handle)
-            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(publisher 1) returned $rc" }
+            Suspend-Pid $p1.Id
             Start-Sleep -Milliseconds 800
             Write-ProcMarker $suspendMarker $rs
             $rsSuspendMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $rsSuspended = $true
-            $rc = [LateJoin367]::NtSuspendProcess($rsHandle)
+            Suspend-Pid $rs.Id
             $gapMs = $sw.ElapsedMilliseconds
-            if ($rc -ne 0) { throw "FAILED: NtSuspendProcess(Restreamer) returned $rc" }
             Write-Host "Publisher 1 (PID $($p1.Id)) frozen, Restreamer (PID $($rs.Id)) suspended $gapMs ms later -- no API call until it is resumed"
             Start-Sleep -Seconds 35
 
-            $rc = [LateJoin367]::NtResumeProcess($rsHandle)
-            if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer) returned $rc" }
+            Resume-Pid $rs.Id
             $rsSuspended = $false
             Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue
             $resumeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
@@ -2973,10 +2839,11 @@ jobs:
             if ($gapMs -ge 1500) {
               throw "FAILED: repro setup too slow: $gapMs ms between freezing publisher 1 and Restreamer (xiu drops a publisher idle >= 2 s, so the stall path is not guaranteed)"
             }
-            # The dead-man must still be asleep (proves WMI really started it
-            # and its encoded script runs): a dead safety net fails the gate.
+            # The dead-man must still be asleep (proves systemd-run really
+            # started it and its encoded script runs): a dead safety net fails
+            # the gate.
             $dm = Get-Process -Id $deadManPid -ErrorAction SilentlyContinue
-            if (-not $dm -or $dm.ProcessName -ne 'powershell') {
+            if (-not $dm -or $dm.ProcessName -ne 'pwsh') {
               throw "FAILED: the dead-man process (PID $deadManPid) is gone before its 75 s -- the force-cancel safety net is broken"
             }
 
@@ -3036,8 +2903,9 @@ jobs:
             }
           } finally {
             if ($rsSuspended) {
-              $rc = [LateJoin367]::NtResumeProcess($rsHandle)
-              Write-Host "finally: resumed Restreamer (NtResumeProcess returned $rc)"
+              kill -CONT $rs.Id
+              $rc = $LASTEXITCODE
+              Write-Host "finally: resumed Restreamer (kill -CONT returned $rc)"
               if ($rc -eq 0) { Remove-Item $suspendMarker -Force -ErrorAction SilentlyContinue }
             }
             foreach ($p in @($p1, $p2)) {
@@ -3156,9 +3024,9 @@ jobs:
 
       - name: Resume Restreamer if the late-join gate left it suspended (#367)
         if: always()
-        shell: powershell
+        shell: pwsh
         run: |
-          # The late-join gate suspends Restreamer.exe for 35 s (and freezes
+          # The late-join gate suspends Restreamer for 35 s (and freezes
           # ffmpeg publisher 1) and undoes both in its own finally block. A step
           # killed before that ran (a timeout, a cancel) leaves its PID markers
           # behind: resume / kill those processes here, or the rest of the job
@@ -3166,8 +3034,8 @@ jobs:
           # time (UTC ticks); a PID only counts while both still match.
           # (A force-cancel skips this step too: the gate's dead-man covers it.)
           $ErrorActionPreference = 'Stop'
-          $suspendMarker = Join-Path $env:TEMP "latejoin-367-restreamer-suspended.txt"
-          $p1Marker = Join-Path $env:TEMP "latejoin-367-publisher1.txt"
+          $suspendMarker = Join-Path $env:RUNNER_TEMP "latejoin-367-restreamer-suspended.txt"
+          $p1Marker = Join-Path $env:RUNNER_TEMP "latejoin-367-publisher1.txt"
           function Get-Marked([string]$path, [string]$name) {
             $m = @(Get-Content $path)
             if ($m.Count -lt 2) { return }
@@ -3177,15 +3045,8 @@ jobs:
           if (Test-Path $suspendMarker) {
             $proc = Get-Marked $suspendMarker 'Restreamer'
             if ($proc) {
-              Add-Type -TypeDefinition @"
-          using System;
-          using System.Runtime.InteropServices;
-          public static class LateJoin367Resume {
-            [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);
-          }
-          "@
-              $rc = [LateJoin367Resume]::NtResumeProcess($proc.Handle)
-              if ($rc -ne 0) { throw "FAILED: NtResumeProcess(Restreamer PID $($proc.Id)) returned $rc -- Restreamer may still be suspended" }
+              kill -CONT $proc.Id
+              if ($LASTEXITCODE -ne 0) { throw "FAILED: kill -CONT (Restreamer PID $($proc.Id)) exited $LASTEXITCODE -- Restreamer may still be suspended" }
               Write-Host "Resumed Restreamer PID $($proc.Id), left suspended by the late-join gate"
             } else {
               Write-Host "The suspend marker's PID is no longer that Restreamer; nothing to resume"
@@ -3204,7 +3065,7 @@ jobs:
           }
 
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 4
         run: |
           # Regression for the bug where DELETE+CLEANUP did nothing in the
@@ -3273,7 +3134,7 @@ jobs:
           Write-Host "=== clear-s3 GATE PASSED: ${elapsed}s for $($resp.deleted) objects ==="
 
       - name: GATE /s3/usage endpoint returns total + per-event entries
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           $usage = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/s3/usage" -TimeoutSec 25
@@ -3289,7 +3150,7 @@ jobs:
           Write-Host "=== /s3/usage GATE PASSED: $($usage.total_bytes) bytes, $($usage.total_objects) objects, $($usage.by_event.Count) events ==="
 
       - name: GATE delivery logs endpoint returns valid structure
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           # The delivery/logs endpoint must return valid JSON even when
@@ -3304,7 +3165,7 @@ jobs:
           Write-Host "=== /delivery/logs GATE PASSED: instance_id=$($logs.instance_id), restart_records=$($logs.restart_log.Count), has_captured_log=$($null -ne $logs.captured_log) ==="
 
       - name: Verify RTMP disconnected after stream stop
-        shell: powershell
+        shell: pwsh
         run: |
           # After ffmpeg stops, the 30s FRAME_TIMEOUT must elapse before the
           # frame processing loop detects the stall and sets connected=false.
@@ -3330,7 +3191,7 @@ jobs:
 
       - name: Deactivate streaming event
         if: always()
-        shell: powershell
+        shell: pwsh
         run: |
           try {
             $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
@@ -3355,7 +3216,7 @@ jobs:
       group: stream-lan-box
       queue: max
       cancel-in-progress: false
-    runs-on: [self-hosted, windows, stream-lan]
+    runs-on: [self-hosted, linux, stream-lan]
     timeout-minutes: 157 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + #408 deliberate-stop gate up to 12min + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
@@ -3374,12 +3235,12 @@ jobs:
       # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
       # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
       - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 65
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
 
       - name: Configure Hetzner API token
-        shell: powershell
+        shell: pwsh
         run: |
           if (-not $env:HETZNER_API_TOKEN) {
             throw "HETZNER_API_TOKEN secret not set"
@@ -3387,7 +3248,7 @@ jobs:
           # Merge Hetzner secrets into existing hetzner config section.
           # Preserves operator-set fields like `extra_ssh_key_names` that
           # aren't secret-managed here (was getting wiped on every deploy).
-          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $configPath = "$HOME/.config/restreamer/config.json"
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if (-not $config.hetzner) {
             $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
@@ -3402,13 +3263,11 @@ jobs:
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
-          # Restart Restreamer via scheduled task to pick up new config
-          Write-Host "Restarting Restreamer via scheduled task..."
-          $TaskName = "RestreamerGUI"
-          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 3
-          schtasks.exe /run /tn $TaskName
-          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          # Restart Restreamer (the user unit) to pick up new config
+          Write-Host "Restarting Restreamer (the user unit)..."
+          . scripts/ci/restreamer-box.ps1
+          $restreamerPid = Restart-Restreamer
+          Write-Host "Restreamer restarted (PID: $restreamerPid)"
           Start-Sleep -Seconds 10
 
           # Verify Restreamer is back up
@@ -3426,7 +3285,7 @@ jobs:
           throw "FAILED: Restreamer did not restart after config update"
 
       - name: Seed YouTube OAuth tokens
-        shell: powershell
+        shell: pwsh
         run: |
           if (-not $env:YOUTUBE_REFRESH_TOKEN) {
             throw "YOUTUBE_REFRESH_TOKEN secret not set"
@@ -3442,7 +3301,7 @@ jobs:
           Write-Host "YouTube OAuth tokens seeded"
 
       - name: Link e2e rtmp endpoint to default OAuth
-        shell: powershell
+        shell: pwsh
         run: |
           $endpoints = Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/endpoints -Method GET
           $ep = $endpoints | Where-Object { $_.alias -eq 'e2e rtmp' }
@@ -3477,9 +3336,9 @@ jobs:
       # Start/Stop streaming). Read-only pre-flight, before any VPS boots: fail
       # with the reason when camera-box's TEST mode is not in place.
       - name: "Stream OBS readiness (read-only, #374)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
+        run: pwsh -NoProfile -File scripts/ci/obs-readiness-check.ps1
 
       # #349: final rig-lease re-check RIGHT before the first
       # StartStream, closing the TOCTOU gap between the post-checkout check and
@@ -3493,12 +3352,12 @@ jobs:
       # right before StartStream covers the remaining gap (it fails, never
       # waits, when camera-box started streaming or recording meanwhile).
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
 
       - name: "Pre-flight: verify no stale delivery instances"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           Write-Host "Checking for stale delivery instances..."
@@ -3568,7 +3427,7 @@ jobs:
           Write-Host "Pre-flight cleanup complete"
 
       - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 20
         run: |
           # #285: the VPS live-edge lag probe trusts any chunk object in the
@@ -3615,7 +3474,7 @@ jobs:
           throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
       - name: "Pin fast-endpoint classes (#192)"
-        shell: powershell
+        shell: pwsh
         run: |
           # #192: exercise the fast-endpoint audit path end-to-end on a CI-OWNED,
           # self-seeded, credential-free fast endpoint 'e2e fast'
@@ -3685,7 +3544,7 @@ jobs:
           Write-Host "OK (#192): 'e2e fast' (TEST_FILE, id=$($fast2.id)) is_fast=true, 'e2e rtmp' is_fast=false"
 
       - name: Start stream (activate + delivery VPS)
-        shell: powershell
+        shell: pwsh
         run: |
           # Find or create the event, deactivate others, then call start-stream
           # which sets receiving_activated=true, delivering_activated=true,
@@ -3768,11 +3627,11 @@ jobs:
       # inside the job's one lease budget; a detached heartbeat keeps it until the
       # release step after the OBS stop (scripts/ci/rig-lease-hold.ps1).
       - name: "Rig lease: take it before StartStream (#349)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         env:
           RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
@@ -3780,9 +3639,9 @@ jobs:
       # OBS_STREAMING_STARTED_BY_CI=true before the start (=false when OBS refuses),
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: never stream room/FOH music to a platform (owner copyright rule). The start
       # step above already refused to StartStream unless camera-box's sampler said
@@ -3791,14 +3650,14 @@ jobs:
       # Restreamer's API and leaves a breach marker the checks below fail on.
       - name: "Program-audio watchdog: start (#379)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Start-ProgramAudioWatchdog
 
       - name: Wait for chunks and verify upload
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 3
         run: |
           Write-Host "Waiting for chunks to be created and uploaded to S3..."
@@ -3830,7 +3689,7 @@ jobs:
           }
 
       - name: Verify YouTube is NOT receiving stream (baseline)
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           # BASELINE CHECK: Before delivery starts, verify YouTube is NOT
@@ -3906,7 +3765,7 @@ jobs:
           }
 
       - name: Verify E2E event has endpoints configured
-        shell: powershell
+        shell: pwsh
         run: |
           # The E2E event must have endpoints pre-configured on stream.lan.
           # CI does NOT create or manage endpoints -- that's the user's job.
@@ -3925,14 +3784,14 @@ jobs:
           }
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: Wait for delivery server ready
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 15
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
@@ -4009,7 +3868,7 @@ jobs:
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -4021,15 +3880,15 @@ jobs:
       # its own init wait would turn a slow Hetzner boot into a failure (the wait
       # step above allows 15 min). The 90 s init poll inside stays as a safety net.
       - name: Verify cache bar grows after the VPS live-edge init (Playwright)
-        shell: powershell
+        shell: pwsh
         # 5 -> 7 with #380: the step now first waits up to 90 s for the VPS live-edge init
         # (+ up to 15 s for the post-init label) before its 10 s growth check.
         timeout-minutes: 7
         run: |
           Write-Host "Verifying the cache bar grows after the VPS live-edge init..."
-          Set-Location "$env:GITHUB_WORKSPACE\e2e"
-          cmd /c "npm install playwright 2>&1" | Out-Null
-          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
+          npm install playwright 2>&1 | Out-Null
+          npx playwright install --with-deps chromium 2>&1 | Out-Null
 
           $testScript = @'
           const { chromium } = require('playwright');
@@ -4193,7 +4052,7 @@ jobs:
           Remove-Item "buffering-cache-check.cjs" -ErrorAction SilentlyContinue
 
       - name: "GATE: delivery_init_sent within 180s of vps_ready"
-        shell: powershell
+        shell: pwsh
         run: |
           # Hardens against the chunk_records.duration_ms=0 regression (#146).
           # The orchestrator's buffer-fill wait loop in delivery.rs:463-491 has
@@ -4221,14 +4080,14 @@ jobs:
           Write-Host "=== Init latency GATE PASSED: $delaySecs s ==="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: "GATE: chunks_processed > 0 within 200s of init"
-        shell: powershell
+        shell: pwsh
         run: |
           # Catches the silent VPS warmup spin (#146). After init returns ok,
           # the VPS must start delivering chunks. If it does not, the dashboard
@@ -4276,14 +4135,14 @@ jobs:
           Write-Host "=== chunks_processed GATE PASSED ==="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: "Assert fast-endpoint audit (#192)"
-        shell: powershell
+        shell: pwsh
         run: |
           # #192: with the CI-owned 'e2e fast' (TEST_FILE) pinned is_fast=true
           # before start-stream, the VPS delivering transition must have
@@ -4361,8 +4220,8 @@ jobs:
           $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
           if (-not $instances -or @($instances).Count -lt 1) { throw "FAILED (#192): no delivery instance for the TEST_FILE sink check" }
           $vpsBase = "http://$($instances[0].ipv4):8000"
-          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
-          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          $sqlite = "/usr/bin/sqlite3"
+          $token = (& $sqlite -readonly "$HOME/.local/share/restreamer/restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
           if (-not $token) { throw "FAILED (#192): could not read the VPS auth_token from the host DB" }
           $vpsHeaders = @{ Authorization = "Bearer $token" }
           $sink0 = (Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10).test_file_sink
@@ -4385,14 +4244,14 @@ jobs:
           Write-Host "OK (#192): 'e2e fast' delivers into the VPS TEST_FILE loopback sink"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: Verify delivery progression
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 10
         run: |
           # Delivering server sends to YouTube via the configured endpoint service type
@@ -4574,21 +4433,21 @@ jobs:
           Write-Host "=========================================="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: Verify dashboard per-endpoint cache bar via Playwright
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 5
         run: |
           Write-Host "Installing Playwright and verifying dashboard..."
-          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
           # Install playwright package and browser
-          cmd /c "npm install playwright 2>&1" | Out-Null
-          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+          npm install playwright 2>&1 | Out-Null
+          npx playwright install --with-deps chromium 2>&1 | Out-Null
 
           # Write inline Playwright test
           $testScript = @'
@@ -4707,7 +4566,7 @@ jobs:
           Remove-Item "dashboard-check.cjs" -ErrorAction SilentlyContinue
 
       - name: Verify cache delay meets target
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 8
         run: |
           # TDD assertion: After delivery is streaming, verify that the
@@ -4786,7 +4645,7 @@ jobs:
           Write-Host "=========================================="
 
       - name: "STRICT: Steady-state delivery verification (3min sustained)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 5
         run: |
           # Sustained verification of delivery health during steady-state
@@ -4956,7 +4815,7 @@ jobs:
 
       - name: "GATE: Verify YouTube stream health is 'good'"
         id: verify_yt_receiving
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 7
         run: |
           # HARD GATE: YouTube health MUST be "good" (same as OBS direct).
@@ -5048,7 +4907,7 @@ jobs:
           }
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -5056,7 +4915,7 @@ jobs:
 
       - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"
         if: success()
-        shell: powershell
+        shell: pwsh
         # 30 samples × 30s = 15 min minimum, plus per-sample API latency
         # (YT Data API + delivery/status + audit query) typically adds
         # 5-15s per sample at p95. Main CI run 26738025583 reached sample
@@ -5096,7 +4955,7 @@ jobs:
           $bkInstances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
           if (-not $bkInstances -or @($bkInstances).Count -lt 1) { throw "FAILED (#368): no delivery instance for the backup-ingest check" }
           $bkVpsBase = "http://$($bkInstances[0].ipv4):8000"
-          $bkToken = (& "C:\ProgramData\Restreamer\sqlite3.exe" -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          $bkToken = (& "/usr/bin/sqlite3" -readonly "$HOME/.local/share/restreamer/restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
           if (-not $bkToken) { throw "FAILED (#368): could not read the VPS auth_token from the host DB" }
           $bkHeaders = @{ Authorization = "Bearer $bkToken" }
           function Get-RtmpBackupStatus {
@@ -5322,7 +5181,7 @@ jobs:
           Write-Host "=========================================="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -5330,7 +5189,7 @@ jobs:
 
       - name: OBS disconnect/reconnect resilience test
         if: success()
-        shell: powershell
+        shell: pwsh
         run: |
           Write-Host "=== OBS Disconnect/Reconnect Resilience Test ==="
           # Get active event ID and VPS instance from status API
@@ -5349,7 +5208,7 @@ jobs:
           # took OBS during the gap, the restart is refused and the marker stays
           # false, so no teardown ever stops camera-box's stream.
           Write-Host "Republishing OBS stream (10 s outage)..."
-          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 10
+          & pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 10
           if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish for the disconnect test (see the ::error:: line above)" }
 
           # Wait for RTMP to reconnect
@@ -5400,7 +5259,7 @@ jobs:
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -5408,7 +5267,7 @@ jobs:
 
       - name: OBS republish A/V-alignment gate (av_skew_ms)
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 8
         run: |
           # Issue #258: after a mid-stream OBS unpublish/republish, assert the
@@ -5437,7 +5296,7 @@ jobs:
             Write-Host "--- Republish cycle $c of $cycles ---"
             # #374: stop OUR stream, dead air, checked restart (see obs-stream.ps1).
             Write-Host "Republishing OBS stream (cycle $c, ${deadAirSecs}s dead air)..."
-            & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 8
+            & pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 8
             if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish in cycle $c (see the ::error:: line above)" }
 
             # Wait for RTMP to reconnect after this cycle.
@@ -5529,7 +5388,7 @@ jobs:
 
       - name: Simulated network disconnect - cache drain and recovery
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 6
         run: |
           Write-Host "=== Network Disconnect Simulation ==="
@@ -5681,7 +5540,7 @@ jobs:
 
       - name: Long outage - never-drop + rescue + calm UI
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 15
         run: |
           # Rationale: this extends the already-gated e2e-obs-youtube job. The
@@ -5727,9 +5586,9 @@ jobs:
           # ASSERT 3: dashboard shows calm blue banner, not a red wall.
           # Mirror the inline Playwright launch pattern at ci.yml :2877-3014:
           # install playwright in e2e, write an ASCII .cjs, run via node.
-          Set-Location "$env:GITHUB_WORKSPACE\e2e"
-          cmd /c "npm install playwright 2>&1" | Out-Null
-          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
+          npm install playwright 2>&1 | Out-Null
+          npx playwright install --with-deps chromium 2>&1 | Out-Null
 
           $check = @'
           const { chromium } = require('playwright');
@@ -5797,7 +5656,7 @@ jobs:
           Write-Host "OK: outage survived end-to-end with zero chunk loss"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -5805,7 +5664,7 @@ jobs:
 
       - name: Restreamer crash recovery test
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 5
         run: |
           Write-Host "=== Restreamer Crash Recovery Test ==="
@@ -5819,19 +5678,16 @@ jobs:
           $vpsId = $instances[0].hetzner_id
           Write-Host "VPS hetzner_id: $vpsId"
 
-          # CRASH: kill Restreamer process
+          # CRASH: SIGKILL Restreamer (it stays down until started again)
           Write-Host "Killing Restreamer process (simulating crash)..."
-          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
-          Start-Sleep -Seconds 3
+          . scripts/ci/restreamer-box.ps1
+          $killedPid = Stop-RestreamerHard
+          Write-Host "Restreamer killed successfully (PID $killedPid)"
 
-          # Verify Restreamer is dead
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($proc) { throw "FAILED: Restreamer still running after taskkill" }
-          Write-Host "Restreamer killed successfully"
-
-          # RESTART: via scheduled task (same as CI deploy)
-          Write-Host "Restarting Restreamer via scheduled task..."
-          Start-ScheduledTask -TaskName "RestreamerGUI"
+          # RESTART: the user unit (same as CI deploy)
+          Write-Host "Restarting Restreamer (the user unit)..."
+          $restreamerPid = Start-Restreamer
+          Write-Host "Restreamer started (PID $restreamerPid)"
           Start-Sleep -Seconds 10
 
           # Wait for API to respond
@@ -5915,7 +5771,7 @@ jobs:
 
       - name: "GATE: crash-exhaustion -> rescue on EVERY endpoint (#238/#280)"
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 25
         run: |
           # #238/#280: THE core church-stream guarantee. Kill Restreamer
@@ -5944,8 +5800,8 @@ jobs:
           $vpsIp = $instances[0].ipv4
           $vpsBase = "http://${vpsIp}:8000"
 
-          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
-          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          $sqlite = "/usr/bin/sqlite3"
+          $token = (& $sqlite -readonly "$HOME/.local/share/restreamer/restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
           if (-not $token) { throw "could not read VPS auth_token from host DB" }
           $vpsHeaders = @{ Authorization = "Bearer $token" }
 
@@ -5974,9 +5830,9 @@ jobs:
           Write-Host "kill -> all-rescue budget: ${budget}s (max chunk_delay_secs=$maxDelay)"
 
           Write-Host "KILLING Restreamer mid-stream (uploads stop; VPS must exhaust and rescue)..."
-          cmd /c "taskkill /F /IM Restreamer.exe 2>nul" | Out-Null
-          Start-Sleep -Seconds 3
-          if (Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue) { throw "Restreamer still running after taskkill" }
+          . scripts/ci/restreamer-box.ps1
+          $killedPid = Stop-RestreamerHard
+          Write-Host "Restreamer killed (PID $killedPid); it stays down until restarted below"
 
           # PHASE 1: EVERY endpoint reaches rescue/recovering within budget.
           $inRescue = @{}
@@ -6040,8 +5896,9 @@ jobs:
           # restart — a wedged S3 recovery GET held a fetch permit for
           # minutes, starving recovery). Re-added now that #252 bounds the
           # per-GET S3 fetch (rs-delivery/s3_fetch.rs with_request_timeout).
-          Write-Host "Restarting Restreamer via scheduled task..."
-          Start-ScheduledTask -TaskName "RestreamerGUI"
+          Write-Host "Restarting Restreamer (the user unit)..."
+          $restreamerPid = Start-Restreamer
+          Write-Host "Restreamer started (PID $restreamerPid)"
           $apiUp = $false
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 3
@@ -6140,17 +5997,17 @@ jobs:
 
       - name: "Ensure Restreamer is running after crash-exhaustion gate"
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 5
         run: |
           # The gate above kills Restreamer mid-step; if an assertion threw
           # while the host was down, the remaining steps (second YT health
           # check, deactivate event, VPS teardown) need the host API back.
           # Idempotent: no-op when the gate already restarted it.
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if (-not $proc) {
-            Write-Host "Restreamer not running - starting via scheduled task"
-            Start-ScheduledTask -TaskName "RestreamerGUI"
+          . scripts/ci/restreamer-box.ps1
+          if ((Get-RestreamerPid) -le 0) {
+            Write-Host "Restreamer not running - starting the user unit"
+            $null = Start-Restreamer
           }
           for ($i = 0; $i -lt 30; $i++) {
             try {
@@ -6162,18 +6019,18 @@ jobs:
           throw "Restreamer API did not come back - subsequent cleanup will fail"
 
       # #374: the crash recovery test, the crash-exhaustion gate and the always()
-      # step above kill/restart Restreamer.exe, so OBS reconnected and its
+      # step above kill/restart Restreamer, so OBS reconnected and its
       # outputDuration restarted at 0. Re-anchor our stream's identity, read-only, or
       # the teardown would mistake our reconnected stream for a newer (camera-box) one.
       # The guard requires this right after any such chain.
       - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 3
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Rebaseline
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Rebaseline
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -6181,7 +6038,7 @@ jobs:
 
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 6
         run: |
           # Second health gate: verify YouTube stream is still healthy after
@@ -6263,7 +6120,7 @@ jobs:
 
       - name: "GATE: a deliberate OBS stop ends every endpoint without rescue (#408)"
         if: success()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 12
         run: |
           # #408: the operator stopping the stream in OBS is the end of the
@@ -6304,7 +6161,7 @@ jobs:
           }
 
           Write-Host "Deliberate OBS stop, ${gap}s of dead air, then the checked restart..."
-          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 210
+          & pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Republish -GapSeconds 210
           if ($LASTEXITCODE -ne 0) { throw "FAILED: OBS republish for the #408 gate (see the ::error:: line above)" }
 
           # @(): PowerShell 5.1 unrolls a one-row result into a PSCustomObject,
@@ -6342,7 +6199,7 @@ jobs:
           Write-Host "=== #408 GATE PASSED: deliberate stop -> every endpoint ended, 0 rescue, every endpoint resumed ==="
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -6350,23 +6207,23 @@ jobs:
 
       - name: Stop OBS stream
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Stop
 
       # #349: release the rig lease after the OBS stop (also when a step failed).
       - name: "Rig lease: release it (#349)"
         if: always() && env.RIG_LEASE_HELD == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         env:
           RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Release
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Release
 
       # #379: always, even when the job never streamed (both calls are then no-ops).
       - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -6375,7 +6232,7 @@ jobs:
 
       - name: Verify RTMP disconnected after OBS stream stop
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         run: |
           Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
           $maxRetries = 15
@@ -6401,7 +6258,7 @@ jobs:
 
       - name: "Restore fast-endpoint classes (#192)"
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           # #192: undo the pin so the persistent E2E-Test event does not carry
@@ -6433,7 +6290,7 @@ jobs:
 
       - name: Deactivate streaming event
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           # Stop delivery (Hetzner VPS)
@@ -6467,7 +6324,7 @@ jobs:
 
       - name: Verify delivery instances cleaned up
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           Write-Host "Verifying all delivery instances have been cleaned up..."
@@ -6499,7 +6356,7 @@ jobs:
 
       - name: Verify YouTube stopped receiving after deactivation
         if: always() && steps.verify_yt_receiving.outcome == 'success'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 4
         run: |
           # Post-deactivation check: verify YouTube's ingest server is no longer
@@ -6554,7 +6411,7 @@ jobs:
 
       - name: Verify cache_delay_secs unchanged
         if: always()
-        shell: powershell
+        shell: pwsh
         env:
           EVENT_NAME: "E2E-Test"
         run: |
@@ -6570,12 +6427,12 @@ jobs:
 
       - name: Verify production config is intact
         if: always()
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "=== CHECK 7: Hetzner API token present ==="
-          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $configPath = "$HOME/.config/restreamer/config.json"
           if (-not (Test-Path $configPath)) {
             Write-Error "FAIL: Config file not found at $configPath"
             exit 1
@@ -6622,7 +6479,7 @@ jobs:
       group: stream-lan-box
       queue: max
       cancel-in-progress: false
-    runs-on: [self-hosted, windows, stream-lan]
+    runs-on: [self-hosted, linux, stream-lan]
     timeout-minutes: 120 # ~32min real work + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
@@ -6648,17 +6505,17 @@ jobs:
       # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
       # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
       - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 65
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
 
       - name: Configure Hetzner API token
-        shell: powershell
+        shell: pwsh
         run: |
           if (-not $env:HETZNER_API_TOKEN) {
             throw "HETZNER_API_TOKEN secret not set"
           }
-          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $configPath = "$HOME/.config/restreamer/config.json"
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if (-not $config.hetzner) {
             $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
@@ -6671,11 +6528,9 @@ jobs:
           $json = $config | ConvertTo-Json -Depth 10
           [System.IO.File]::WriteAllText($configPath, $json)
 
-          $TaskName = "RestreamerGUI"
-          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 3
-          schtasks.exe /run /tn $TaskName
-          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          . scripts/ci/restreamer-box.ps1
+          $restreamerPid = Restart-Restreamer
+          Write-Host "Restreamer restarted (PID: $restreamerPid)"
           Start-Sleep -Seconds 10
           for ($i = 1; $i -le 15; $i++) {
             try {
@@ -6694,7 +6549,7 @@ jobs:
         # stop) blocks delivery/start with "server name is already used",
         # confuses the watchdog with stale VPS metrics, and leaks Hetzner
         # spend across runs.
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         run: |
           Write-Host "Checking for stale delivery instances..."
@@ -6763,7 +6618,7 @@ jobs:
           Write-Host "Pre-flight cleanup complete"
 
       - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 20
         run: |
           # #285: the VPS live-edge lag probe trusts any chunk object in the
@@ -6810,7 +6665,7 @@ jobs:
           throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
       - name: Verify FB Graph API credentials
-        shell: powershell
+        shell: pwsh
         run: |
           if (-not $env:FB_PAGE_ID -or -not $env:FB_PAGE_ACCESS_TOKEN) {
             throw "FB_PAGE_ID + FB_PAGE_ACCESS_TOKEN secrets must be set. See memory reference_fb_graph_api_token for minting."
@@ -6819,7 +6674,7 @@ jobs:
 
       - name: Create FB live_video on the Page (Graph API)
         id: fb_create
-        shell: powershell
+        shell: pwsh
         run: |
           # POST /<page-id>/live_videos creates a fresh broadcast in
           # UNPUBLISHED state. FB returns a stream_url containing the
@@ -6876,7 +6731,7 @@ jobs:
           "FB_STREAM_KEY=$streamKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Seed FB endpoint config
-        shell: powershell
+        shell: pwsh
         run: |
           $body = @{
             alias = "e2e fb"
@@ -6891,12 +6746,12 @@ jobs:
       # Start/Stop streaming). Read-only pre-flight, before any VPS boots: fail
       # with the reason when camera-box's TEST mode is not in place.
       - name: "Stream OBS readiness (read-only, #374)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-readiness-check.ps1
+        run: pwsh -NoProfile -File scripts/ci/obs-readiness-check.ps1
 
       - name: Activate E2E event + attach FB endpoint
-        shell: powershell
+        shell: pwsh
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
 
@@ -6937,20 +6792,20 @@ jobs:
       # waits only for the rest of the job's ONE lease budget (the first check
       # recorded the deadline); fail-open; exit 0.
       - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
 
       # #349: TAKE camera-box's shared rig lease for as long as this job streams, so its
       # rig-busy gate sees a named holder, not an anonymous OBS stream. Waits on a hold
       # inside the job's one lease budget; a detached heartbeat keeps it until the
       # release step after the OBS stop (scripts/ci/rig-lease-hold.ps1).
       - name: "Rig lease: take it before StartStream (#349)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
         env:
           RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
 
       # #374: the ONLY way CI starts stream OBS streaming. In ONE websocket session:
       # rig lease free + readiness (scene Development, inpoint service, not streaming,
@@ -6958,21 +6813,21 @@ jobs:
       # OBS_STREAMING_STARTED_BY_CI=true before the start (=false when OBS refuses),
       # which gates the always() teardown below: it never stops camera-box's stream.
       - name: Start OBS stream
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 63 # may wait out a camera-box hold, up to the job's 60-min lease budget (#349)
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Start
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Start
 
       # #379: the program-audio watchdog, as in the YouTube job (see there).
       - name: "Program-audio watchdog: start (#379)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Start-ProgramAudioWatchdog
 
       - name: Start delivery
-        shell: powershell
+        shell: pwsh
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -7001,7 +6856,7 @@ jobs:
           Write-Host "Delivery started for event $($ev.id)"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -7032,7 +6887,7 @@ jobs:
         #     with NO endpoint and NO terminal status is a real timeout.
         # Every poll logs instance_status + elapsed so a future failure is
         # diagnosable from the CI log alone.
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 7
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
@@ -7111,7 +6966,7 @@ jobs:
         # cleanliness AFTER first chunk). Boot-wait happens in the GATE step
         # above so this step's failure is unambiguously a delivery regression,
         # not a VPS boot timeout.
-        shell: powershell
+        shell: pwsh
         run: |
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:FB_E2E_EVENT_ID)"
           $watchdogStartTs = $env:FB_E2E_WATCHDOG_START
@@ -7361,14 +7216,14 @@ jobs:
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
           Assert-NoProgramAudioBreach
 
       - name: "GATE: FB-side ingest_streams.stream_health populated within 15min (Graph API)"
-        shell: powershell
+        shell: pwsh
         run: |
           # GATE: Facebook MUST report a populated ingest_streams.stream_health
           # block (video_bitrate, video_framerate, video_width > 0) within 15
@@ -7390,8 +7245,8 @@ jobs:
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
           $sawDash = $false
-          $ffmpegPath = "C:\ProgramData\Restreamer\ci-tools\ffmpeg.exe"
-          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          $ffmpegPath = "/usr/bin/ffmpeg"
+          $ffprobe = "/usr/bin/ffprobe"
           if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobe)) { throw "FAILED: ffmpeg/ffprobe not found next to $ffmpegPath" }
           $poll = 0
           while ((Get-Date) -lt $liveDeadline) {
@@ -7459,7 +7314,7 @@ jobs:
           Write-Host "FB-side GATE: FB confirmed real-time decode of rust-pusher feed"
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -7467,7 +7322,7 @@ jobs:
 
       - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
-        shell: powershell
+        shell: pwsh
         run: |
           $events = $null
           try { $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10 } catch {}
@@ -7537,7 +7392,7 @@ jobs:
           }
 
       - name: "Program-audio breach check (#379)"
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1
@@ -7545,23 +7400,23 @@ jobs:
 
       - name: "Stop OBS stream (only the one this job started, #374)"
         if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/obs-stream.ps1 -Action Stop
+        run: pwsh -NoProfile -File scripts/ci/obs-stream.ps1 -Action Stop
 
       # #349: release the rig lease after the OBS stop (also when a step failed).
       - name: "Rig lease: release it (#349)"
         if: always() && env.RIG_LEASE_HELD == 'true'
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 2
         env:
           RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-hold.ps1 -Action Release
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Release
 
       # #379: always, even when the job never streamed (both calls are then no-ops).
       - name: "Program-audio guard: stop the watchdog + final breach check (#379)"
         if: always()
-        shell: powershell
+        shell: pwsh
         timeout-minutes: 1
         run: |
           . scripts/ci/program-audio-guard.ps1

@@ -1,5 +1,5 @@
 # obs-ws.ps1 -- #374: the ONE obs-websocket client restreamer CI uses for stream OBS.
-# Dot-source it:  . "$PSScriptRoot\obs-ws.ps1"
+# Dot-source it:  . (Join-Path $PSScriptRoot "obs-ws.ps1")
 #
 # Stream OBS (10.77.9.204) is camera-box's development target. Owner directive
 # 2026-08-30: restreamer may only START and STOP OBS streaming and read status.
@@ -134,15 +134,23 @@ function Test-ObsReady {
   return $null
 }
 
-# Exactly one obs64 process, or the reason.
+# The stream OBS's process name: obs64 on Windows, obs on the Linux stream.lan
+# (stream-snv since 22.10.2026, #417).
+function Get-ObsProcessName {
+  if ($IsLinux) { return "obs" }
+  return "obs64"
+}
+
+# Exactly one stream OBS process, or the reason.
 function Test-ObsProcess {
-  $procs = @(Get-Process -Name obs64 -ErrorAction SilentlyContinue)
-  if ($procs.Count -eq 0) { return "obs64 is not running" }
+  $name = Get-ObsProcessName
+  $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+  if ($procs.Count -eq 0) { return "$name is not running" }
   if ($procs.Count -gt 1) {
     $ids = ($procs | ForEach-Object { "$($_.Id)" }) -join ","
-    return "$($procs.Count) obs64 processes (PIDs $ids)"
+    return "$($procs.Count) $name processes (PIDs $ids)"
   }
-  Write-Host "obs64 running: PID $($procs[0].Id), $([int]($procs[0].WorkingSet64 / 1MB)) MB"
+  Write-Host "$name running: PID $($procs[0].Id), $([int]($procs[0].WorkingSet64 / 1MB)) MB"
   return $null
 }
 

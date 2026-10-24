@@ -12,8 +12,8 @@ gated on its verdict). Each scenario runs the real PowerShell script and asserts
   * the OBS_STREAMING_STARTED_BY_CI values it wrote to GITHUB_ENV (in order);
   * that every request the script sent is in the read-only + Start/Stop allowlist.
 
-Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
-`pwsh` elsewhere, or the interpreter named by $OBS_TEST_PWSH.
+`pwsh` on Linux -- what the stream boxes run since 2026-10 (#417); Windows
+PowerShell 5.1 (`powershell`) on Windows; or the interpreter named by $OBS_TEST_PWSH.
 """
 
 from __future__ import annotations
@@ -310,10 +310,15 @@ def _closed_port() -> int:
 # ---------------------------------------------------------------- fake obs64 --
 
 
-class FakeObs64:
-    """A long-running process named `obs64` (Get-Process -Name obs64), or another name."""
+# The stream OBS's process name the scripts look for (obs-ws.ps1 Get-ObsProcessName):
+# obs64 on Windows, obs on Linux (the stream boxes since 2026-10, #417).
+OBS_PROC = "obs64" if os.name == "nt" else "obs"
 
-    def __init__(self, tmp: Path, count: int = 1, name: str = "obs64") -> None:
+
+class FakeObs64:
+    """A long-running process named like stream OBS (Get-Process -Name obs64 / obs), or another name."""
+
+    def __init__(self, tmp: Path, count: int = 1, name: str = OBS_PROC) -> None:
         self.procs: list[subprocess.Popen] = []
         if os.name == "nt":
             exe = tmp / f"{name}.exe"
@@ -392,8 +397,8 @@ CASES = [
     Case("readiness: TEST mode -> ready", RC, [], ObsState(), 0, "stream OBS ready", []),
     Case("readiness: production scene PRO", RC, [], ObsState(scene="PRO"), 1, "production scene 'PRO'", []),
     Case("readiness: another scene", RC, [], ObsState(scene="Scene 2"), 1, "not the TEST scene 'Development'", []),
-    Case("readiness: no obs64", RC, [], ObsState(), 1, "obs64 is not running", [], obs64=0),
-    Case("readiness: two obs64", RC, [], ObsState(), 1, "2 obs64 processes", [], obs64=2),
+    Case("readiness: no obs64", RC, [], ObsState(), 1, f"{OBS_PROC} is not running", [], obs64=0),
+    Case("readiness: two obs64", RC, [], ObsState(), 1, f"2 {OBS_PROC} processes", [], obs64=2),
     Case("readiness: websocket down", RC, [], ObsState(), 1, "unreachable", [], obs_down=True),
     Case("readiness: service points at YouTube", RC, [],
          ObsState(server="rtmp://a.rtmp.youtube.com/live2"), 1, "not the restreamer inpoint", []),

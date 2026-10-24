@@ -53,7 +53,7 @@ OBS_STREAM = Path("scripts/ci/obs-stream.ps1")
 GUARD = Path("scripts/ci/program-audio-guard.ps1")
 MOCK_TEST = "python tests/ci/test_program_audio_guard.py"
 
-PS = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/"
+PS = "pwsh -NoProfile -File scripts/ci/"
 START_RUN = PS + "obs-stream.ps1 -Action Start"
 STOP_RUN = PS + "obs-stream.ps1 -Action Stop"
 STARTED_IF = "always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
@@ -82,7 +82,7 @@ def check_obs_stream(root: Path) -> list[str]:
         return [f"{OBS_STREAM} is missing"]
     code = strip_comments(path.read_text(encoding="utf-8"))
     errs = []
-    if not re.search(r'(?m)^\. "\$PSScriptRoot\\program-audio-guard\.ps1"$', code):
+    if not re.search(r'(?m)^\. \(Join-Path \$PSScriptRoot "program-audio-guard\.ps1"\)$', code):
         errs.append(f"{OBS_STREAM}: must dot-source program-audio-guard.ps1 at top level")
     starts = len(START_LITERAL.findall(code))
     gated = len(GATED_START.findall(code))
@@ -312,7 +312,7 @@ def check(root: Path) -> list[str]:
 YT_SUSTAINED = '      - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"'
 YT_LAST_GATE_END = ('          Write-Host "=== #408 GATE PASSED: deliberate stop -> every endpoint ended, '
                     '0 rescue, every endpoint resumed ==="\n\n')
-CHECK_STEP = ('      - name: "Program-audio breach check (#379)"\n        shell: powershell\n        timeout-minutes: 1\n'
+CHECK_STEP = ('      - name: "Program-audio breach check (#379)"\n        shell: pwsh\n        timeout-minutes: 1\n'
               '        run: |\n          . scripts/ci/program-audio-guard.ps1\n          Assert-NoProgramAudioBreach\n\n')
 WD_IF = "      - name: \"Program-audio watchdog: start (#379)\"\n        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'"
 TEARDOWN = '      - name: "Program-audio guard: stop the watchdog + final breach check (#379)"\n        if: always()'
@@ -329,7 +329,7 @@ STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
      "not immediately preceded"),
     ("a wait sits between the check and StartStream", '    Set-StartedMarker "true"\n',
      '    Start-Sleep -Seconds 30\n    Set-StartedMarker "true"\n', "not immediately preceded"),
-    ("the guard is no longer dot-sourced", '. "$PSScriptRoot\\program-audio-guard.ps1"\n', "", "must dot-source"),
+    ("the guard is no longer dot-sourced", '. (Join-Path $PSScriptRoot "program-audio-guard.ps1")\n', "", "must dot-source"),
     ("a second ungated StartStream", "function Stop-OurStream {",
      'function Start-Again {\n  $resp = Invoke-ObsRequest "StartStream"\n}\n\nfunction Stop-OurStream {',
      "1 of 2 StartStream"),

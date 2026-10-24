@@ -63,15 +63,19 @@ GUARD_FILES = {SELF, Path("scripts/ci/verify_program_audio_guard.py")}
 OBS_STREAM = Path("scripts/ci/obs-stream.ps1")
 OBS_LIB = Path("scripts/ci/obs-ws.ps1")
 MARKER = "OBS_STREAMING_STARTED_BY_CI"
-PS = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/"
+PS = "pwsh -NoProfile -File scripts/ci/"
 START_RUN = PS + "obs-stream.ps1 -Action Start"
 STOP_RUN = PS + "obs-stream.ps1 -Action Stop"
 ASSERT_RUN = PS + "obs-stream.ps1 -Action AssertNotStreaming"
 REBASELINE_RUN = PS + "obs-stream.ps1 -Action Rebaseline"
-# A step that kills / restarts / suspends Restreamer.exe while OBS streams into it:
+# A step that kills / restarts / suspends Restreamer while OBS streams into it:
 # OBS reconnects and zeroes outputDuration, so the next step must be a Rebaseline.
+# Windows forms (taskkill, the RestreamerGUI task, NtSuspendProcess) and the Linux
+# box's (#417): the restreamer-box.ps1 helpers and systemctl --user on the unit.
 RESTREAMER_RESTART = re.compile(
-    r"taskkill[^\n]*restreamer|stop-process[^\n]*restreamer|restreamergui|ntsuspendprocess", re.I)
+    r"taskkill[^\n]*restreamer|stop-process[^\n]*restreamer|restreamergui|ntsuspendprocess|"
+    r"\b(?:restart|start|stop)-restreamer|stop-restreamerhard|suspend-pid|"
+    r"systemctl\s+--user\s+(?:kill|restart|start|stop)[^\n]*restreamer", re.I)
 READINESS_RUN = PS + "obs-readiness-check.ps1"
 REPUBLISH_LINE = re.compile(r"&\s*" + re.escape(PS + "obs-stream.ps1 -Action Republish -GapSeconds") + r" \d+")
 WHOLE_RUNS = {START_RUN, STOP_RUN, ASSERT_RUN, READINESS_RUN, REBASELINE_RUN}
@@ -96,7 +100,8 @@ CONFINED_REQUESTS = {"StartStream": "Start-OurStream", "StopStream": "Stop-OurSt
 OBS_WORD = r"(?:(?<![a-z])obs|startobs)"
 PROCESS_ACTION = (
     r"(?:stop-process|taskkill|\.kill\s*\(|suspend|debug-process|"
-    r"invoke-cimmethod|terminate|start-process|wait-process)"
+    r"invoke-cimmethod|terminate|start-process|wait-process|"
+    r"\bkill\s+-|\bpkill\b|\bkillall\b|systemctl|systemd-run)"
 )
 TASK_ACTION = r"(?:schtasks|scheduledtask)"
 
@@ -135,9 +140,10 @@ LINE_RULES: list[tuple[re.Pattern[str], str]] = [
 # A unit (one step, one script) that looks up obs64 or the obs-websocket port may
 # not also kill, launch or close a process: `$z = Get-Process obs64` +
 # `Stop-Process -Id $z.Id` has no OBS word on the kill line.
-UNIT_OBS_LOOKUP = re.compile(r"obs64|\b4455\b", re.I)
+UNIT_OBS_LOOKUP = re.compile(r"obs64|get-obsprocessname|pgrep[^\n]*\bobs\b|\b4455\b", re.I)
 UNIT_PROCESS_ACTION = re.compile(
-    r"stop-process|taskkill|\.kill\s*\(|start-process|closemainwindow|schtasks|scheduledtask|suspend",
+    r"stop-process|taskkill|\.kill\s*\(|start-process|closemainwindow|schtasks|scheduledtask|suspend|"
+    r"\bkill\s+-|\bpkill\b|\bkillall\b|systemctl|systemd-run",
     re.I,
 )
 # The websocket client internals: only in obs-ws.ps1, never in a workflow.
@@ -527,8 +533,8 @@ def check_mock_job(root: Path) -> list[str]:
     jobs = wf.get("jobs") or {}
     job = jobs.get("obs-scripts-test")
     errs = []
-    if not job or "windows" not in str(job.get("runs-on", "")):
-        errs.append("ci.yml: job obs-scripts-test (windows, Windows PowerShell 5.1) is missing")
+    if not job or "ubuntu" not in str(job.get("runs-on", "")):
+        errs.append("ci.yml: job obs-scripts-test (ubuntu, pwsh -- what the stream boxes run) is missing")
     elif not any(MOCK_TEST in str(st.get("run") or "") for st in job.get("steps") or []):
         errs.append(f"ci.yml: obs-scripts-test must run `{MOCK_TEST}`")
     gate = jobs.get("rust-ci-gate") or {}
@@ -619,8 +625,8 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("e2e-streaming-test stops via -Action:Stop", ST_ASSERT, f"        run: {PS}obs-stream.ps1 -Action:Stop", "not a canonical"),
     ("e2e-streaming-test runs the canonical Stop before any start", ST_ASSERT, f"        run: {STOP_RUN}",
      "before this job started it"),
-    ("YT teardown stops via -Action 'Stop'", YT_STOP + f"\n        shell: powershell\n        timeout-minutes: 2\n        run: {STOP_RUN}",
-     YT_STOP + f"\n        shell: powershell\n        timeout-minutes: 2\n        run: {PS}obs-stream.ps1 -Action 'Stop'",
+    ("YT teardown stops via -Action 'Stop'", YT_STOP + f"\n        shell: pwsh\n        timeout-minutes: 2\n        run: {STOP_RUN}",
+     YT_STOP + f"\n        shell: pwsh\n        timeout-minutes: 2\n        run: {PS}obs-stream.ps1 -Action 'Stop'",
      "not a canonical"),
     ("e2e-streaming-test inline StopStream (the removed bug)", ST_ASSERT,
      "        run: |\n          $stop = @{ op = 6; d = @{ requestType = \"StopStream\"; requestId = \"stop-stream\" } }",
@@ -643,7 +649,7 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      - name: evil\n        uses: some/action@v1\n        with:\n          cmd: taskkill /F /IM obs64.exe\n\n      - name: Start delivery",
      "obs64.exe"),
     ("a computed obs-stream path with -Action Stop before the start", ST_ASSERT,
-     "        run: |\n          $s = 'scripts/ci/obs-' + 'stream.ps1'\n          & powershell -NoProfile -File $s -Action Stop",
+     "        run: |\n          $s = 'scripts/ci/obs-' + 'stream.ps1'\n          & pwsh -NoProfile -File $s -Action Stop",
      "outside the canonical forms"),
     ("the mock obs-websocket job is dropped from the gate", "        mutation-testing,\n        obs-scripts-test,\n      ]",
      "        mutation-testing,\n      ]", "rust-ci-gate must need obs-scripts-test"),
@@ -651,7 +657,7 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "        run: echo skipped", "must run `python tests/ci/test_obs_stream.py`"),
     ("the Rebaseline after the Restreamer restarts is dropped",
      '      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"\n'
-     "        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'\n        shell: powershell\n        timeout-minutes: 3\n"
+     "        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'\n        shell: pwsh\n        timeout-minutes: 3\n"
      f"        run: {PS}obs-stream.ps1 -Action Rebaseline\n",
      "", "the next step must be"),
     ("the Rebaseline after the Restreamer restarts runs only on success",
@@ -661,11 +667,11 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "the Rebaseline step needs exactly"),
     ("a new Restreamer kill after the Rebaseline",
      '      - name: "GATE: Second YouTube health check after resilience tests"\n',
-     '      - name: evil restart\n        shell: powershell\n        run: taskkill /F /IM Restreamer.exe\n\n'
+     '      - name: evil restart\n        shell: pwsh\n        run: systemctl --user restart restreamer\n\n'
      '      - name: "GATE: Second YouTube health check after resilience tests"\n',
      "the next step must be"),
     ("the guard moved onto the stream box", "  test-integrity:\n    name: Test integrity check\n    runs-on: ubuntu-latest",
-     "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, windows, stream-lan]",
+     "  test-integrity:\n    name: Test integrity check\n    runs-on: [self-hosted, linux, stream-lan]",
      "may only run in a GitHub-hosted job"),
     ("the #379 wiring guard (skipped by path) runs on the stream box",
      "      # #379: the program-audio watchdog, as in the YouTube job",
@@ -673,7 +679,7 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      # #379: the program-audio watchdog, as in the YouTube job",
      "verify_program_audio_guard.py may only run in a GitHub-hosted job"),
     ("a self-hosted runner group is not treated as hosted",
-     "    runs-on: [self-hosted, windows, stream-lan]\n    timeout-minutes: 20\n    steps:",
+     "    runs-on: [self-hosted, linux, stream-lan]\n    timeout-minutes: 20\n    steps:",
      "    runs-on: {group: stream}\n    timeout-minutes: 20\n    steps:\n      - run: taskkill /F /IM obs64.exe", "obs64.exe"),
 ]
 STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [

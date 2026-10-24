@@ -8,7 +8,7 @@
 # starts the stream.
 #
 # Ready means:
-#   - exactly one obs64 process;
+#   - exactly one stream OBS process (obs64 on Windows, obs on Linux);
 #   - the obs-websocket answers and accepts us;
 #   - the program scene is the TEST scene (camera-box's `Development`, issue 1380;
 #     `PRO` is the owner's production scene and is never accepted);
@@ -18,7 +18,7 @@
 # Exit 0 = ready. Exit 1 = not ready, with one ::error:: line naming what is wrong.
 
 $ErrorActionPreference = "Stop"
-. "$PSScriptRoot\obs-ws.ps1"
+. (Join-Path $PSScriptRoot "obs-ws.ps1")
 
 $why = Test-ObsProcess
 if ($why) { Write-NotReady $why; exit 1 }
@@ -38,5 +38,5 @@ try {
 }
 if ($why) { Write-NotReady $why; exit 1 }
 
-Write-Host "stream OBS ready: one obs64, scene '$($script:ObsTestScene)', inpoint service, not streaming, not recording"
+Write-Host "stream OBS ready: one $(Get-ObsProcessName), scene '$($script:ObsTestScene)', inpoint service, not streaming, not recording"
 exit 0
