@@ -55,8 +55,10 @@ function launchChrome(): Chrome {
       "--password-store=basic",
       "about:blank",
     ],
-    // Its own process group, so Chrome dies with all its children.
-    { stdio: "ignore", detached: true },
+    // Its own process group, so Chrome dies with all its children. Its stderr
+    // goes to a file beside the profile: a start that never writes the port
+    // then fails with Chrome's own words (CI run 40107588143 had none).
+    { stdio: ["ignore", "ignore", fs.openSync(`${dir}.stderr.log`, "w")], detached: true },
   );
   // A detached group outlives its parent: reap it if the worker exits
   // before afterEach runs.
@@ -83,7 +85,11 @@ async function connectChrome(chrome: Chrome): Promise<Browser> {
         }
         await sleep(100);
       }
-      throw new Error(`${CHROME} wrote no DevToolsActivePort within 10 s`);
+      const err = fs.readFileSync(`${dir}.stderr.log`, "utf-8").split("\n").slice(-15).join("\n");
+      const how = proc.exitCode !== null || proc.signalCode !== null
+        ? `exited (code ${proc.exitCode}, signal ${proc.signalCode})`
+        : "still running";
+      throw new Error(`${CHROME} wrote no DevToolsActivePort within 10 s; it is ${how}; stderr tail:\n${err}`);
     })(),
   ]);
   chrome.browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
@@ -118,6 +124,7 @@ async function stopChrome(chrome: Chrome): Promise<void> {
       maxRetries: 10,
       retryDelay: 200,
     });
+    fs.rmSync(`${dir}.stderr.log`, { force: true });
   }
 }
 
