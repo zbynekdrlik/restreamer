@@ -1855,6 +1855,8 @@ jobs:
         run: python tests/ci/test_rig_lease_wait.py
       - name: "Run the rig-lease hold (acquire/heartbeat/release) against a mock lease API (#349)"
         run: python tests/ci/test_rig_lease_hold.py
+      - name: "Run the job-owner /proc walk under a fake Runner.Worker (#349, #417)"
+        run: python tests/ci/test_job_owner.py
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -2048,8 +2050,12 @@ jobs:
           $configDir = Join-Path $HOME ".config/restreamer"
           New-Item -ItemType Directory -Path $configDir -Force | Out-Null
           [System.IO.File]::WriteAllText((Join-Path $configDir "cert.pem"), $env:TLS_CERT_PEM)
-          [System.IO.File]::WriteAllText((Join-Path $configDir "key.pem"), $env:TLS_KEY_PEM)
-          chmod 600 (Join-Path $configDir "key.pem")
+          # The key file is mode 600 BEFORE the key goes in.
+          $keyPath = Join-Path $configDir "key.pem"
+          if (-not (Test-Path $keyPath)) { New-Item -ItemType File -Path $keyPath | Out-Null }
+          chmod 600 $keyPath
+          if ($LASTEXITCODE -ne 0) { throw "chmod 600 $keyPath failed" }
+          [System.IO.File]::WriteAllText($keyPath, $env:TLS_KEY_PEM)
           Write-Host "TLS certificates deployed to $configDir"
 
       - name: Deploy and start Restreamer
@@ -2067,32 +2073,38 @@ jobs:
           # scopes and survive (control-rooms.md).
           systemctl --user stop restreamer
           if ($LASTEXITCODE -ne 0) { throw "systemctl --user stop restreamer failed ($LASTEXITCODE)" }
+          # From here on, whatever fails, the operator box gets its Restreamer
+          # back (the old package if the install failed) before the job fails.
+          try {
 
-          Write-Host "=== Step 1.5: Clean stale chunk files (preserve database AND WAL) ==="
-          # WAL/SHM files are part of the live database in journal_mode=WAL.
-          # Deleting them between a stop and the next start destroys
-          # uncheckpointed transactions. SQLite replays WAL safely on open.
-          $chunksDir = Join-Path $HOME ".local/share/restreamer/chunks"
-          if (Test-Path $chunksDir) {
-            $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
-            Remove-Item (Join-Path $chunksDir "*") -Force -ErrorAction SilentlyContinue
-            Write-Host "Removed $count stale chunk files"
+            Write-Host "=== Step 1.5: Clean stale chunk files (preserve database AND WAL) ==="
+            # WAL/SHM files are part of the live database in journal_mode=WAL.
+            # Deleting them between a stop and the next start destroys
+            # uncheckpointed transactions. SQLite replays WAL safely on open.
+            $chunksDir = Join-Path $HOME ".local/share/restreamer/chunks"
+            if (Test-Path $chunksDir) {
+              $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
+              Remove-Item (Join-Path $chunksDir "*") -Force -ErrorAction SilentlyContinue
+              Write-Host "Removed $count stale chunk files"
+            }
+
+            Write-Host "=== Step 2: Install the package ==="
+            # The runner user has passwordless sudo on the box (owner, 24.10.2026).
+            sudo -n dpkg -i $deb.FullName
+            if ($LASTEXITCODE -ne 0) { throw "dpkg -i $($deb.Name) failed ($LASTEXITCODE)" }
+            dpkg-query -W restreamer
+
+            # The package ships the user unit; reload so a changed unit applies.
+            systemctl --user daemon-reload
+            if ($LASTEXITCODE -ne 0) { throw "systemctl --user daemon-reload failed ($LASTEXITCODE)" }
+            systemctl --user enable restreamer
+            if ($LASTEXITCODE -ne 0) { throw "systemctl --user enable restreamer failed ($LASTEXITCODE)" }
+          } finally {
+            Write-Host "=== Step 3: Start Restreamer in the kiosk session ==="
+            systemctl --user start restreamer
+            $started = $LASTEXITCODE
           }
-
-          Write-Host "=== Step 2: Install the package ==="
-          # The runner user has passwordless sudo on the box (owner, 24.10.2026).
-          sudo -n dpkg -i $deb.FullName
-          if ($LASTEXITCODE -ne 0) { throw "dpkg -i $($deb.Name) failed ($LASTEXITCODE)" }
-          dpkg-query -W restreamer
-
-          Write-Host "=== Step 3: Start Restreamer in the kiosk session ==="
-          # The package ships the user unit; reload so a changed unit applies.
-          systemctl --user daemon-reload
-          if ($LASTEXITCODE -ne 0) { throw "systemctl --user daemon-reload failed ($LASTEXITCODE)" }
-          systemctl --user enable restreamer
-          if ($LASTEXITCODE -ne 0) { throw "systemctl --user enable restreamer failed ($LASTEXITCODE)" }
-          systemctl --user start restreamer
-          if ($LASTEXITCODE -ne 0) { throw "systemctl --user start restreamer failed ($LASTEXITCODE)" }
+          if ($started -ne 0) { throw "systemctl --user start restreamer failed ($started)" }
           Start-Sleep -Seconds 10
           Write-Host "=== Deployment steps complete ==="
 
@@ -2141,11 +2153,22 @@ jobs:
             exit 1
           }
           $envVars = [System.IO.File]::ReadAllText("/proc/$mainPid/environ") -split "`0"
-          if (-not ($envVars | Where-Object { $_ -like "DISPLAY=*" -or $_ -like "WAYLAND_DISPLAY=*" })) {
+          $appDisplay = ($envVars | Where-Object { $_ -like "DISPLAY=*" } | Select-Object -First 1)
+          if (-not $appDisplay) {
             Write-Error "FAIL: Restreamer has no DISPLAY - the operator window cannot show"
             exit 1
           }
-          Write-Host "OK: running as newlevel with a display"
+          $appDisplay = $appDisplay.Substring("DISPLAY=".Length)
+          Write-Host "OK: running as newlevel on display $appDisplay"
+
+          Write-Host "=== CHECK 2b: Normal CPU priority (#368) ==="
+          $nice = [int]((ps -o ni= -p $mainPid).Trim())
+          $policy = (ps -o cls= -p $mainPid).Trim()
+          if ($nice -gt 0 -or $policy -in @("B", "IDL")) {
+            Write-Error "FAIL: Restreamer runs at nice $nice, policy $policy - OBS wins every CPU tie (#368)"
+            exit 1
+          }
+          Write-Host "OK: nice $nice, scheduling policy $policy"
 
           $log = Join-Path $HOME ".local/share/restreamer/restreamer.log"
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
@@ -2220,13 +2243,13 @@ jobs:
           Write-Host "=== CHECK 7: The operator window is open ==="
           $win = $null
           for ($w = 1; $w -le 15; $w++) {
-            $env:DISPLAY = ":0"
+            $env:DISPLAY = $appDisplay
             $win = (wmctrl -l 2>$null) | Select-String "Restreamer Dashboard"
             if ($win) { break }
             Start-Sleep -Seconds 2
           }
           if (-not $win) {
-            Write-Error "FAIL: no 'Restreamer Dashboard' window on :0 (#393)"
+            Write-Error "FAIL: no 'Restreamer Dashboard' window on $appDisplay (#393)"
             exit 1
           }
           Write-Host "OK: $win"
@@ -3888,7 +3911,10 @@ jobs:
           Write-Host "Verifying the cache bar grows after the VPS live-edge init..."
           Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
           npm install playwright 2>&1 | Out-Null
-          npx playwright install --with-deps chromium 2>&1 | Out-Null
+          # The browser's system libraries are provisioned on the box once; CI
+          # never apt-installs on the production stream PC (#417 review).
+          npx playwright install chromium 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "npx playwright install chromium failed ($LASTEXITCODE)" }
 
           $testScript = @'
           const { chromium } = require('playwright');
@@ -4447,7 +4473,10 @@ jobs:
           Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
           # Install playwright package and browser
           npm install playwright 2>&1 | Out-Null
-          npx playwright install --with-deps chromium 2>&1 | Out-Null
+          # The browser's system libraries are provisioned on the box once; CI
+          # never apt-installs on the production stream PC (#417 review).
+          npx playwright install chromium 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "npx playwright install chromium failed ($LASTEXITCODE)" }
 
           # Write inline Playwright test
           $testScript = @'
@@ -5588,7 +5617,10 @@ jobs:
           # install playwright in e2e, write an ASCII .cjs, run via node.
           Set-Location (Join-Path $env:GITHUB_WORKSPACE "e2e")
           npm install playwright 2>&1 | Out-Null
-          npx playwright install --with-deps chromium 2>&1 | Out-Null
+          # The browser's system libraries are provisioned on the box once; CI
+          # never apt-installs on the production stream PC (#417 review).
+          npx playwright install chromium 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "npx playwright install chromium failed ($LASTEXITCODE)" }
 
           $check = @'
           const { chromium } = require('playwright');

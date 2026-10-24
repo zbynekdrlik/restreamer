@@ -16,6 +16,10 @@ Description=Restreamer (operator window)
 After=graphical-session.target
 
 [Service]
+# exec: `systemctl --user start` returns once /usr/bin/Restreamer runs (not right
+# after the fork), so a caller that reads MainPID sees the app's own process and
+# environment (the CI deploy checks its DISPLAY, #417).
+Type=exec
 ExecStart=/usr/bin/Restreamer
 Restart=always
 RestartSec=5

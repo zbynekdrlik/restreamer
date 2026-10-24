@@ -75,7 +75,8 @@ REBASELINE_RUN = PS + "obs-stream.ps1 -Action Rebaseline"
 RESTREAMER_RESTART = re.compile(
     r"taskkill[^\n]*restreamer|stop-process[^\n]*restreamer|restreamergui|ntsuspendprocess|"
     r"\b(?:restart|start|stop)-restreamer|stop-restreamerhard|suspend-pid|"
-    r"systemctl\s+--user\s+(?:kill|restart|start|stop)[^\n]*restreamer", re.I)
+    r"systemctl\s+--user\s+(?:kill|restart|start|stop)[^\n]*restreamer|"
+    r"\bkill\s+-\S+[^\n]*(?:restreamer|\$rspid)", re.I)
 READINESS_RUN = PS + "obs-readiness-check.ps1"
 REPUBLISH_LINE = re.compile(r"&\s*" + re.escape(PS + "obs-stream.ps1 -Action Republish -GapSeconds") + r" \d+")
 WHOLE_RUNS = {START_RUN, STOP_RUN, ASSERT_RUN, READINESS_RUN, REBASELINE_RUN}
@@ -140,7 +141,8 @@ LINE_RULES: list[tuple[re.Pattern[str], str]] = [
 # A unit (one step, one script) that looks up obs64 or the obs-websocket port may
 # not also kill, launch or close a process: `$z = Get-Process obs64` +
 # `Stop-Process -Id $z.Id` has no OBS word on the kill line.
-UNIT_OBS_LOOKUP = re.compile(r"obs64|get-obsprocessname|pgrep[^\n]*\bobs\b|\b4455\b", re.I)
+UNIT_OBS_LOOKUP = re.compile(
+    r"obs64|get-obsprocessname|(?:pgrep|pidof|get-process)\b[^\n]*\bobs\b|/proc/[^\n]*/comm|\b4455\b", re.I)
 UNIT_PROCESS_ACTION = re.compile(
     r"stop-process|taskkill|\.kill\s*\(|start-process|closemainwindow|schtasks|scheduledtask|suspend|"
     r"\bkill\s+-|\bpkill\b|\bkillall\b|systemctl|systemd-run",
@@ -665,6 +667,19 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "        if: always() && env.OBS_STREAMING_STARTED_BY_CI == 'true'",
      '      - name: "Re-anchor the OBS stream after the Restreamer restarts (#374)"\n        if: success()',
      "the Rebaseline step needs exactly"),
+    ("a Linux two-line OBS kill (Get-Process obs + Stop-Process)", "      - name: Start delivery",
+     "      - name: evil\n        shell: pwsh\n        run: |\n          $z = Get-Process -Name obs\n"
+     "          Stop-Process -Id $z.Id -Force\n\n      - name: Start delivery",
+     "looks up obs64 / port 4455 AND runs a process action"),
+    ("a Linux two-line OBS freeze (pidof obs + kill -STOP)", "      - name: Start delivery",
+     "      - name: evil\n        shell: pwsh\n        run: |\n          $z = pidof obs\n"
+     "          kill -STOP $z\n\n      - name: Start delivery",
+     "looks up obs64 / port 4455 AND runs a process action"),
+    ("a Restreamer kill by PID after the Rebaseline",
+     '      - name: "GATE: Second YouTube health check after resilience tests"\n',
+     '      - name: evil restart\n        shell: pwsh\n        run: kill -9 (systemctl --user show -p MainPID --value restreamer)\n\n'
+     '      - name: "GATE: Second YouTube health check after resilience tests"\n',
+     "the next step must be"),
     ("a new Restreamer kill after the Rebaseline",
      '      - name: "GATE: Second YouTube health check after resilience tests"\n',
      '      - name: evil restart\n        shell: pwsh\n        run: systemctl --user restart restreamer\n\n'
