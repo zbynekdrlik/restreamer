@@ -38,8 +38,12 @@ paths:
     - After the wait, the group is killed in any case, since a child may outlive
       the main process. A `process.once("exit")` hook in the worker reaps the
       detached group if `afterEach` never runs.
-    - `afterEach` shares the test's budget, so the describe sets a 60 s timeout:
-      ~5 s of test plus at most ~6 s of stop and rm retries.
+    - `afterEach` shares the test's budget, so the describe sets a 90 s timeout:
+      the 30 s start bound, ~5 s of test, and at most ~6 s of stop and rm retries.
+  - The wait for `DevToolsActivePort` is a HANG bound (`CHROME_START_LIVENESS_MS`,
+    30 s), not a speed check: a cold hosted runner took over 10 s while Chrome kept
+    running (run 40135492094). Chrome's stderr goes to `<profile>.stderr.log`, and a
+    start that never writes the port fails with its exit state and the stderr tail.
   - Skip the exit wait when `pid` is undefined (spawn failed) or
     `exitCode`/`signalCode` is set: an `exit` listener added after the exit never
     fires.

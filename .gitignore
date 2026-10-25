@@ -49,3 +49,4 @@ soak-*.png
 # sha256 sidecar (which rs-api verifies before uploading it to S3).
 /src-tauri/rs-delivery-linux
 /src-tauri/rs-delivery-linux.sha256
+__pycache__/

@@ -14,8 +14,8 @@ every 30 s while it streams, and releases it in an always() step:
   * the job ends without Release (a force-cancel kills Runner.Worker with no cleanup):
     the heartbeat releases ITS lease and exits, and never touches the next job's lease.
 
-Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
-`pwsh` elsewhere, or the interpreter named by $OBS_TEST_PWSH.
+`pwsh` on Linux -- what the stream boxes run since 2026-10 (#417); Windows
+PowerShell 5.1 (`powershell`) on Windows; or the interpreter named by $OBS_TEST_PWSH.
 """
 
 from __future__ import annotations

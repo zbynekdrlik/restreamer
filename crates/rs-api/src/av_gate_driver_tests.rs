@@ -174,7 +174,9 @@ impl Default for YtState {
             life: StdMutex::new("ready".to_string()),
             live_lands_as: StdMutex::new("live".to_string()),
             video: StdMutex::new("succeeded".to_string()),
-            upload: StdMutex::new("uploaded".to_string()),
+            // No upload status until a test sets one: `uploaded` already means
+            // the archive is there (the VOD wait ends).
+            upload: StdMutex::new(String::new()),
             fail: StdMutex::new(HashSet::new()),
             transitions: StdMutex::new(Vec::new()),
             inserts: AtomicU32::new(0),
@@ -351,6 +353,8 @@ pub(crate) fn timings() -> AvGateTimings {
     AvGateTimings {
         poll: Duration::from_millis(5),
         drain_extra: Duration::ZERO,
+        ingest_end_timeout: Duration::from_millis(150),
+        archive_settle: Duration::ZERO,
         idle_timeout: Duration::from_secs(10),
         servers_gone_timeout: Duration::from_millis(150),
         processing_poll: Duration::from_millis(5),
@@ -475,6 +479,15 @@ impl Harness {
         }
     }
 
+    /// The audit rows emitted so far, in order.
+    pub fn audit_rows(&mut self) -> Vec<(Action, serde_json::Value)> {
+        let mut out = Vec::new();
+        while let Ok(row) = self.audit_rx.try_recv() {
+            out.push((row.action, row.detail));
+        }
+        out
+    }
+
     /// The audit actions emitted so far, in order.
     pub fn actions(&mut self) -> Vec<Action> {
         let mut out = Vec::new();
@@ -544,10 +557,17 @@ fn vod_step_reads_both_processing_and_upload_status() {
             "{p:?} {u:?}"
         );
     }
+    // A live archive is fetchable while YouTube still reads `processing`: on
+    // stream-snv, 24.10.2026, vr2JmFSu8dc read processing/uploaded 26 min after
+    // the stop while yt-dlp already listed 1080p + audio (camera-box issue 1404).
+    // So `uploaded` is done; fetching the formats is the caller's own check.
     assert_eq!(
         vod_step(&vod(Some("processing"), Some("uploaded"))),
-        VodStep::Pending
+        VodStep::Done
     );
+    assert_eq!(vod_step(&vod(None, Some("uploaded"))), VodStep::Done);
+    // Nothing reported yet is still pending.
+    assert_eq!(vod_step(&vod(Some("processing"), None)), VodStep::Pending);
     assert_eq!(vod_step(&vod(None, None)), VodStep::Pending);
 }
 
@@ -591,6 +611,8 @@ async fn a_session_goes_starting_ready_processing_done_and_cleans_up() {
         Some("s-happy")
     );
 
+    // Our publish ended: YouTube reads the stream inactive at the first check.
+    *h.yt_state.stream_status.lock().unwrap() = VecDeque::from(["inactive".to_string()]);
     assert!(h.ctx.registry.request_stop("s-happy"));
     let done = h.wait_state("s-happy", SessionState::Done).await;
     assert_eq!(done.vod_id.as_deref(), Some("bc-1"));
@@ -599,8 +621,9 @@ async fn a_session_goes_starting_ready_processing_done_and_cleans_up() {
     assert!(done.finished_at.is_some());
     assert_eq!(done.reason, None);
     // lookup 1 + insert 50 + bind 50; poll 1: life 1 + stream 1 + live 50;
-    // poll 2: life 1; the teardown's life 1 + complete 50; one VOD poll 1.
-    assert_eq!(done.quota_units, 206);
+    // poll 2: life 1; the ingest-end check's stream 1; the teardown's life 1 +
+    // complete 50; one VOD poll 1.
+    assert_eq!(done.quota_units, 207);
     assert_eq!(h.yt_state.transitions(), vec!["live", "complete"]);
     assert_eq!(h.ctx.registry.holder(), None);
     let calls = h.rig.calls();

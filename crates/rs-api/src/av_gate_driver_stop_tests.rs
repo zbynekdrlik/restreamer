@@ -45,6 +45,75 @@ async fn the_stop_waits_for_the_cache_drain_before_completing() {
 }
 
 #[tokio::test]
+async fn the_stop_completes_only_after_youtube_saw_the_ingest_end_and_the_archive_settled() {
+    // stream-snv 24.10.2026 (session 2b50f118): `complete` 8.6 s after our
+    // last byte left the VOD ~9 s short. The stop now waits for YouTube to
+    // report the stream not `active`, then for the archive to catch up.
+    let mut h = Harness::with(
+        FakeRig::default(),
+        AvGateTimings {
+            ingest_end_timeout: Duration::from_secs(5),
+            archive_settle: Duration::from_millis(80),
+            ..timings()
+        },
+    )
+    .await;
+    h.ready_session("s1").await;
+    assert!(h.ctx.registry.request_stop("s1"));
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        h.yt_state.transitions(),
+        vec!["live"],
+        "nothing is completed while YouTube still reads the stream active"
+    );
+    *h.yt_state.stream_status.lock().unwrap() = VecDeque::from(["inactive".to_string()]);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        h.yt_state.transitions(),
+        vec!["live"],
+        "the ingest end is seen, but the archive settle (80 ms) is not over"
+    );
+    h.wait_state("s1", SessionState::Done).await;
+    assert_eq!(h.yt_state.transitions(), vec!["live", "complete"]);
+    let rows = h.audit_rows();
+    let processing = rows
+        .iter()
+        .find(|(a, _)| *a == Action::AvGateSessionProcessing)
+        .map(|(_, d)| d.clone())
+        .expect("a processing row");
+    assert_eq!(processing["ingest_end_seen"], true, "{processing}");
+    assert!(
+        processing["ingest_end_wait_ms"].as_u64().unwrap() >= 100,
+        "{processing}"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_youtube_keeps_active_is_completed_after_the_bound() {
+    // Bounded: a broadcast must never stay live because YouTube kept reading
+    // the stream active (a publish that did not end, a stale status).
+    let mut h = Harness::with(
+        FakeRig::default(),
+        AvGateTimings {
+            ingest_end_timeout: Duration::from_millis(100),
+            ..timings()
+        },
+    )
+    .await;
+    h.ready_session("s1").await;
+    assert!(h.ctx.registry.request_stop("s1"));
+    h.wait_state("s1", SessionState::Done).await;
+    assert_eq!(h.yt_state.transitions(), vec!["live", "complete"]);
+    let processing = h
+        .audit_rows()
+        .into_iter()
+        .find(|(a, _)| *a == Action::AvGateSessionProcessing)
+        .map(|(_, d)| d)
+        .expect("a processing row");
+    assert_eq!(processing["ingest_end_seen"], false, "{processing}");
+}
+
+#[tokio::test]
 async fn servers_that_never_go_fail_the_stop_with_the_count() {
     let rig = FakeRig::default();
     *rig.servers.lock().unwrap() = VecDeque::from([Ok(1)]);

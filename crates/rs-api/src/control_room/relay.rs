@@ -37,6 +37,7 @@ const MOUSE_FIELDS: &[&str] = &[
     "x",
     "y",
     "button",
+    "buttons",
     "clickCount",
     "modifiers",
     "deltaX",

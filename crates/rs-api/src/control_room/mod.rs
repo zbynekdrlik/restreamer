@@ -14,6 +14,8 @@
 //!   `<data_dir>/control-room-tabs.json`, so a Restreamer restart reattaches
 //!   to the tabs the (still running) Chrome has open.
 
+#[cfg(not(windows))]
+pub mod audio_service;
 pub mod browser;
 pub mod cdp;
 #[cfg(test)]

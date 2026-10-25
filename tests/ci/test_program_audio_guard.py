@@ -28,8 +28,8 @@ PowerShell functions:
 Every step runs the way GitHub Actions runs `shell: powershell` (the 'stop'
 prelude, `-command ". '<file>'"`), so `exit 1` inside a function behaves as in CI.
 
-Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
-`pwsh` elsewhere, or the interpreter named by $OBS_TEST_PWSH.
+`pwsh` on Linux -- what the stream boxes run since 2026-10 (#417); Windows
+PowerShell 5.1 (`powershell`) on Windows; or the interpreter named by $OBS_TEST_PWSH.
 """
 
 from __future__ import annotations

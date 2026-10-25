@@ -30,6 +30,8 @@ interface Chrome {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// How long Chrome may take to come up before the spec calls it hung.
+const CHROME_START_LIVENESS_MS = 30_000;
 
 function killGroup(pid: number | undefined): void {
   if (pid === undefined) return;
@@ -55,8 +57,10 @@ function launchChrome(): Chrome {
       "--password-store=basic",
       "about:blank",
     ],
-    // Its own process group, so Chrome dies with all its children.
-    { stdio: "ignore", detached: true },
+    // Its own process group, so Chrome dies with all its children. Its stderr
+    // goes to a file beside the profile: a start that never writes the port
+    // then fails with Chrome's own words (CI run 40107588143 had none).
+    { stdio: ["ignore", "ignore", fs.openSync(`${dir}.stderr.log`, "w")], detached: true },
   );
   // A detached group outlives its parent: reap it if the worker exits
   // before afterEach runs.
@@ -71,19 +75,27 @@ async function connectChrome(chrome: Chrome): Promise<Browser> {
   const spawnError = new Promise<never>((_, reject) =>
     proc.once("error", (e) => reject(new Error(`${CHROME}: ${e.message}`))),
   );
-  // Chrome writes the port it picked to DevToolsActivePort.
+  // Chrome writes the port it picked to DevToolsActivePort. The wait is a
+  // HANG bound, not a speed check (.claude/rules/load-robust-tests.md): a cold
+  // start on a hosted runner took over 10 s while Chrome kept running (CI run
+  // 40135492094, its stderr only D-Bus "Failed to connect to the bus" lines),
+  // and nothing below depends on how fast Chrome came up.
   const portFile = path.join(dir, "DevToolsActivePort");
   const port = await Promise.race([
     spawnError,
     (async () => {
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < CHROME_START_LIVENESS_MS / 100; i++) {
         if (fs.existsSync(portFile)) {
           const first = fs.readFileSync(portFile, "utf-8").split("\n")[0];
           if (first) return first;
         }
         await sleep(100);
       }
-      throw new Error(`${CHROME} wrote no DevToolsActivePort within 10 s`);
+      const err = fs.readFileSync(`${dir}.stderr.log`, "utf-8").split("\n").slice(-15).join("\n");
+      const how = proc.exitCode !== null || proc.signalCode !== null
+        ? `exited (code ${proc.exitCode}, signal ${proc.signalCode})`
+        : "still running";
+      throw new Error(`${CHROME} wrote no DevToolsActivePort within ${CHROME_START_LIVENESS_MS / 1000} s; it is ${how}; stderr tail:\n${err}`);
     })(),
   ]);
   chrome.browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
@@ -118,13 +130,15 @@ async function stopChrome(chrome: Chrome): Promise<void> {
       maxRetries: 10,
       retryDelay: 200,
     });
+    fs.rmSync(`${dir}.stderr.log`, { force: true });
   }
 }
 
 test.describe("Browser log", () => {
   // ~10 s of test plus up to ~6 s of teardown in afterEach, which shares
-  // the test's budget: 60 s keeps a slow runner from cutting the cleanup.
-  test.describe.configure({ timeout: 60_000 });
+  // the test's budget: 90 s covers the 30 s start bound, ~10 s of test and
+  // the teardown, so a slow runner never cuts the cleanup.
+  test.describe.configure({ timeout: 90_000 });
   let chrome: Chrome | undefined;
 
   test.beforeEach(async ({ request }) => {

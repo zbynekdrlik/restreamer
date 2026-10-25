@@ -220,6 +220,21 @@ paths:
   2026-10-14).
 - **The screencast stops on a cross-site navigation** (renderer swap). The relay
   restarts `Page.startScreencast` on every main-frame `Page.frameNavigated`.
+- **Drags (#419).** A `mouseMoved` must name the held button (`button` + the
+  `buttons` bitmask, both whitelisted): Chrome drags a scrollbar thumb only then, a
+  move with `button: none` is a hover. A press on the canvas keeps sending its moves
+  and its release from `window` listeners once the pointer leaves the canvas.
+- **Room sound (#420).** The room Chrome plays through pipewire-pulse to the box's ONE
+  sink, `stream-operator-headphones` (camera-box's design, camera-box issue 1465: no
+  extra sinks, loopbacks or WirePlumber rules from us; volume/mute = the page's own
+  player). Chrome's audio service connects to PulseAudio once: after a pipewire-pulse
+  restart it plays into nothing (`pa_operation is nullptr` in chrome.stderr.log). Every
+  room open ends an audio service older than the newest pipewire-pulse
+  (`audio_service.rs`); Chrome starts a fresh one on the next sound. Chrome clobbers
+  its own `/proc/<pid>/environ`, so an empty environ there proves nothing. Check with
+  a probe tab (`AudioContext` + oscillator at gain 0.0005, `userGesture: true`), then
+  `XDG_RUNTIME_DIR=/run/user/1000 wpctl status`: a "Google Chrome" stream appears under
+  Streams.
 - **Relay.** Dashboard to Chrome carries only the whitelisted mouse/key fields, paste,
   `{t:copy}`, `{t:reload,hard?}` (`Page.reload`), `history.back()`, http(s)
   `Page.navigate`, and `{t:size,w,h}`. Anything else is dropped. Frames are JPEG binary

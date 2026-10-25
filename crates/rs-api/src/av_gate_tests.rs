@@ -99,6 +99,8 @@ fn timings_come_from_the_config() {
         AvGateTimings {
             poll: Duration::from_secs(15),
             drain_extra: Duration::from_secs(15),
+            ingest_end_timeout: Duration::from_secs(120),
+            archive_settle: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(61),
             servers_gone_timeout: Duration::from_secs(180),
             processing_poll: Duration::from_secs(30),

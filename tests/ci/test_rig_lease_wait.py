@@ -11,8 +11,8 @@ for 30 more minutes, and Start then refused to touch OBS). So:
   * a later check waits for the holder, but never past that deadline;
   * the deadline bounds only the wait: a free rig is used at any time.
 
-Windows PowerShell 5.1 (`powershell`) on Windows -- what the stream box runs;
-`pwsh` elsewhere, or the interpreter named by $OBS_TEST_PWSH.
+`pwsh` on Linux -- what the stream boxes run since 2026-10 (#417); Windows
+PowerShell 5.1 (`powershell`) on Windows; or the interpreter named by $OBS_TEST_PWSH.
 """
 
 from __future__ import annotations

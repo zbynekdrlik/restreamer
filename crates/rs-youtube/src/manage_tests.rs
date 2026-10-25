@@ -398,6 +398,33 @@ async fn insert_broadcast_without_an_id_is_an_error() {
 }
 
 #[tokio::test]
+async fn a_post_without_a_body_says_content_length_zero() {
+    // stream-snv 24.10.2026: liveBroadcasts.bind answered 411 Length Required.
+    // Google's front end refuses a POST that carries no Content-Length, and bind
+    // and transition have all their parameters in the query.
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts/bind"))
+        .and(header("content-length", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "bc-1"})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts/transition"))
+        .and(header("content-length", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "bc-1"})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let c = client(&s);
+    c.bind_broadcast("bc-1", "s-e2e").await.unwrap();
+    c.transition_broadcast("bc-1", BroadcastTransition::Live)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn bind_sends_both_ids() {
     let s = server_with_token(3600, 1).await;
     Mock::given(method("POST"))

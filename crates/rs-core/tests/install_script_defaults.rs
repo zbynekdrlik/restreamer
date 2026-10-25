@@ -538,15 +538,57 @@ fn install_script_registers_the_task_at_normal_priority() {
     assert_task_runs_at_normal_priority(&install_script(), "scripts/install.ps1");
 }
 
-/// #368: the CI deploy re-registers the task on stream.lan on every deploy,
-/// so it must carry the same priority as the installer.
+/// #368 / #417: stream.lan runs Linux since 22.10.2026. The CI deploy no
+/// longer registers a scheduled task: it installs the .deb and starts its
+/// `restreamer` user unit, so the app's priority is the packaged unit's. The
+/// deploy must use that unit, and the unit must not lower the priority.
 #[test]
-fn ci_deploy_registers_the_task_at_normal_priority() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
-    let ci = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!(".github/workflows/ci.yml must be readable at {path:?}: {e}"));
-    assert_task_runs_at_normal_priority(&ci, ".github/workflows/ci.yml");
+fn ci_deploy_runs_the_packaged_unit_at_normal_priority() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml must be readable")
+        // A Windows checkout has CRLF line ends.
+        .replace("\r\n", "\n");
+    let start = ci
+        .find("\n  deploy-stream-lan:\n")
+        .expect("ci.yml must have the deploy-stream-lan job");
+    let end = ci[start..]
+        .find("\n  e2e-streaming-test:\n")
+        .map(|e| start + e)
+        .expect("e2e-streaming-test must follow deploy-stream-lan");
+    let deploy = &ci[start..end];
+    for needle in ["sudo -n dpkg -i", "systemctl --user start restreamer"] {
+        assert!(
+            deploy.contains(needle),
+            "deploy-stream-lan must run `{needle}`"
+        );
+    }
+    assert!(
+        !deploy.contains("Register-ScheduledTask"),
+        "deploy-stream-lan runs on Linux: the RestreamerGUI task is gone, the user unit replaces it"
+    );
+
+    let unit = std::fs::read_to_string(root.join("src-tauri/linux/restreamer.service"))
+        .expect("src-tauri/linux/restreamer.service must be readable");
+    for line in unit.lines().map(str::trim) {
+        if let Some(v) = line.strip_prefix("Nice=") {
+            let nice: i32 = v.trim().parse().expect("Nice= must be a number");
+            assert!(
+                nice <= 0,
+                "the unit lowers Restreamer's priority (Nice={nice}); OBS then wins every CPU tie (#368)"
+            );
+        }
+        if let Some(v) = line.strip_prefix("CPUSchedulingPolicy=") {
+            assert!(
+                !matches!(v.trim(), "idle" | "batch"),
+                "the unit runs Restreamer as CPUSchedulingPolicy={v} (#368)"
+            );
+        }
+        assert!(
+            !line.starts_with("IOSchedulingClass=idle"),
+            "the unit gives Restreamer idle I/O priority (#368)"
+        );
+    }
 }
 
 fn install_script() -> String {

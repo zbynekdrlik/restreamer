@@ -24,6 +24,18 @@ fn mouse_and_key_forward_only_known_fields() {
 }
 
 #[test]
+fn a_drag_carries_the_held_button_to_chrome() {
+    // #419: a scrollbar thumb follows only a mouseMoved that says which button
+    // is held; without `buttons` Chrome sees a hover.
+    let m = json!({"t": "m", "type": "mouseMoved", "x": 300, "y": 40, "button": "left",
+                   "buttons": 1, "modifiers": 0});
+    let (method, p) = client_to_cdp(&m).unwrap();
+    assert_eq!(method, "Input.dispatchMouseEvent");
+    assert_eq!(p["button"], "left");
+    assert_eq!(p["buttons"], 1);
+}
+
+#[test]
 fn paste_back_and_navigation() {
     let (m, p) = client_to_cdp(&json!({"t": "paste", "text": "hello"})).unwrap();
     assert_eq!((m, p["text"].as_str()), ("Input.insertText", Some("hello")));

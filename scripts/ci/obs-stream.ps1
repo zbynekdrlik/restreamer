@@ -56,8 +56,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-. "$PSScriptRoot\obs-ws.ps1"
-. "$PSScriptRoot\program-audio-guard.ps1"
+. (Join-Path $PSScriptRoot "obs-ws.ps1")
+. (Join-Path $PSScriptRoot "program-audio-guard.ps1")
 
 $Marker = "OBS_STREAMING_STARTED_BY_CI"
 
