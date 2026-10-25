@@ -719,8 +719,22 @@ impl RtmpPusher {
     /// the wall-clock anchor, so a sleep BETWEEN chunks only lets the next
     /// chunk burst until it catches up again; the slowdown has to move the
     /// anchor itself.
+    /// Before the first media chunk there is no anchor and nothing to slow.
     pub fn slow_pacing(&mut self, by: Duration) {
-        let _ = by;
+        match self.state.pacing_anchor.as_mut() {
+            Some(anchor) => {
+                *anchor += by;
+                tracing::debug!(
+                    by_ms = by.as_millis() as u64,
+                    last_output_ts_ms = self.state.last_output_ts_ms,
+                    "rtmp_push: pacing slowed (refill)"
+                );
+            }
+            None => tracing::debug!(
+                by_ms = by.as_millis() as u64,
+                "rtmp_push: pacing not slowed: no chunk sent yet"
+            ),
+        }
     }
 
     pub async fn close(&mut self) {

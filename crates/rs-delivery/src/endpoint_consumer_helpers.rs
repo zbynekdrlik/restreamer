@@ -34,9 +34,10 @@ pub(super) fn record_starvation_gap(
 
 /// #296 buffered-endpoint slow-refill throttle. Called after a successful
 /// chunk delivery on the NON-fast path. When the producer has published a
-/// below-target cushion deficit (`BufferState::refill_deficit_secs > 0`), add
-/// the small per-chunk sleep from `refill::refill_throttle_ms` so the endpoint
-/// delivers marginally slower than realtime (0.98x) and the cushion rebuilds.
+/// below-target cushion deficit (`BufferState::refill_deficit_secs > 0`), the
+/// endpoint delivers marginally slower than realtime (0.98x) so the cushion
+/// rebuilds: `refill::refill_throttle_ms` per chunk, moved into the rust
+/// pusher's pacing (`slow_pacing`, #424), or slept on the legacy ffmpeg path.
 ///
 /// Gating (all must hold to throttle):
 /// - `!is_fast` — fast endpoints use the #294 read-delay ratchet instead.
@@ -59,7 +60,6 @@ pub(super) async fn maybe_refill_throttle(
     pusher: Option<&mut impl Pushable>,
     stop_rx: &mut watch::Receiver<bool>,
 ) {
-    let _ = pusher;
     if is_fast {
         return;
     }
@@ -93,6 +93,12 @@ pub(super) async fn maybe_refill_throttle(
 
     let throttle_ms = crate::refill::refill_throttle_ms(deficit, chunk_duration_ms);
     if throttle_ms == 0 {
+        return;
+    }
+    // #424: the rust pusher paces every tag against a wall-clock anchor and
+    // would catch a sleep here up on the next chunk; slow its pacing instead.
+    if let Some(pusher) = pusher {
+        pusher.slow_pacing(std::time::Duration::from_millis(throttle_ms));
         return;
     }
     tokio::select! {

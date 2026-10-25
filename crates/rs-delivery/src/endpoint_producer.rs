@@ -218,13 +218,13 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 .await;
                 // #296: buffered endpoints re-measure their below-target cushion
                 // deficit on the same cadence and publish it for the consumer's
-                // slow-refill throttle. Uses the post-jump `chunk_id` (read
-                // pointer) so the deficit is consistent with any excess-lag
-                // correction just applied. Fast endpoints are excluded.
+                // slow-refill throttle. Measured at the consumer's last pushed
+                // chunk, not at this read pointer (#424). Fast endpoints are
+                // excluded.
                 if !is_fast {
                     crate::producer_lag::maybe_update_refill_deficit(
                         &fetcher,
-                        chunk_id,
+                        &stats,
                         delivery_delay_chunks,
                         typical_chunk_dur_ms,
                         &mut iters_since_refill_probe,

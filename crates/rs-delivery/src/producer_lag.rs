@@ -263,7 +263,7 @@ pub(crate) async fn detect_refill_deficit<F: ChunkFetcher>(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn maybe_update_refill_deficit<F: ChunkFetcher>(
     fetcher: &F,
-    current: i64,
+    stats: &crate::endpoint_stats::Stats,
     target_chunks: i64,
     typical_chunk_dur_ms: u64,
     iters: &mut u32,
@@ -278,6 +278,11 @@ pub(crate) async fn maybe_update_refill_deficit<F: ChunkFetcher>(
     }
     *iters = 0;
 
+    // #424: the cushion the viewers are behind is the one at the CONSUMER's
+    // last pushed chunk. The producer's own read pointer runs up to
+    // `PREFETCH_BUFFER_SIZE` + 2 chunks ahead in the prefetch channel, which
+    // read as a permanent false ~23 s deficit on every buffered endpoint.
+    let current = stats.lock().await.current_chunk_id;
     let deficit_secs = match detect_refill_deficit(fetcher, current, target_chunks).await {
         // A genuine sub-target deficit: convert chunks → seconds, flooring to 1
         // so a small-but-real deficit still signals the consumer to throttle.
@@ -294,6 +299,8 @@ pub(crate) async fn maybe_update_refill_deficit<F: ChunkFetcher>(
         tracing::info!(
             alias = %alias,
             deficit_secs,
+            delivered_chunk_id = current,
+            target_chunks,
             "Refill: cushion below target, delivering slower to rebuild"
         );
     } else if deficit_secs == 0 && *refilling {
