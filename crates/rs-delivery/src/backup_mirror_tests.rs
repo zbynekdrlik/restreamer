@@ -12,6 +12,7 @@ use std::io;
 enum Event {
     Push(Vec<u8>),
     Close,
+    Slow(std::time::Duration),
 }
 
 type Log = Arc<std::sync::Mutex<Vec<Event>>>;
@@ -67,7 +68,9 @@ impl Pushable for Mock {
         self.skew
     }
 
-    fn slow_pacing(&mut self, _by: std::time::Duration) {}
+    fn slow_pacing(&mut self, by: std::time::Duration) {
+        self.log.lock().unwrap().push(Event::Slow(by));
+    }
 
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
         std::mem::take(&mut self.events)
@@ -88,7 +91,7 @@ fn pushes(log: &Log) -> Vec<Vec<u8>> {
         .iter()
         .filter_map(|e| match e {
             Event::Push(d) => Some(d.clone()),
-            Event::Close => None,
+            Event::Close | Event::Slow(_) => None,
         })
         .collect()
 }
@@ -327,6 +330,26 @@ async fn a_repush_goes_to_the_primary_only() {
         "the backup already has a re-sent chunk"
     );
     assert_eq!(state.snapshot().dropped_chunks, 0);
+}
+
+/// #424: the refill slows the primary; the backup only ever gets the chunks
+/// the primary offers it, so it cannot run ahead.
+#[tokio::test(start_paused = true)]
+async fn a_refill_slows_the_primary_only() {
+    let primary = Mock::default();
+    let primary_log = Arc::clone(&primary.log);
+    let backup = Mock::default();
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(primary, backup, None);
+
+    tee.slow_pacing(std::time::Duration::from_millis(40));
+    settle(50, || false).await;
+
+    assert_eq!(
+        *primary_log.lock().unwrap(),
+        vec![Event::Slow(std::time::Duration::from_millis(40))]
+    );
+    assert!(backup_log.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

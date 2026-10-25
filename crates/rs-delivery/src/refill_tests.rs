@@ -147,16 +147,24 @@ async fn a_fast_endpoint_never_refills() {
     assert_ne!(stats.lock().await.delivery_mode, "refilling");
 }
 
-/// A live source one chunk per second, a 40 s cushion exactly at target, and
-/// a consumer pushing one chunk per second. The producer reads ~11 chunks
-/// ahead into the prefetch channel; that is not a drained cushion, so no
-/// refill may start.
-#[tokio::test(start_paused = true)]
-async fn the_prefetch_queue_is_not_a_refill_deficit() {
+/// What a refill probe saw: the producer's furthest read, the consumer's last
+/// pushed chunk, the `buffer_refill_started` details, and the deficit left on
+/// the shared state.
+struct RefillRun {
+    read: i64,
+    delivered: i64,
+    started: Vec<serde_json::Value>,
+    deficit_secs: u64,
+}
+
+/// A live source adding one chunk per second, a consumer pushing one chunk per
+/// second, a 40 s target, and a cushion of `cushion` chunks between the live
+/// edge and the consumer, for 150 s.
+async fn run_buffered_producer(cushion: i64) -> RefillRun {
     const TARGET_CHUNKS: i64 = 40;
     const START: i64 = 1;
     let chunks: Vec<(i64, Vec<u8>)> = (1..=400).map(|i| (i, vec![0u8; 1])).collect();
-    let fetcher = TimedMockFetcher::new(chunks, START + TARGET_CHUNKS).with_chunk_duration(1000);
+    let fetcher = TimedMockFetcher::new(chunks, START + cushion).with_chunk_duration(1000);
     let live_edge = fetcher.available_up_to();
     let max_fetched = fetcher.max_fetched_id();
 
@@ -197,25 +205,72 @@ async fn the_prefetch_queue_is_not_a_refill_deficit() {
     let _ = producer.await;
 
     let read = max_fetched.load(Ordering::Relaxed);
-    assert!(
-        read >= 4 * crate::producer_lag::LAG_PROBE_INTERVAL_ITERS as i64,
-        "the producer must have read enough chunks to run the refill probe a \
-         few times (read up to {read})"
-    );
     let delivered = stats.lock().await.current_chunk_id;
-    assert!(
-        read > delivered + 5,
-        "the producer must be ahead of the consumer (read {read}, pushed {delivered})"
-    );
     let (rows, _) = ring.since(0);
-    let started: Vec<_> = rows
+    let started = rows
         .iter()
         .filter(|r| r.action == Action::BufferRefillStarted)
         .map(|r| r.detail.clone())
         .collect();
+    RefillRun {
+        read,
+        delivered,
+        started,
+        deficit_secs: buffer_state.refill_deficit_secs.load(Ordering::Relaxed),
+    }
+}
+
+impl RefillRun {
+    /// The probe ran a few times, with the producer ahead of the consumer.
+    fn assert_probed_ahead_of_the_consumer(&self) {
+        let (read, delivered) = (self.read, self.delivered);
+        assert!(
+            read >= 4 * crate::producer_lag::LAG_PROBE_INTERVAL_ITERS as i64,
+            "the producer must have read enough chunks to run the refill probe \
+             a few times (read up to {read})"
+        );
+        assert!(
+            read > delivered + 5,
+            "the producer must be ahead of the consumer (read {read}, pushed {delivered})"
+        );
+    }
+}
+
+/// The cushion is exactly at target. The producer reads ~11 chunks ahead into
+/// the prefetch channel; that is not a drained cushion, so no refill starts.
+#[tokio::test(start_paused = true)]
+async fn the_prefetch_queue_is_not_a_refill_deficit() {
+    let run = run_buffered_producer(40).await;
+    run.assert_probed_ahead_of_the_consumer();
     assert!(
-        started.is_empty(),
-        "the cushion was at target, but a refill started: {started:?}"
+        run.started.is_empty(),
+        "the cushion was at target, but a refill started: {:?}",
+        run.started
     );
-    assert_eq!(buffer_state.refill_deficit_secs.load(Ordering::Relaxed), 0);
+    assert_eq!(run.deficit_secs, 0);
+}
+
+/// A cushion 20 chunks short of target is a real deficit of 20 s, measured at
+/// the consumer (the producer's read pointer would say ~31 s).
+#[tokio::test(start_paused = true)]
+async fn a_drained_cushion_is_measured_at_the_consumer() {
+    let run = run_buffered_producer(20).await;
+    run.assert_probed_ahead_of_the_consumer();
+    let deficits: Vec<u64> = run
+        .started
+        .iter()
+        .filter_map(|d| d["deficit_secs"].as_u64())
+        .collect();
+    // ±1 for the second the consumer is in the middle of; the producer's read
+    // pointer, ~11 chunks further on, would say ~31 s.
+    assert!(
+        deficits.len() == 1 && (19..=21).contains(&deficits[0]),
+        "one refill of ~20 s expected: {:?}",
+        run.started
+    );
+    assert!(
+        (19..=21).contains(&run.deficit_secs),
+        "{}",
+        run.deficit_secs
+    );
 }
