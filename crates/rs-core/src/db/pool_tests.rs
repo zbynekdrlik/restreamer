@@ -5,15 +5,17 @@
 /// A file-backed test DB. Dropping it must remove the DB and its SQLite
 /// `-wal`/`-shm` siblings, even while a pool still holds the file open (#421:
 /// 17 GB of orphaned WALs in dev2's /tmp).
+/// The DB lives in its own directory, and the directory's drop removes all
+/// three files.
 struct TempDb {
-    _file: tempfile::NamedTempFile,
+    _dir: tempfile::TempDir,
     path: std::path::PathBuf,
 }
 
 fn temp_db() -> TempDb {
-    let file = tempfile::NamedTempFile::new().unwrap();
-    let path = file.path().to_path_buf();
-    TempDb { _file: file, path }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    TempDb { _dir: dir, path }
 }
 
 fn sibling(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
