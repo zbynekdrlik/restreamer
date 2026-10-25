@@ -220,7 +220,7 @@ find-or-create body in the job (`e2e rtmp` is accepted because its key is
 synced from `YOUTUBE_STREAM_KEY`). Adding a gate on a new alias = seed it in
 the pin step first.
 
-## Syntax-check inline PowerShell before pushing (dev1 is Tier-0, no local pwsh)
+## Syntax-check inline PowerShell before pushing (no local pwsh)
 
 A PowerShell PARSE error in a `shell: powershell` step is NOT caught by an inner
 `try/catch` and fails the step (and, for an `if: always()` teardown, the job).

@@ -263,6 +263,5 @@ paths:
   - The Playwright spec uses the mock's `/api/v1/control-rooms*` routes and a second
     noServer WebSocketServer, `/api/v1/control-rooms/ws`. Its fixture frame is
     `e2e/fixtures/control-room-frame.jpg`; an inline base64 JPEG trips the secret scanner.
-- **dev2 gotcha.** `trunk build` writes to the repo-root `dist/`, not `leptos-ui/dist/`.
-  An `rsync --delete` of the repo to dev2 wipes it, and the mock then serves a stale or
-  missing UI. Re-run `trunk build` before Playwright.
+- **`trunk build` writes to the repo-root `dist/`**, not `leptos-ui/dist/`; the mock serves
+  that, so a stale or missing `dist/` means a stale UI. Re-run `trunk build` before Playwright.

@@ -125,7 +125,7 @@ Five failure layers discovered in 2026-06-14 crash test (event 9312 — all 7 en
 4. **No producer respawn** (spec Component #4a never implemented; endpoint tears down permanently on producer finish/panic) → #237
 5. **Test gap = meta-cause**: rescue tests are source-grep only (`rescue_tests.rs:550-829`), never exercise the trigger; fast tests assert rescue NEVER pushed; specced e2e crash job never built (#238); cargo-mutants excludes rescue::/consumer_task/producer_task/endpoint_loop
 
-**Fix constraint**: Cannot build/test locally (dev1 OOM) — all via CI. Crash verification needs forced kill on stream.lan (destructive → requires operator to not be in a live event).
+**Fix constraint**: Crash verification needs forced kill on stream.lan (destructive → requires operator to not be in a live event).
 
 ## S3 fetch MUST be bounded — `set_request_timeout` is a NO-OP on our backend (#252/#276, v0.29.12)
 
@@ -277,4 +277,4 @@ behaviorally identical to permanent/threshold-only there.
 returns `None` for the noise rows (mirror phase, `consecutive_failures=1/2`,
 `permanent:false`) and `Some` for the real ones (`consecutive_failures=3`,
 `permanent:true`, `RescueActivated`). RED fails on the action-only classifier.
-`cargo test -p rs-core --lib notify` on dev2.
+`cargo test -p rs-core --lib notify`.
