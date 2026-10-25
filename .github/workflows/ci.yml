@@ -2006,6 +2006,21 @@ jobs:
           Write-Host "=== Linux package (Restreamer + embedded service + www) ==="
           Get-ChildItem artifacts/deb/
 
+      # #417: a deploy restarts restreamer.service, which kills a camera-box
+      # av-gate session streaming through it (camera-box issue 1404). The deploy
+      # holds camera-box's rig lease like the OBS jobs do.
+      - name: "Rig lease: wait out a camera-box hold before the restart (#349, #417)"
+        shell: pwsh
+        timeout-minutes: 65
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
+
+      - name: "Rig lease: take it before the restart (#349, #417)"
+        shell: pwsh
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
+
       # Live-delivery guard (#229). A late CI deploy must NEVER restart the app
       # while the VPS is actively delivering a live event -- that bounces the
       # operator window, empties the local buffer, and caused the 2026-05-20
@@ -2295,6 +2310,14 @@ jobs:
             exit 1
           }
 
+      - name: "Rig lease: release it (#349)"
+        if: always() && env.RIG_LEASE_HELD == 'true'
+        shell: pwsh
+        timeout-minutes: 2
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Release
+
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
@@ -2310,9 +2333,26 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, linux, stream-lan]
-    timeout-minutes: 20
+    # 20 min of test plus the rig-lease wait (#417): at most the 60-min lease
+    # budget (RIG_LEASE_BUDGET_S) while camera-box holds the rig.
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
+
+      # #417: this job publishes its own stream into the inpoint, which a
+      # camera-box av-gate session on the same box would collide with: it holds
+      # the rig lease like the OBS jobs do.
+      - name: "Rig lease: wait out a camera-box hold before the test publish (#349, #417)"
+        shell: pwsh
+        timeout-minutes: 65
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-wait.ps1
+
+      - name: "Rig lease: take it before the test publish (#349, #417)"
+        shell: pwsh
+        timeout-minutes: 62 # waits at most the rest of the job's 60-min lease budget
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Acquire
 
       - name: Verify Restreamer is running
         shell: pwsh
@@ -3228,6 +3268,14 @@ jobs:
             Write-Host "Local deactivation failed: $_"
           }
           exit 0
+
+      - name: "Rig lease: release it (#349)"
+        if: always() && env.RIG_LEASE_HELD == 'true'
+        shell: pwsh
+        timeout-minutes: 2
+        env:
+          RIG_LEASE_TOKEN: ${{ secrets.RIG_LEASE_TOKEN }}
+        run: pwsh -NoProfile -File scripts/ci/rig-lease-hold.ps1 -Action Release
 
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
