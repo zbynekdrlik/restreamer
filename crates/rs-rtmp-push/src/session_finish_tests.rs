@@ -104,3 +104,85 @@ async fn send_queue_counts_unacknowledged_bytes() {
     let total = reader.await.unwrap();
     assert!(total >= written, "read {total} of at least {written}");
 }
+
+/// A transport that records every byte written and never delivers any.
+struct WireLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[async_trait::async_trait]
+impl bytesio::bytesio::TNetIO for WireLog {
+    async fn write(
+        &mut self,
+        bytes: bytes::Bytes,
+    ) -> Result<(), bytesio::bytesio_errors::BytesIOError> {
+        self.0.lock().unwrap().extend_from_slice(&bytes);
+        Ok(())
+    }
+    async fn read(&mut self) -> Result<bytes::BytesMut, bytesio::bytesio_errors::BytesIOError> {
+        std::future::pending().await
+    }
+    async fn read_timeout(
+        &mut self,
+        _duration: Duration,
+    ) -> Result<bytes::BytesMut, bytesio::bytesio_errors::BytesIOError> {
+        std::future::pending().await
+    }
+    fn get_net_type(&self) -> bytesio::bytesio::NetType {
+        bytesio::bytesio::NetType::TCP
+    }
+}
+
+fn session_over(wire: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>, poisoned: bool) -> Session {
+    use std::sync::Arc;
+    let io: Arc<tokio::sync::Mutex<Box<dyn bytesio::bytesio::TNetIO + Send + Sync>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(WireLog(Arc::clone(wire)))));
+    Session {
+        packetizer: rtmp::chunk::packetizer::ChunkPacketizer::new(Arc::clone(&io)),
+        io,
+        msg_stream_id: 1,
+        poisoned: Arc::new(std::sync::atomic::AtomicBool::new(poisoned)),
+        read_loop_handle: None,
+        signals: Arc::default(),
+        send_queue: SendQueue::unmeasured(),
+        stream_name: "key".to_string(),
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[tokio::test]
+async fn finish_writes_fcunpublish_then_delete_stream() {
+    let wire = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = session_over(&wire, false).finish(MAX).await;
+
+    assert!(report.unpublished, "{report:?}");
+    assert_eq!(report.outcome, DrainOutcome::Unmeasured, "{report:?}");
+    let sent = wire.lock().unwrap().clone();
+    let fc = find(&sent, &fcunpublish_body(4.0, "key")).expect("FCUnpublish on the wire");
+    let del = find(&sent, &delete_stream_body(5.0, 1)).expect("deleteStream on the wire");
+    assert!(fc < del, "FCUnpublish goes first");
+}
+
+#[tokio::test]
+async fn finish_on_a_dead_session_writes_nothing() {
+    let wire = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = session_over(&wire, true).finish(MAX).await;
+
+    assert!(!report.unpublished, "{report:?}");
+    assert_eq!(report.outcome, DrainOutcome::SessionDead, "{report:?}");
+    assert!(wire.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_unreadable_queue_reads_none() {
+    assert_eq!(SendQueue::unmeasured().unacked_bytes(), None);
+}
+
+#[test]
+fn finish_polls_cover_the_bound() {
+    assert_eq!(finish_polls(Duration::ZERO), 1);
+    assert_eq!(finish_polls(Duration::from_millis(49)), 1);
+    assert_eq!(finish_polls(Duration::from_millis(100)), 3);
+    assert_eq!(finish_polls(Duration::from_secs(15)), 301);
+}

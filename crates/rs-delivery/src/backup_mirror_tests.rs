@@ -347,7 +347,8 @@ async fn finish_finishes_the_primary_and_stops_the_backup() {
     let backup_dropped = Arc::clone(&backup.dropped.0);
     let mut tee = tee_with(primary, backup, None);
 
-    tee.finish().await;
+    // Through the trait, as the consumer's end paths reach it.
+    Pushable::finish(&mut tee).await;
     settle(100, || backup_dropped.load(Ordering::SeqCst)).await;
 
     assert_eq!(*primary_log.lock().unwrap(), vec![Event::Finish]);

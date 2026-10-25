@@ -40,6 +40,17 @@ a ~2 s content hole. Three layers fix it; keep all three.
   `shutdown()` closes both and awaits the backup task; the rescue paths use
   it before building the next pusher on the same key (no overlap). Dropping
   the tee aborts the backup task.
+- **`finish()` is the endpoint's END** (#424): the source end (#408) and the
+  consumer's stop. The primary sends FCUnpublish + deleteStream and waits up to
+  `FINISH_MAX_WAIT` (15 s) until the socket's unacknowledged bytes
+  (`TIOCOUTQ`) are 0; then the backup is stopped. A plain close used to drop
+  the 8 MB send queue: a close with unread acks is a reset, and the VOD lost
+  its last ~8 s. The log line `rtmp_push: publish finished (#424)` carries
+  `queued_at_start` / `waited_ms` / the outcome. The rescue switch keeps
+  `shutdown()`, because it must not wait on a dead link.
+- **`slow_pacing(by)` is the #296 refill** (#424). It moves the pusher's pacing
+  anchor; the tee forwards it to the primary only. A sleep between chunks
+  does nothing: per-tag pacing catches it up on the next chunk.
 - `repush_flv_bytes` (the re-send below) goes to the primary only: the backup
   already has that chunk.
 - **The live consumer keeps the backup ONE chunk ahead** (`feed_backup_ahead`,

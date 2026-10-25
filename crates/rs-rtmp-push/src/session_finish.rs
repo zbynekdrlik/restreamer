@@ -60,6 +60,15 @@ impl SendQueue {
         }
     }
 
+    /// A queue that cannot be read (tests over a fake transport).
+    #[cfg(test)]
+    pub(crate) fn unmeasured() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            fd: -1,
+        }
+    }
+
     /// Bytes written but not yet acknowledged by the peer. `None` where the
     /// platform cannot tell.
     #[allow(unsafe_code)]
@@ -70,7 +79,10 @@ impl SendQueue {
             // SAFETY: `fd` is the session's own socket, open while the session
             // lives; TIOCOUTQ writes one c_int (unsent plus unacknowledged).
             let rc = unsafe { libc::ioctl(self.fd, libc::TIOCOUTQ, &mut n) };
-            (rc == 0 && n >= 0).then_some(n as u64)
+            if rc != 0 {
+                return None;
+            }
+            u64::try_from(n).ok()
         }
         #[cfg(not(target_os = "linux"))]
         None
@@ -108,6 +120,11 @@ pub(crate) fn drain_step(
     }
 }
 
+/// How many queue reads fit in `max_wait`, plus the first one at 0.
+pub(crate) fn finish_polls(max_wait: Duration) -> u128 {
+    max_wait.as_millis() / FINISH_POLL.as_millis() + 1
+}
+
 /// What `Session::finish` did, for the log and the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinishReport {
@@ -136,18 +153,23 @@ impl Session {
                 false
             }
         };
-        let outcome = loop {
+        // Bounded by a count as well as by `max_wait`, so the wait ends even if
+        // the clock or the queue reading misbehaves.
+        let polls = finish_polls(max_wait);
+        let mut outcome = DrainOutcome::TimedOut;
+        for _ in 0..polls {
             let step = drain_step(
                 self.send_queue.unacked_bytes(),
                 self.poisoned.load(Ordering::Relaxed),
                 started.elapsed(),
                 max_wait,
             );
-            if let Some(outcome) = step {
-                break outcome;
+            if let Some(done) = step {
+                outcome = done;
+                break;
             }
             tokio::time::sleep(FINISH_POLL).await;
-        };
+        }
         let report = FinishReport {
             outcome,
             unpublished,
