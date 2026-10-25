@@ -24,5 +24,6 @@ pub use error::{
     is_exponential, map_read_err, may_lose_chunk, reconnect_delay_ms,
 };
 pub use pusher::RtmpPusher;
+pub use session::{DrainOutcome, FINISH_MAX_WAIT, FinishReport};
 pub use skew::{GuardMode, MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};

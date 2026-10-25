@@ -37,6 +37,10 @@ impl Pushable for Acked {
         0
     }
 
+    async fn finish(&mut self) {
+        self.close().await
+    }
+
     fn slow_pacing(&mut self, _by: std::time::Duration) {}
 
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
@@ -63,6 +67,10 @@ impl Pushable for Canned {
 
     fn av_skew_ms(&self) -> i64 {
         0
+    }
+
+    async fn finish(&mut self) {
+        self.close().await
     }
 
     fn slow_pacing(&mut self, _by: std::time::Duration) {}

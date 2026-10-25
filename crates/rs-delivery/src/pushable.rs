@@ -24,6 +24,9 @@ pub(crate) trait Pushable {
         data: &[u8],
     ) -> impl std::future::Future<Output = Result<(), PushError>> + Send;
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
+    /// #424: end the publish for good without losing its tail (unpublish,
+    /// wait for the queued bytes, close). `close` stays the reconnect hook.
+    fn finish(&mut self) -> impl std::future::Future<Output = ()> + Send;
     fn reconnect_count(&self) -> u32;
     /// Current signed content-PTS A/V skew in ms (positive = audio behind
     /// video). Surfaced to per-endpoint telemetry (issue #257).
@@ -62,6 +65,10 @@ impl Pushable for RtmpPusher {
 
     async fn close(&mut self) {
         RtmpPusher::close(self).await
+    }
+
+    async fn finish(&mut self) {
+        RtmpPusher::finish(self, rs_rtmp_push::FINISH_MAX_WAIT).await;
     }
 
     fn reconnect_count(&self) -> u32 {

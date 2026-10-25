@@ -88,6 +88,10 @@ impl Pushable for RecordingPusher {
         0
     }
 
+    async fn finish(&mut self) {
+        self.close().await
+    }
+
     fn slow_pacing(&mut self, _by: std::time::Duration) {}
 
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
@@ -179,6 +183,10 @@ async fn rescue_push_errors_do_not_stamp_last_push_ok() {
         }
         fn av_skew_ms(&self) -> i64 {
             0
+        }
+
+        async fn finish(&mut self) {
+            self.close().await
         }
 
         fn slow_pacing(&mut self, _by: std::time::Duration) {}

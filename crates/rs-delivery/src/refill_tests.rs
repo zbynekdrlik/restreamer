@@ -42,6 +42,9 @@ impl Pushable for PacingRecorder {
     fn av_skew_ms(&self) -> i64 {
         0
     }
+    async fn finish(&mut self) {
+        self.close().await
+    }
     fn slow_pacing(&mut self, by: Duration) {
         self.slowed.push(by);
     }
