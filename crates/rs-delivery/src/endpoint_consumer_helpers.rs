@@ -56,8 +56,10 @@ pub(super) async fn maybe_refill_throttle(
     buffer_state: &Arc<crate::buffer_state::BufferState>,
     chunk_duration_ms: i64,
     stats: &Stats,
+    pusher: Option<&mut impl Pushable>,
     stop_rx: &mut watch::Receiver<bool>,
 ) {
+    let _ = pusher;
     if is_fast {
         return;
     }

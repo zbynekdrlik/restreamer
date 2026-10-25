@@ -465,6 +465,8 @@ mod fast_upload_gap_regression {
             0
         }
 
+        fn slow_pacing(&mut self, _by: std::time::Duration) {}
+
         fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
             // This mock does not model the #367 invariant guard.
             Vec::new()

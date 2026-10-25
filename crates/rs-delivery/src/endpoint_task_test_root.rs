@@ -12,6 +12,8 @@ mod fast_self_healing_tests;
 mod flv_tests;
 #[path = "endpoint_task_reconnect_tests.rs"]
 mod reconnect_tests;
+#[path = "refill_tests.rs"]
+mod refill_tests;
 #[path = "rescue_behavioral_tests.rs"]
 mod rescue_behavioral_tests;
 #[path = "rescue_endpoint_loop_tests.rs"]

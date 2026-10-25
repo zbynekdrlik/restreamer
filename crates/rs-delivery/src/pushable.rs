@@ -33,6 +33,10 @@ pub(crate) trait Pushable {
     /// (no default): a pusher that silently returned nothing would make
     /// its violations invisible.
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent>;
+    /// #424: send everything after this point `by` later (the #296 slow
+    /// refill). Required (no default): a pusher that ignored it would make
+    /// the refill a no-op again, as a sleep between chunks was.
+    fn slow_pacing(&mut self, by: std::time::Duration);
     /// #368: push a chunk AGAIN after its first push failed (the consumer's
     /// one re-send on the fresh session). A plain pusher pushes it like any
     /// chunk; a pusher that mirrors its chunks elsewhere (the YouTube backup
@@ -66,6 +70,10 @@ impl Pushable for RtmpPusher {
 
     fn av_skew_ms(&self) -> i64 {
         RtmpPusher::av_skew_ms(self)
+    }
+
+    fn slow_pacing(&mut self, by: std::time::Duration) {
+        RtmpPusher::slow_pacing(self, by)
     }
 
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {

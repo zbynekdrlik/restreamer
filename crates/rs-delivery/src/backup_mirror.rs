@@ -464,6 +464,12 @@ impl<P: Pushable + Send> Pushable for TeePusher<P> {
         self.primary.av_skew_ms()
     }
 
+    /// The primary only: the backup gets its chunks from the primary's
+    /// offers, so it cannot run ahead of it.
+    fn slow_pacing(&mut self, by: std::time::Duration) {
+        self.primary.slow_pacing(by)
+    }
+
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
         self.primary.take_av_invariant_events()
     }

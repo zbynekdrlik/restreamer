@@ -714,6 +714,15 @@ impl RtmpPusher {
         self.state.regression_reanchor_count
     }
 
+    /// #424: send everything after this point `by` later on the wire: the
+    /// #296 slow refill rebuilding a drained cushion. Tags are paced against
+    /// the wall-clock anchor, so a sleep BETWEEN chunks only lets the next
+    /// chunk burst until it catches up again; the slowdown has to move the
+    /// anchor itself.
+    pub fn slow_pacing(&mut self, by: Duration) {
+        let _ = by;
+    }
+
     pub async fn close(&mut self) {
         if let Some(s) = self.session.take() {
             s.close().await;

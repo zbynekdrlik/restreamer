@@ -745,6 +745,7 @@ async fn consumer_task<P: OutputProcessFactory>(
             &buffer_state,
             chunk_duration_ms,
             &stats,
+            rust_pusher.as_mut(),
             &mut stop_rx,
         )
         .await;
