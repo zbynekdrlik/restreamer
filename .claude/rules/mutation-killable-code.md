@@ -94,7 +94,7 @@ From the #357 av-gate lane:
   `rounds * 1`: the loop test just finishes faster. Put the step in a pure fn
   (`next_failed_rounds`) and assert its boundaries.
 
-Run it on dev2 before returning a lane, with the recipe in
+Run it before returning a lane, with the recipe in
 `.claude/rules/ci-mutation-gate.md`. The excludes and levers now live in
 `.cargo/mutants.toml`, so there is nothing to copy from ci.yml.
 `missed.txt` and `timeout.txt` must be empty.

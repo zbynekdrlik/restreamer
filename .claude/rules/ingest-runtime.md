@@ -159,12 +159,11 @@ app-wide runtime, two ~5-7 s stalls on 2026-10-04 cost 416 frames.
 - Decisions live in `ingest_priority.rs` behind `PriorityOs`, tested with a
   fake. `ingest_priority_windows.rs` holds only the kernel32 calls and is
   in `.cargo/mutants.toml` `exclude_globs`.
-- Type-check the Windows branch from dev2 with a scratch crate that pulls
+- Type-check the Windows branch from Linux with a scratch crate that pulls
   only `ingest_priority.rs` in through `#[path]` (deps: `log`, `windows-sys`
   0.61.2 with `Win32_System_Threading`), then
-  `cargo +1.99.0 clippy --offline --all-targets --target x86_64-pc-windows-msvc -- -D warnings`.
-  The `x86_64-pc-windows-msvc` std is installed for both dev2 toolchains
-  (stable and 1.99.0) since 2026-10-06.
+  `cargo +1.99.0 clippy --offline --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
+  (needs that toolchain's `x86_64-pc-windows-msvc` std target).
 
 ## Blocking calls stay off async workers
 

@@ -89,8 +89,8 @@ runs on **`cargo check` too**, not just `cargo tauri build`. Consequences:
   artifact to `src-tauri/rs-delivery-linux` + its `.sha256`) BEFORE `cargo tauri build`. This is a
   strong guard: a broken wiring fails the build LOUD, never ships an installer silently missing the
   binary.
-- To `cargo check` src-tauri on dev2 you must stage two placeholders first (`truncate -s 0
-  rs-delivery-linux; : > rs-delivery-linux.sha256`) — see the `dev2-build-verify` skill.
+- To `cargo check` src-tauri you must stage two placeholders first (`truncate -s 0
+  rs-delivery-linux; : > rs-delivery-linux.sha256`).
 - The one silent-failure point is DROPPING the `bundle.resources` declaration itself (Tauri then just
   won't bundle it, no error) — guarded by the `test-integrity` `jq` self-check in ci.yml.
 ## create_server retries transient errors + adopts-on-409 (#223)

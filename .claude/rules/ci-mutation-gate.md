@@ -77,10 +77,10 @@ tests, add it to that override, or make it independent. Then run
 `cargo nextest run --cargo-profile mutants -p <crate>` 2-3 times; it must be
 green.
 
-## Run it locally (dev2)
+## Run it locally
 
 ```bash
-git diff origin/main...HEAD > pr.diff     # on dev1; scp to the dev2 lane copy
+git diff origin/main...HEAD > pr.diff
 SQLX_OFFLINE=true CARGO_INCREMENTAL=1 cargo mutants --list --in-diff pr.diff | wc -l
 SQLX_OFFLINE=true CARGO_INCREMENTAL=1 cargo mutants --in-diff pr.diff --in-place \
   --baseline=run --timeout 120 --build-timeout 600 --output <dir> [--shard k/N]
