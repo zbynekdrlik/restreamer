@@ -21,6 +21,10 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
+# #424: TIOCOUTQ (the push socket's unacknowledged bytes) in Session::finish.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 streamhub = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

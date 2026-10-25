@@ -2792,6 +2792,7 @@ dependencies = [
  "bytes",
  "bytesio",
  "futures",
+ "libc",
  "log",
  "rcgen",
  "rtmp",

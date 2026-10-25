@@ -756,8 +756,8 @@ async fn consumer_task<P: OutputProcessFactory>(
         p.kill().await;
     }
     if let Some(mut pusher) = rust_pusher {
-        // #368: closes the primary AND stops the backup mirror.
-        pusher.shutdown().await;
+        // #424: unpublishes and drains the primary, stops the backup (#368).
+        pusher.finish().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
 }

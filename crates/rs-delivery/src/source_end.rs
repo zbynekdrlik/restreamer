@@ -122,7 +122,7 @@ pub(crate) async fn idle_until_resume(
 ) -> Option<PrefetchedChunk> {
     let alias = target.alias.as_str();
     if let Some(mut p) = rust_pusher.take() {
-        p.shutdown().await;
+        p.finish().await;
     }
     stats.lock().await.delivery_mode = ENDED_DELIVERY_MODE.to_string();
     if let Some(r) = audit_ring {
