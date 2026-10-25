@@ -53,17 +53,17 @@ upgrades, tailscale IP) are obsolete.
 | Property | Value |
 |---|---|
 | Host | `stream-pp`, LAN `10.77.8.204` (PP LAN, gateway 10.77.8.1) |
-| From dev1 | MCP `linux-stream-pp` (remoteos MCP, `http://stream-pp.lan:8092/mcp`; dev1 resolves `stream-pp.lan` to 10.76.8.204), or `ssh newlevel@10.76.8.204` (companion-pp subnet route). **No tailscale on the box** (owner, 2026-10-11). |
-| User | `newlevel` (dev1 key in authorized_keys; `sudo` needs the rig password, which camera-box/owner hold) |
+| From dev1 | MCP `linux-stream-pp` (remoteos MCP, `http://stream-pp.lan:8092/mcp`; dev1 resolves `stream-pp.lan` to 10.76.8.204); from scripts `remoteos-call linux-stream-pp Shell '<cmd>'` / `put` / `get` (#422). ssh `newlevel@10.76.8.204` is break-glass only, for when the MCP server is down. **No tailscale on the box** (owner, 2026-10-11). |
+| User | `newlevel`, passwordless `sudo -n` since 24.10.2026 (owner) |
 | Restreamer | apt-installed `.deb` (`dpkg -s restreamer`), `systemctl --user` unit `restreamer.service` (GUI operator window since #393, enabled; the kiosk autostart also starts it) |
 | Config / data | `~/.config/restreamer/config.json` (own `client_uuid`, obs ws `127.0.0.1:4455` without auth) / `~/.local/share/restreamer` (DB, chunks, `restreamer.log`, `logs/stall.log`) |
 | Dashboard | `http://10.77.8.204:8910` on the PP LAN (`http://10.76.8.204:8910` from dev1, Playwright works) |
 | OBS ingest | `rtmp://127.0.0.1:1234/live` (camera-box sets it); restreamer may only Start/Stop streaming via its API. Never put `PRO` on program/preview. |
 
-**Upgrade:** take the `restreamer-linux-deb` artifact (ci.yml) or the `Restreamer_<ver>_amd64.deb`
-release asset, `scp` it to stream-pp and have someone with sudo run `apt install ./<deb>`, then
-`systemctl --user restart restreamer` (with `XDG_RUNTIME_DIR=/run/user/1000` over ssh). Verify:
-`dpkg -s restreamer`, `/api/v1/status` 200, the dashboard DOM version, `obs/status` connected.
+**Upgrade:** the self-upgrade timer does it (#323). By hand: the recipe in
+`.claude/rules/linux-build.md` ("Upgrading a Linux box by hand", `remoteos-call put` + `Shell`
+with `sudo -n dpkg -i`). Verify: `dpkg -s restreamer`, `/api/v1/status` 200, the dashboard DOM
+version, `obs/status` connected.
 
 **Ingest-only test without a VPS:** `pp-ingest-test.sh` recipe (2026-10-11). Create or reuse the
 event `PP-Ingest-Test`, `POST /events/{id}/activate`, `POST /obs/start-stream`, sample
@@ -81,8 +81,8 @@ plus the live mixer audio (likely music, a YouTube ban risk), and PP has no YT-s
 - Teardown: `delivery/stop`, deactivate, kill ffmpeg, `vps_orphan_count` 0.
 - Expect YouTube `bitrateLow` (the stream is configured for 2160p) and boot-time
   `vps_unreachable` warns.
-- Gotcha: `ssh pp 'pkill -f pp-fullpath-test'` kills its OWN ssh shell (exit 255), because the
-  pattern is in that command line too. Use `pkill -f '[p]p-fullpath-test'`.
+- Gotcha: `pkill -f pp-fullpath-test` run through a remote shell kills that shell too (exit
+  255), because the pattern is in its own command line. Use `pkill -f '[p]p-fullpath-test'`.
 
 ## Object storage — ONE bucket exists: `restreamer-chunks-fsn1`
 
