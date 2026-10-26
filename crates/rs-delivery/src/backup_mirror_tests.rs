@@ -12,6 +12,7 @@ use std::io;
 enum Event {
     Push(Vec<u8>),
     Close,
+    Finish,
 }
 
 type Log = Arc<std::sync::Mutex<Vec<Event>>>;
@@ -67,6 +68,10 @@ impl Pushable for Mock {
         self.skew
     }
 
+    async fn finish(&mut self) {
+        self.log.lock().unwrap().push(Event::Finish);
+    }
+
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
         std::mem::take(&mut self.events)
     }
@@ -86,7 +91,7 @@ fn pushes(log: &Log) -> Vec<Vec<u8>> {
         .iter()
         .filter_map(|e| match e {
             Event::Push(d) => Some(d.clone()),
-            Event::Close => None,
+            Event::Close | Event::Finish => None,
         })
         .collect()
 }
@@ -325,6 +330,27 @@ async fn a_repush_goes_to_the_primary_only() {
         "the backup already has a re-sent chunk"
     );
     assert_eq!(state.snapshot().dropped_chunks, 0);
+}
+
+/// #424: the end of an endpoint finishes the primary (unpublish + wait for
+/// its send queue) and stops the backup.
+#[tokio::test(start_paused = true)]
+async fn finish_finishes_the_primary_and_stops_the_backup() {
+    let primary = Mock::default();
+    let primary_log = Arc::clone(&primary.log);
+    let backup = Mock::default();
+    let backup_dropped = Arc::clone(&backup.dropped.0);
+    let mut tee = tee_with(primary, backup, None);
+
+    // Through the trait, as the consumer's end paths reach it.
+    Pushable::finish(&mut tee).await;
+    settle(100, || backup_dropped.load(Ordering::SeqCst)).await;
+
+    assert_eq!(*primary_log.lock().unwrap(), vec![Event::Finish]);
+    assert!(
+        backup_dropped.load(Ordering::SeqCst),
+        "the backup is stopped"
+    );
 }
 
 #[tokio::test]

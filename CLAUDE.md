@@ -16,8 +16,8 @@ auto-load on their `paths:` — you do not invoke those.
 - cargo-mutants survivors / TIMEOUTs (log-only branches, cross-crate tests, paused-clock watchdog) → `.claude/rules/mutation-killable-code.md` (auto)
 - authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
-- process-stall detector (`logs/stall.log`, ProcessStall, Windows-cfg verify on dev2) → `.claude/rules/process-stall-detector.md` (auto)
-- CI Mutation Testing job is fake-green; local diff-scoped mutation recipe on dev2 → `.claude/rules/ci-mutation-gate.md` (auto)
+- process-stall detector (`logs/stall.log`, ProcessStall, Windows-cfg verify from Linux) → `.claude/rules/process-stall-detector.md` (auto)
+- CI Mutation Testing job is fake-green; local diff-scoped mutation recipe → `.claude/rules/ci-mutation-gate.md` (auto)
 - DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
 - installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
@@ -30,7 +30,6 @@ auto-load on their `paths:` — you do not invoke those.
 - CI's stream-OBS contract (Start/Stop + reads only, readiness check, no-mutation guard) → `.claude/rules/stream-obs-ci.md` (auto)
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
 - Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
-- Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
 - leptos-ui timers / detached async / reactive-disposal panics on SPA nav → `.claude/rules/leptos-ownership.md` (auto-loads on `leptos-ui/src/**`)
 - RTMP ingest runtime thread / Windows process+thread priorities / blocking calls off async workers → `.claude/rules/ingest-runtime.md` (auto)
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
@@ -38,7 +37,7 @@ auto-load on their `paths:` — you do not invoke those.
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - Linux build for stream-pp (.deb, systemd --user GUI unit (#393 operator window), XDG paths via `rs_core::paths`) → `.claude/rules/linux-build.md` (auto)
-- VPS `delivery_mode` in CI gates (`refilling` is normal delivery, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
+- VPS `delivery_mode` in CI gates (no speed change ever: `refilling` is gone since #424, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
 - frontend E2E WebSocket pushes (`waitForWsClient` + `broadcast`, the #377 guard) → `.claude/rules/e2e-ws-broadcast.md` (auto)
 - Chrome warnings outside `console` (CDP Log, raw Chrome over CDP, `--password-store=basic`) → `.claude/rules/e2e-browser-log.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
@@ -121,12 +120,7 @@ Full E2E test coverage is the primary goal. Every feature ships with E2E tests c
 - `deploy-stream-lan` job MUST run on every push (use `always()` in complex `if` conditions)
 - E2E gate requires both frontend and YouTube E2E to pass — the expensive stream-lan e2e jobs (`e2e-streaming-test`, `e2e-obs-youtube-test`, `e2e-fb-push-stream-lan`) require `needs.deploy-stream-lan.result == 'success'` (STRICT — not `!= 'failure'`, which used to let them run even after deploy was SKIPPED by an upstream compile/lint/test failure, #267)
 - Every CSS class referenced in UI components MUST be defined in the stylesheet
-
-### Local Build Policy — Tier 0 (dev1 OOM)
-
-NO local `cargo build`, `cargo test`, `cargo check`, or `cargo clippy` on dev1 — it has 7.5 GB RAM and OOMs (target/ hit 23 GB; 2026-06-10 operator directive). **`cargo fmt --all -- --check` only** locally. Purge `target/` whenever found. All compilation, clippy, and tests run on CI.
-
-Never pipe a pre-push gate through `tail`/`grep` then `&& echo OK` — it swallows the real exit code; use `$?` or `${PIPESTATUS[0]}`.
+- Never pipe a pre-push gate through `tail`/`grep` then `&& echo OK` — it swallows the real exit code; use `$?` or `${PIPESTATUS[0]}`.
 
 ### Push Discipline — ONE In-Flight CI Run at a Time
 

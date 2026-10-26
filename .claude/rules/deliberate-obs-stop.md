@@ -75,8 +75,9 @@ reconnect keeps the outage path (keepalive, rescue, alerts).
      Without the probe, every endpoint would wait forever (review of #408).
    - `note_fetched` on every sent chunk clears the end when a chunk past it
      arrives.
-   - A buffered endpoint resumes at the live edge with no cushion, and the #296
-     slow refill rebuilds it. Rescue used to hold it about 120 s first.
+   - A buffered endpoint resumes at the live edge with no cushion. Nothing
+     rebuilds it within the event: the push never runs slower than real time
+     (#424). Rescue used to hold it about 120 s first.
 
 ## Mapping and alerts
 

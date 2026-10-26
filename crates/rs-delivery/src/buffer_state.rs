@@ -41,17 +41,13 @@ pub struct BufferState {
     pub fast_delay_target_secs: AtomicU64,
     /// #296: how far (seconds) a BUFFERED (non-fast) endpoint's delivered
     /// cushion currently sits BELOW its configured target. 0 = at/above
-    /// target (nothing to refill) — the steady state. Written by the
-    /// producer's periodic live-edge HEAD-probe (`producer_lag`), read by the
-    /// consumer to decide whether to deliver marginally slower than realtime
-    /// (0.98x) and rebuild the cushion after a source gap (`refill` module).
-    /// Mirrors `fast_delay_target_secs` in shape (an AtomicU64 on the shared
-    /// state) but the opposite direction: fast endpoints RAISE a read-delay
-    /// target; buffered endpoints REFILL a drained delivery cushion. Fast
-    /// endpoints never write it (they use the #294 ratchet instead), so it
-    /// stays 0 for them and the consumer's throttle is gated `!is_fast`.
-    /// Cleared to 0 by the producer when it goes stalled (outage) so no
-    /// throttle fires while there is no source to rebuild from.
+    /// target, the steady state. Written by the producer's periodic live-edge
+    /// HEAD-probe (`producer_lag`), measured at the consumer's last pushed
+    /// chunk (#424). Information only: the push path never reads it, since
+    /// YouTube flags any off-real-time ingest (a source-scan test,
+    /// `refill_tests::nothing_in_the_push_path_reads_the_deficit`, keeps it so). Fast
+    /// endpoints never write it. Cleared to 0 by the producer when it goes
+    /// stalled (outage).
     pub refill_deficit_secs: AtomicU64,
     /// #408: the end of the source after a deliberate OBS stop, shared by
     /// every endpoint of the event (`EndpointHandle::spawn` hands in the

@@ -48,6 +48,11 @@ use crate::{PushError, map_read_err};
 // -------------------------------------------------------------------------
 const NEGOTIATE_TIMEOUT_SECS: u64 = 30;
 
+#[path = "session_finish.rs"]
+mod finish;
+pub(crate) use finish::SendQueue;
+pub use finish::{DrainOutcome, FINISH_MAX_WAIT, FinishReport};
+
 // -------------------------------------------------------------------------
 // Session
 // -------------------------------------------------------------------------
@@ -76,6 +81,10 @@ pub struct Session {
     poisoned: Arc<AtomicBool>,
     /// Background task handle; aborted on `Drop` or `close`.
     read_loop_handle: Option<tokio::task::JoinHandle<()>>,
+    /// #424: the socket's unacknowledged bytes, read by `finish`.
+    send_queue: SendQueue,
+    /// The published stream name, for FCUnpublish.
+    stream_name: String,
     /// #368: upstream Acknowledgements + answered PingRequests, recorded by
     /// the read loop.
     signals: Arc<UpstreamSignals>,
@@ -152,6 +161,7 @@ impl Session {
             tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
         }
 
+        let send_queue = SendQueue::of(&tcp_stream);
         // Wrap the connected stream in either TcpIO (rtmp://) or TlsIO (rtmps://).
         // The negotiate / read-loop machinery below operates on Box<dyn TNetIO>
         // and is therefore transparent to wire encryption.
@@ -187,6 +197,8 @@ impl Session {
             poisoned,
             read_loop_handle: Some(read_loop_handle),
             signals,
+            send_queue,
+            stream_name: stream_name.clone(),
         };
 
         // --- 7. Announce the stream via @setDataFrame onMetaData -------------

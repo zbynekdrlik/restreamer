@@ -95,30 +95,21 @@ paths:
   again under `apt-mark hold`: left alone), and drives the root restart (`Restreamer --restart-app`, hidden) against a stand-in user
   unit under a lingering user manager. A release now has 5 assets.
   `self_upgrade_host.rs` (dpkg, apt, systemctl, CLI) is mutation-excluded glue.
-- **Upgrading a Linux box by hand** (stream-pp `newlevel@10.76.8.204`, stream-snv
-  `10.77.9.204`, Linux since 22.10.2026). Since 24.10.2026 (owner) `newlevel` has
-  PASSWORDLESS sudo on both: stage the CI `.deb` (artifact `restreamer-linux-deb`) on
-  the box, check its sha256, `sudo -n dpkg -i`, then `systemctl --user daemon-reload` +
-  `restart restreamer`, all through the box's MCP. dev1 has no ssh to stream-snv: serve
-  the file from dev1 with a short-lived `python3 -m http.server --bind 10.77.9.109` and
-  `curl` it on the box. `airuleset.py share` hands out a Cloudflare Access page, not the
-  file. Before 24.10 stream-pp needed a password:
-- *(History)* Upgrading stream-pp by hand (the first 0.29.53 install, or when the timer is
-  broken) (`newlevel@10.76.8.204`): `newlevel` had no passwordless
-  sudo there. The owner provided the sudo password on 2026-10-19 (#323: the
-  streampp box drifts behind releases). It is the dev1 key file `stream-pp-sudo`
-  in the secrets store, and it is used only through
-  `airuleset.py secret exec --file <it> --env PPPW -- bash <script>`. The script pipes
-  `${PPPW%$'\n'}` into `ssh newlevel@10.76.8.204 "sudo -S -k -p '' dpkg -i /tmp/<deb>"`
-  (the file ends in a newline, so strip it). Never read the file inline; a hook blocks
-  it. Then run `systemctl --user daemon-reload` (the package ships the unit file) and
-  `systemctl --user restart restreamer` through the `linux-stream-pp` MCP. Verify the
-  version on the dashboard (`http://10.76.8.204:8910/`), `dpkg-query -W restreamer`,
-  and `wmctrl -l` (the `Restreamer Dashboard` window, with `DISPLAY=:0`) (0.29.51).
-  The repo is public, so stage the `.deb` with `curl -sSL -o /tmp/<deb>
-  https://github.com/zbynekdrlik/restreamer/releases/download/restreamer-v<X.Y.Z>/<deb>`
-  run on the box (MCP Shell), and compare its sha256 with a `gh release download` copy
-  on dev1 before handing it over (0.29.47).
+- **Upgrading a Linux box by hand** (stream-pp `10.76.8.204`, stream-snv `10.77.9.204`,
+  Linux since 22.10.2026). Since 24.10.2026 (owner) `newlevel` has PASSWORDLESS sudo on both.
+  Go through the box's MCP only, never ssh (#422, owner 24.10.2026: "potom aky ma vlastne mcp
+  vyznam?!"). Scripts and one-liners use `remoteos-call` (dev1 `~/.local/bin`, the project's
+  MCP config):
+  - `remoteos-call linux-stream-snv put <deb> /tmp/<deb>` stages the CI `.deb` (artifact
+    `restreamer-linux-deb`) or a release asset;
+  - `remoteos-call linux-stream-snv Shell 'sha256sum /tmp/<deb> && sudo -n dpkg -i /tmp/<deb>
+    && systemctl --user daemon-reload && systemctl --user restart restreamer'`. The exit code is
+    the remote one, and `--timeout 300` covers dpkg.
+  - Verify the dashboard DOM version, `dpkg-query -W restreamer` and `wmctrl -l` (the
+    `Restreamer Dashboard` window, `DISPLAY=:0`).
+  - SSH is break-glass ONLY, for when the box's MCP server itself is down. The old dev1 ->
+    box `python3 -m http.server` hop and the `stream-pp-sudo` password (`sudo -S` over ssh,
+    before 24.10) are retired.
 - **Watching the release run:** `release.yml` runs list with `headBranch == "main"`, not
   the `restreamer-v*` tag. A waiter that filters on the tag never matches and sits to its
   timeout (cost ~1.5 h on 0.29.47). Pick the newest Release run created after the main

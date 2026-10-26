@@ -55,6 +55,10 @@ function launchChrome(): Chrome {
       // Without a desktop session the first request otherwise waits ~25 s
       // (the D-Bus timeout) for a keyring to encrypt cookies with.
       "--password-store=basic",
+      // Chrome's own startup log to stderr: a start that hung for 30 s with
+      // an EMPTY stderr (CI run 40216697488) left nothing to go on.
+      "--enable-logging=stderr",
+      "--v=1",
       "about:blank",
     ],
     // Its own process group, so Chrome dies with all its children. Its stderr
@@ -91,7 +95,7 @@ async function connectChrome(chrome: Chrome): Promise<Browser> {
         }
         await sleep(100);
       }
-      const err = fs.readFileSync(`${dir}.stderr.log`, "utf-8").split("\n").slice(-15).join("\n");
+      const err = fs.readFileSync(`${dir}.stderr.log`, "utf-8").split("\n").slice(-60).join("\n");
       const how = proc.exitCode !== null || proc.signalCode !== null
         ? `exited (code ${proc.exitCode}, signal ${proc.signalCode})`
         : "still running";

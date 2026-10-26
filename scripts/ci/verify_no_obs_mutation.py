@@ -694,8 +694,10 @@ CI_MUTATIONS: list[tuple[str, str, str, str]] = [
      "      # #379: the program-audio watchdog, as in the YouTube job",
      "verify_program_audio_guard.py may only run in a GitHub-hosted job"),
     ("a self-hosted runner group is not treated as hosted",
-     "    runs-on: [self-hosted, linux, stream-lan]\n    timeout-minutes: 20\n    steps:",
-     "    runs-on: {group: stream}\n    timeout-minutes: 20\n    steps:\n      - run: taskkill /F /IM obs64.exe", "obs64.exe"),
+     "    runs-on: [self-hosted, linux, stream-lan]\n    # 20 min of test plus the rig-lease wait (#417): at most the 60-min lease\n"
+     "    # budget (RIG_LEASE_BUDGET_S) while camera-box holds the rig.\n    timeout-minutes: 85\n    steps:",
+     "    runs-on: {group: stream}\n    timeout-minutes: 85\n    steps:\n      - run: taskkill /F /IM obs64.exe",
+     "obs64.exe"),
 ]
 STREAM_MUTATIONS: list[tuple[str, str, str, str]] = [
     ("Start skips the readiness check", "$why = Test-ObsReady", "$why = $null", "after the Test-ObsReady"),

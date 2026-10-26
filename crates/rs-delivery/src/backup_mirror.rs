@@ -434,6 +434,16 @@ impl<P: Pushable> TeePusher<P> {
             backup.shutdown().await;
         }
     }
+
+    /// #424: the endpoint's end: finish the primary (unpublish, wait for its
+    /// queued bytes) and stop the backup. A rescue switch uses `shutdown`
+    /// instead: it must not wait on a link that may be dead.
+    pub async fn finish(&mut self) {
+        self.primary.finish().await;
+        if let Some(backup) = self.backup.as_mut() {
+            backup.shutdown().await;
+        }
+    }
 }
 
 impl<P: Pushable + Send> Pushable for TeePusher<P> {
@@ -454,6 +464,10 @@ impl<P: Pushable + Send> Pushable for TeePusher<P> {
 
     async fn close(&mut self) {
         self.primary.close().await;
+    }
+
+    async fn finish(&mut self) {
+        TeePusher::finish(self).await
     }
 
     fn reconnect_count(&self) -> u32 {

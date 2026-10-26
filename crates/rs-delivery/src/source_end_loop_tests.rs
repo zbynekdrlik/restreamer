@@ -47,6 +47,9 @@ impl Pushable for Recording {
     fn av_skew_ms(&self) -> i64 {
         0
     }
+    async fn finish(&mut self) {
+        self.close().await
+    }
     fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
         Vec::new()
     }

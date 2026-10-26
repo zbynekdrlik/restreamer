@@ -4,7 +4,9 @@
 //! See `docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md` for
 //! the full design.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the one exception is the TIOCOUTQ ioctl in
+// `session_finish.rs` (#424), which has no safe wrapper in our dependencies.
+#![deny(unsafe_code)]
 
 mod av_invariant;
 mod error;
@@ -24,5 +26,6 @@ pub use error::{
     is_exponential, map_read_err, may_lose_chunk, reconnect_delay_ms,
 };
 pub use pusher::RtmpPusher;
+pub use session::{DrainOutcome, FINISH_MAX_WAIT, FinishReport};
 pub use skew::{GuardMode, MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};

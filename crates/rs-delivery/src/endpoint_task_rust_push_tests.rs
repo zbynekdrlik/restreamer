@@ -364,6 +364,10 @@ mod close_on_error {
             0
         }
 
+        async fn finish(&mut self) {
+            self.close().await
+        }
+
         fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
             std::mem::take(&mut self.av_events)
         }

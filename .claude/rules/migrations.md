@@ -52,12 +52,12 @@ pure-DDL `MIGRATION_V*_SQL` consts were moved to a sibling `migration_sql.rs`
 (`#[path]` child module, `pub(crate)`). Put a new pure-DDL migration's SQL there;
 keep guarded rebuild logic in `migrations.rs`.
 
-## Testing rewind + forward paths (dev1 is Tier-0 — verify on dev2)
+## Testing rewind + forward paths
 - Rewind (guard-fire) coverage: seed a fully-migrated DB, `DELETE FROM
   schema_version WHERE version > <keep>`, re-run, assert data preserved + version
   reaches MAX. keep=2/3/11/15 forces re-running V3/V4/V12/V16.
 - Forward (guard-not-fire) coverage: build the real V1+V2 schema from the
   `migration_sql` consts, pin `schema_version=2`, seed pre-V3 rows, migrate to MAX.
-- Prove RED before GREEN on dev2 with `git stash push -- <fix-file>` → rsync → run
-  (fails) → `git stash pop` → rsync → run (passes). `MAX_SCHEMA_VERSION` and the
+- Prove RED before GREEN with `git stash push -- <fix-file>` → run (fails) →
+  `git stash pop` → run (passes). `MAX_SCHEMA_VERSION` and the
   `max_schema_version_constant` test must be bumped together when adding a migration.

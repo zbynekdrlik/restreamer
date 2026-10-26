@@ -465,6 +465,10 @@ mod fast_upload_gap_regression {
             0
         }
 
+        async fn finish(&mut self) {
+            self.close().await
+        }
+
         fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
             // This mock does not model the #367 invariant guard.
             Vec::new()

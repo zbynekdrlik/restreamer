@@ -714,6 +714,18 @@ impl RtmpPusher {
         self.state.regression_reanchor_count
     }
 
+    /// #424: end the publish without losing its tail (`Session::finish`):
+    /// unpublish, wait up to `max_wait` for the upstream to acknowledge every
+    /// queued byte, then close. `None` when no session was open.
+    pub async fn finish(&mut self, max_wait: Duration) -> Option<crate::FinishReport> {
+        let report = match self.session.take() {
+            Some(session) => Some(session.finish(max_wait).await),
+            None => None,
+        };
+        self.state.connected = false;
+        report
+    }
+
     pub async fn close(&mut self) {
         if let Some(s) = self.session.take() {
             s.close().await;

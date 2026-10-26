@@ -61,10 +61,8 @@ via `rs_core::audit::record(inpoint_state.audit_tx()?, AuditRow{…})` — the #
 skew precedent did this. `notify::classify` has a `_ => None` catch-all, so new
 Action variants add NO Discord alert unless you explicitly wire one.
 
-## dev2 frontend-E2E on a shared box (the mock traps)
+## Frontend-E2E mock trap
 
-- `mock-api.js` must be started with `setsid nohup node mock-api.js …` to
-  survive the ssh session teardown; a plain `nohup … &` still dies under load.
 - A sibling autopilot lane's `pkill -f "node mock-api.js"` kills YOUR mock too,
   and `ss -ltn | grep :8910` (MOCK_UP) can be a sibling's STALE mock lacking
   your new field. Before trusting an E2E failure, `curl /api/v1/status` and

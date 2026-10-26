@@ -289,12 +289,6 @@ pub fn EndpointTree() -> impl IntoView {
                                             "recovering" => {
                                                 ("endpoint-mode-recovering", "RECOVERING")
                                             }
-                                            // #296: buffered endpoint rebuilding a
-                                            // below-target cushion — protection is
-                                            // degraded but actively recovering.
-                                            "refilling" => {
-                                                ("endpoint-mode-refilling", "REFILLING")
-                                            }
                                             // #408: OBS stopped on purpose.
                                             "ended" => {
                                                 ("endpoint-mode-ended", "UKONČENÉ (OBS zastavené)")

@@ -60,12 +60,12 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
     // `duration_ms` so it tracks operator config without a hardcode.
     let mut typical_chunk_dur_ms: u64 = 1000;
     let mut iters_since_lag_probe: u32 = 0;
-    // #296 buffered-endpoint slow-refill: cadence counter + open-refill edge
-    // tracker for the below-target cushion deficit. Fast endpoints never use
+    // #296 buffered-endpoint cushion deficit (information only since #424):
+    // cadence counter + open-refill edge tracker. Fast endpoints never use
     // this (they ratchet the read-delay via #294 instead) — the update calls
-    // below are gated `!is_fast`. Start each (re)spawn with the deficit clear
-    // so a fresh producer never inherits a stale throttle; the first probe
-    // re-establishes it ~`LAG_PROBE_INTERVAL_ITERS` fetches later.
+    // below are gated `!is_fast`. Start each (re)spawn with the deficit clear;
+    // the first probe re-establishes it ~`LAG_PROBE_INTERVAL_ITERS` fetches
+    // later.
     let mut iters_since_refill_probe: u32 = 0;
     let mut refilling = false;
     if !is_fast {
@@ -217,14 +217,14 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 )
                 .await;
                 // #296: buffered endpoints re-measure their below-target cushion
-                // deficit on the same cadence and publish it for the consumer's
-                // slow-refill throttle. Uses the post-jump `chunk_id` (read
-                // pointer) so the deficit is consistent with any excess-lag
-                // correction just applied. Fast endpoints are excluded.
+                // deficit on the same cadence and audit it (information only,
+                // nothing paces on it). Measured at the consumer's last pushed
+                // chunk, not at this read pointer (#424). Fast endpoints are
+                // excluded.
                 if !is_fast {
                     crate::producer_lag::maybe_update_refill_deficit(
                         &fetcher,
-                        chunk_id,
+                        &stats,
                         delivery_delay_chunks,
                         typical_chunk_dur_ms,
                         &mut iters_since_refill_probe,
@@ -350,9 +350,8 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     buffer_state
                         .producer_active
                         .store(false, AtomicOrdering::Relaxed);
-                    // #296: source gap → stop the slow-refill throttle. There
-                    // is nothing to rebuild from while stalled, and rescue owns
-                    // the drain from here.
+                    // #296: source gap → clear the cushion deficit; rescue
+                    // owns the drain from here.
                     if !is_fast {
                         crate::producer_lag::clear_refill_deficit(
                             &buffer_state,
@@ -399,7 +398,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     buffer_state
                         .producer_active
                         .store(false, AtomicOrdering::Relaxed);
-                    // #296: error-shaped outage → stop the slow-refill throttle
+                    // #296: error-shaped outage → clear the cushion deficit
                     // (mirrors the clean-404 stall arm above).
                     if !is_fast {
                         crate::producer_lag::clear_refill_deficit(

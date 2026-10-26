@@ -278,13 +278,13 @@ pub enum Action {
     FastKeepaliveEnded,
 
     /// VPS-side (#296): a BUFFERED endpoint's delivered cushion fell below its
-    /// configured target (after a source gap) and the slow-refill throttle
-    /// began delivering marginally slower than realtime to rebuild it. Detail
-    /// JSON: `{alias, deficit_secs}`. Severity::Warn (protection is degraded
-    /// until it climbs back).
+    /// configured target (after a source gap). Information only since #424:
+    /// the push stays at real time, so the cushion does not climb back by
+    /// itself. Detail JSON: `{alias, deficit_secs}`. Severity::Warn
+    /// (protection is degraded).
     BufferRefillStarted,
-    /// VPS-side (#296): the slow refill ended — the cushion reached target
-    /// again (or the endpoint stalled into rescue). Detail JSON: `{alias}`.
+    /// VPS-side (#296): the cushion is back at target (or the endpoint
+    /// stalled into rescue). Detail JSON: `{alias}`.
     /// Severity::Info.
     BufferRefillEnded,
 

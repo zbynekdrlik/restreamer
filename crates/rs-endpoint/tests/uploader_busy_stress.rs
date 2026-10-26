@@ -128,8 +128,12 @@ fn liveness_cap(seed_elapsed: Duration) -> Duration {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn picker_no_busy_storm_under_production_write_mix() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let pool = db::create_pool(tmp.path()).await.unwrap();
+    // A directory, not a NamedTempFile: its drop also removes SQLite's
+    // -wal/-shm, which the never-closed pool leaves behind (#421).
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = db::create_pool(&tmp.path().join("busy-storm.db"))
+        .await
+        .unwrap();
     db::run_migrations(&pool).await.unwrap();
 
     // Seed one streaming event + many eligible unsent chunks. The claimers

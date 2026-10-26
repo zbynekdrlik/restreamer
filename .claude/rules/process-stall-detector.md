@@ -165,8 +165,7 @@ apply):
 CI's `windows-latest` Test job compiles and runs it, including the
 Windows-only asserts in `resource_sample_reads_real_process_and_system_memory`.
 
-Before pushing, you can type-check it on dev2. The `x86_64-pc-windows-msvc`
-std target has been installed there since 2026-10-05.
+Before pushing, you can type-check it with the `x86_64-pc-windows-msvc` std target.
 
 - A whole-crate `--target x86_64-pc-windows-msvc` check cannot work, because
   sqlite/openssl build scripts need an MSVC C toolchain.
@@ -175,7 +174,7 @@ std target has been installed there since 2026-10-05.
   `windows-sys`/`sysinfo`, so keep it that way.
 
 ```toml
-# ~/restreamer-bc-<lane>-wincheck/Cargo.toml  (lib.rs: #[path = "<checkout>/crates/rs-runtime/src/stall_resources.rs"] pub mod resources;)
+# <scratch>/Cargo.toml  (lib.rs: #[path = "<checkout>/crates/rs-runtime/src/stall_resources.rs"] pub mod resources;)
 [dependencies]
 serde_json = "1"
 [target.'cfg(windows)'.dependencies]
@@ -188,7 +187,7 @@ Give the scratch crate `rust-version = "1.85"` (the workspace MSRV). Without
 it clippy (edition 2024) demands let-chains (`collapsible_if`) that the
 workspace never asks for: a false failure (#368 lane c).
 
-Then run, on dev2:
+Then run:
 
 ```bash
 cargo clippy --offline --target x86_64-pc-windows-msvc -- -D warnings
@@ -196,19 +195,3 @@ cargo clippy --offline --target x86_64-pc-windows-msvc -- -D warnings
 
 The output must show `Checking windows-sys v0.61.2`, which proves the
 `cfg(windows)` branch was compiled.
-
-## dev2 lane mechanics that cost time here
-
-- `~/restreamer-buildcheck` had **no `target/` at all** on 2026-10-05, so
-  `cp -al` from it gives no warm build. Hardlink-copy a lane dir that still
-  has a warm `target/` instead.
-  - `du -sh ~/restreamer-bc-*/target` shows which lane dirs still have one.
-  - First check that no cargo process is running in that lane dir
-    (`ps -eo args | grep restreamer-bc-<lane>`): hardlinked `target/` files can
-    be rewritten in place by its owner.
-- An inline `ssh … 'setsid … &'` holds the ssh session open until the build
-  ends, unless every fd is redirected. The worktree command checker also
-  refuses complex inline shapes. What works: put the build in a small script,
-  `scp` it over, then launch it with
-  `ssh -f newlevel@dev2 'setsid bash ~/<script>.sh > /tmp/<log> 2>&1 < /dev/null &'`,
-  and poll its sentinel file from a local script.

@@ -55,8 +55,7 @@ pub use crate::endpoint_audit::{
 mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{
-    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, maybe_refill_throttle, push_chunk,
-    reset_after_rescue,
+    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, push_chunk, reset_after_rescue,
 };
 
 // Fast-endpoint keepalive + outage escalation (C1 #251) extracted to keep this
@@ -736,18 +735,6 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
         }
-
-        // #296: after delivering a chunk on the buffered (non-fast) path, apply
-        // the slow-refill throttle if the producer has flagged the cushion
-        // below target. No-op for fast endpoints and when no deficit exists.
-        maybe_refill_throttle(
-            ep_cfg.is_fast,
-            &buffer_state,
-            chunk_duration_ms,
-            &stats,
-            &mut stop_rx,
-        )
-        .await;
     }
 
     // Cleanup
@@ -755,8 +742,8 @@ async fn consumer_task<P: OutputProcessFactory>(
         p.kill().await;
     }
     if let Some(mut pusher) = rust_pusher {
-        // #368: closes the primary AND stops the backup mirror.
-        pusher.shutdown().await;
+        // #424: unpublishes and drains the primary, stops the backup (#368).
+        pusher.finish().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
 }

@@ -56,16 +56,9 @@ Config-backed threshold: add the field to `DeliveryConfig` (or the relevant sub-
 SNAPSHOT (`orchestrator.config()`), while `get_status` reads `config_live` — a runtime PATCH
 diverges them until restart (same as `s3_region_standard`); document "restart to apply".
 
-## dev2 lane build-verify gotchas that cost time here (beyond dev2-build-verify skill)
+## Build-verify gotcha
 
-- **`cp -al` warm-checkout + `rsync` WITHOUT `--delete` leaves STALE files** that break the
-  build. Real hit: a stale `leptos-ui/src/api.rs` (from before the `api/` module split)
-  coexisting with the synced `api/mod.rs` → `E0761: file for module 'api' found at both`.
-  Fix: `rm` the stale file in the lane (it has extra hardlinks; removing the lane's entry
-  leaves the source buildcheck untouched).
 - **`trunk build` writes to the REPO-ROOT `dist/`, not `leptos-ui/dist/`**, and
   `mock-api.js` serves `path.join(__dirname, "..", "dist")` (repo-root). When "the banner
   isn't in the dist", grep `./dist/*_bg.wasm` (the testid string is greppable in the wasm),
   not `leptos-ui/dist/`.
-- The first frontend-E2E run on a loaded dev2 can flake (banner `toBeVisible` times out);
-  confirm with `--repeat-each=3` before treating a single failure as a real bug.

@@ -48,6 +48,14 @@ main run 39270735842). A drain then silently left a chunk out.
   silence" loop is a speed assertion in disguise.
 - A chunk from `flush()` is already in the channel when `flush` returns
   (`write_and_notify` is awaited), so only `spawn_write` chunks were racy.
-- Proof recipe (dev2, never committed): a sleep before the spawned write fails
+- Proof recipe (never committed): a sleep before the spawned write fails
   the old tests and passes the new ones; a `pending()` write fails the new ones
   at the bound.
+
+## Reproducing a CI-only timing failure (#367)
+
+- An idle loop proves little (21 green runs); build load exposes races (a concurrent
+  from-scratch workspace build gave 1-3 % failures, busy-loop hogs 0/100).
+- Build once (`cargo test --workspace --locked --no-run --message-format=json`), run each
+  `executable` from `dirname(manifest_path)` N times under `taskset -c 0-3` (CI's 4 vCPU)
+  with `</dev/null`, interleaving the RED and GREEN binaries in one loop.

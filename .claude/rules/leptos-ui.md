@@ -5,6 +5,10 @@ paths:
 
 # Leptos UI gotchas
 
+`leptos-ui` is outside the workspace, so no workspace job builds it: after an edit run
+`cargo test --lib` and `cargo check --target wasm32-unknown-unknown` in `leptos-ui/` (only
+the wasm check catches leptos type errors). It is not fmt-gated: rustfmt only files you wrote.
+
 ## Controlled `<select>` with a DYNAMIC (reactive) `<option>` list → use `prop:selected` per option
 
 Binding the current value of a `<select>` whose options are rendered from a

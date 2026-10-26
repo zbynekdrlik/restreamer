@@ -75,15 +75,18 @@ Five workspace commands carry `--locked` (#322). A stale lock fails Lint + Test 
 Test-integrity together within ~1 min. Regenerate in the SAME commit as the bump:
 `cargo update --workspace --offline` (diff must be exactly the 12 local member
 versions — any transitive churn means you resolved online).
+`Restreamer.exe` is built from the separate `src-tauri/Cargo.lock`, which `cargo audit`
+never scans: repeat a SECURITY bump there (`cargo update -p <crate>@<old> --precise <new>`
+in `src-tauri/`; #367 shipped RUSTSEC-2026-0285 after fixing only the root lock).
 
-## CI floats to the newest stable: verify with CI's toolchain, not dev2's default
+## CI floats to the newest stable: verify with CI's toolchain, not the local default
 
 Every job except Coverage uses `dtolnay/rust-toolchain@stable`, so a new Rust
 release can turn an untouched tree red overnight (#367, 2026-10-05: 1.99.0 added
-`clippy::double_must_use`). dev2's default toolchain lags, so a green dev2 run
+`clippy::double_must_use`). A local default toolchain lags, so a green local run
 proves nothing about such drift. Read the version from the failing job log
 (`rustc 1.99.0 (b940084d7 …)`, or the `rust-1.99.0` clippy link) and use exactly
-that version on dev2, without changing dev2's default:
+that version, without changing the default:
 
 ```bash
 rustup toolchain install 1.99.0 --profile minimal -c clippy,rustfmt
@@ -106,7 +109,7 @@ accepts the lock unchanged with `cargo metadata --locked --format-version 1`.
 `cargo-tarpaulin --version 0.37.5 --locked`.** tarpaulin's ptrace engine crashes
 on rustc 1.99.0 code. The SAME binary passes when run natively, so this is
 not our bug. Details are in the coverage job comment, and a test-integrity
-guard keeps both pins. To un-pin, run the full Coverage command on dev2 with
+guard keeps both pins. To un-pin, run the full Coverage command with
 the new stable (`RUSTUP_TOOLCHAIN=<ver> cargo-tarpaulin tarpaulin --workspace
 --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300`, in
 its own `CARGO_TARGET_DIR`). Then change the pin and the guard together.
@@ -159,14 +162,6 @@ A "stop" function whose only observable effect is releasing a port or socket
 "sooner" survives as `-> ()` when the `Drop` impl also aborts the task. Pin it
 with a SYNCHRONOUS rebind right after the stop returns, with no await in
 between: `drop(std::net::TcpListener::bind(addr).expect(..))`.
-
-## Never run ci.yml's test-integrity steps wholesale on dev1
-
-Several test-integrity steps run the full workspace test suite (e.g. "Run tests and
-capture output"). Extracting and running ALL of them locally on dev1 starts a full
-workspace build: a Tier-0 violation, an OOM risk, and ~750 MB of `target/` within minutes
-(#367, 2026-10-06). Run only the ONE step you changed (select it by its exact name), or
-run the whole set on dev2.
 
 ## GitHub evaluates `${{ }}` everywhere in a `run:` block, even inside string literals
 
