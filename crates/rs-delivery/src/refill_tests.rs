@@ -1,153 +1,168 @@
-//! #424: the #296 slow refill must measure the cushion the viewers are
-//! actually behind (the consumer's last pushed chunk) and must slow the
-//! pusher's pacing, not sleep between chunks.
+//! #424: the cushion deficit is measured at the consumer's last pushed chunk,
+//! and it never changes the speed of the outgoing stream.
 //!
-//! In production both went wrong at once: the producer measured from its own
-//! read pointer, ~11 chunks ahead in the prefetch channel, so every buffered
-//! endpoint reported a false ~23 s deficit for the whole event; and the
-//! consumer's sleep was caught up by the pusher's wall-clock pacing, so the
-//! false deficit never slowed anything.
+//! The #296 slow refill (deliver at 0.98x until the cushion is back) never
+//! acted in production: the pusher's wall-clock pacing caught up its sleep.
+//! #424 made it act, and YouTube flagged every refill window as
+//! `videoIngestionStarved` (health bad, PR #425 run 40302038359). Owner
+//! decision 2026-10-26: no slowdown or speed-up of the outgoing stream, ever.
+//! The deficit stays as information only.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rs_core::audit::Action;
+use rs_core::models::PusherKind;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::Instant;
 
-use super::super::consumer_helpers::{Pushable, maybe_refill_throttle};
 use super::tests::TimedMockFetcher;
 use crate::audit_ring::AuditRing;
 use crate::buffer_state::BufferState;
 use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
-use crate::endpoint_task::{PREFETCH_BUFFER_SIZE, PrefetchedChunk};
-use rs_rtmp_push::PushError;
-
-/// Records every `slow_pacing` call; pushes nothing.
-#[derive(Default)]
-struct PacingRecorder {
-    slowed: Vec<Duration>,
-}
-
-impl Pushable for PacingRecorder {
-    async fn push_flv_bytes(&mut self, _data: &[u8]) -> Result<(), PushError> {
-        Ok(())
-    }
-    async fn close(&mut self) {}
-    fn reconnect_count(&self) -> u32 {
-        0
-    }
-    fn av_skew_ms(&self) -> i64 {
-        0
-    }
-    async fn finish(&mut self) {
-        self.close().await
-    }
-    fn slow_pacing(&mut self, by: Duration) {
-        self.slowed.push(by);
-    }
-    fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
-        Vec::new()
-    }
-}
-
-fn state_with_deficit(deficit_secs: u64) -> Arc<BufferState> {
-    let state = Arc::new(BufferState::new());
-    state
-        .refill_deficit_secs
-        .store(deficit_secs, Ordering::Relaxed);
-    state
-}
+use crate::endpoint_task::{
+    OutputProcess, OutputProcessFactory, PREFETCH_BUFFER_SIZE, PrefetchedChunk,
+};
+use rs_ffmpeg::ServiceType;
 
 fn new_stats() -> Stats {
     Arc::new(Mutex::new(EndpointStats::default()))
 }
 
-#[tokio::test(start_paused = true)]
-async fn refill_slows_the_pusher_instead_of_sleeping() {
-    let state = state_with_deficit(23);
+/// Accepts every write and counts it.
+struct CountingProcess {
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl OutputProcess for CountingProcess {
+    fn is_alive(&mut self) -> bool {
+        true
+    }
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    async fn kill(&mut self) {}
+    fn last_stderr_line(&self) -> Option<String> {
+        None
+    }
+}
+
+struct CountingFactory {
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl OutputProcessFactory for CountingFactory {
+    fn spawn(&self, _: ServiceType, _: &str, _: &str) -> Result<Box<dyn OutputProcess>, String> {
+        Ok(Box::new(CountingProcess {
+            writes: self.writes.clone(),
+        }))
+    }
+}
+
+/// What a consumer run showed: how long `CHUNKS` chunks took to write, and
+/// whether the dashboard ever read "refilling".
+struct ConsumerRun {
+    elapsed: Duration,
+    showed_refilling: bool,
+}
+
+const CHUNKS: usize = 10;
+
+/// Feeds `CHUNKS` buffered 2 s chunks to a consumer on the ffmpeg path, with
+/// `deficit_secs` already flagged on the shared state, and times the writes.
+async fn run_consumer(deficit_secs: u64) -> ConsumerRun {
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let factory = CountingFactory {
+        writes: writes.clone(),
+    };
+    let ep_cfg = crate::api::EndpointConfig {
+        alias: "buffered-ep".to_string(),
+        service_type: "TEST_FILE".to_string(),
+        stream_key: "k".to_string(),
+        is_fast: false,
+        chunk_format: "flv".to_string(),
+        start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
+        youtube_backup_ingest: false,
+    };
+    let buffer_state = Arc::new(BufferState::new());
+    buffer_state
+        .refill_deficit_secs
+        .store(deficit_secs, Ordering::Relaxed);
     let stats = new_stats();
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
-    let mut pusher = PacingRecorder::default();
+    let (tx, rx) = mpsc::channel::<PrefetchedChunk>(CHUNKS);
+    let (stop_tx, stop_rx) = watch::channel(false);
 
     let started = Instant::now();
-    maybe_refill_throttle(
-        false,
-        &state,
-        2_000,
-        &stats,
-        Some(&mut pusher),
-        &mut stop_rx,
-    )
-    .await;
+    let consumer = tokio::spawn(super::super::consumer_task(
+        rx,
+        factory,
+        ep_cfg,
+        ServiceType::TestFile,
+        0,
+        stop_rx,
+        stats.clone(),
+        None,
+        buffer_state,
+        None,
+    ));
+    for chunk_id in 1..=CHUNKS as i64 {
+        tx.send(PrefetchedChunk {
+            chunk_id,
+            data: vec![chunk_id as u8; 64],
+            duration_ms: 2_000,
+        })
+        .await
+        .expect("consumer alive");
+    }
 
-    assert_eq!(
-        started.elapsed(),
-        Duration::ZERO,
-        "a sleep here is caught up by the pusher's pacing"
+    let mut showed_refilling = false;
+    // A hang bound only: the writes need no wall time at all.
+    for _ in 0..100_000 {
+        showed_refilling |= stats.lock().await.delivery_mode == "refilling";
+        if writes.load(Ordering::Relaxed) >= CHUNKS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        writes.load(Ordering::Relaxed) >= CHUNKS,
+        "the consumer wrote only {} of {CHUNKS} chunks",
+        writes.load(Ordering::Relaxed)
     );
-    let expected = Duration::from_millis(crate::refill::refill_throttle_ms(23, 2_000));
-    assert!(expected > Duration::ZERO);
-    assert_eq!(pusher.slowed, vec![expected]);
-    assert_eq!(stats.lock().await.delivery_mode, "refilling");
+    let _ = stop_tx.send(true);
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(30), consumer).await;
+    ConsumerRun {
+        elapsed,
+        showed_refilling,
+    }
 }
 
-/// The legacy ffmpeg path has no rust pusher: it keeps the sleep.
+/// A cushion below target (23 s, as after an outage) must not change how fast
+/// the chunks go out: YouTube reads a slower ingest as starved video.
 #[tokio::test(start_paused = true)]
-async fn refill_without_a_rust_pusher_sleeps() {
-    let state = state_with_deficit(23);
-    let stats = new_stats();
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
-
-    let started = Instant::now();
-    maybe_refill_throttle(
-        false,
-        &state,
-        2_000,
-        &stats,
-        None::<&mut PacingRecorder>,
-        &mut stop_rx,
-    )
-    .await;
-
-    let expected = Duration::from_millis(crate::refill::refill_throttle_ms(23, 2_000));
-    assert_eq!(started.elapsed(), expected);
+async fn a_cushion_deficit_never_slows_the_push() {
+    let at_target = run_consumer(0).await;
+    let drained = run_consumer(23).await;
+    assert!(
+        drained.elapsed <= at_target.elapsed + Duration::from_millis(5),
+        "a 23 s deficit slowed the push: {:?} vs {:?} at target",
+        drained.elapsed,
+        at_target.elapsed
+    );
 }
 
+/// The dashboard must not claim a refill that does not happen.
 #[tokio::test(start_paused = true)]
-async fn no_deficit_no_slowdown() {
-    let state = state_with_deficit(0);
-    let stats = new_stats();
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
-    let mut pusher = PacingRecorder::default();
-
-    maybe_refill_throttle(
-        false,
-        &state,
-        2_000,
-        &stats,
-        Some(&mut pusher),
-        &mut stop_rx,
-    )
-    .await;
-
-    assert!(pusher.slowed.is_empty());
-    assert_ne!(stats.lock().await.delivery_mode, "refilling");
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_fast_endpoint_never_refills() {
-    let state = state_with_deficit(23);
-    let stats = new_stats();
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
-    let mut pusher = PacingRecorder::default();
-
-    maybe_refill_throttle(true, &state, 2_000, &stats, Some(&mut pusher), &mut stop_rx).await;
-
-    assert!(pusher.slowed.is_empty());
-    assert_ne!(stats.lock().await.delivery_mode, "refilling");
+async fn a_cushion_deficit_shows_no_refilling_mode() {
+    let drained = run_consumer(23).await;
+    assert!(!drained.showed_refilling);
 }
 
 /// What a refill probe saw: the producer's furthest read, the consumer's last
