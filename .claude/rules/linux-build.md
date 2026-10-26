@@ -78,6 +78,11 @@ paths:
     `systemctl --user -M <gui user>@ daemon-reload` + `restart restreamer`. The GUI user is the owner of the `Restreamer` process that is
     not root and not a CLI mode (`--upgrade-check`, `--verify-update`, `--restart-app`).
 
+  - **Pausing it (e.g. before an event): `systemctl stop` only, never `disable`.** A stopped
+    timer starts again at the next boot. On 25.10 a session ran `disable --now` plus a
+    transient `systemd-run --on-calendar` re-enable; the box rebooted, the transient unit
+    was gone, and stream-pp sat on 0.29.57 with the timer off until 27.10 (#323).
+
   Read it with `journalctl -u restreamer-upgrade` (one line per check) and
   `systemctl list-timers restreamer-upgrade.timer`. The release signs the `.deb` with
   `TAURI_SIGNING_PRIVATE_KEY` (tauri-cli reads the password from the env; never pass
