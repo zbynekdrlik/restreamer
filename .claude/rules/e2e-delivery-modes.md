@@ -29,10 +29,9 @@ Each endpoint's `delivery_mode` comes from the VPS: `warmup`, `normal`, `refilli
 - **A `videoIngestionStarved` on YouTube right after an outage test means
   something changed the push speed.** Check every pacing/sleep change in the
   push path first.
-- **A gate that means "warmup is over" or "it is live" must accept `normal` AND
-  `refilling`.** Waiting for `normal` alone is a race: it passes only when the poll
-  lands before the refill starts. That race broke run 37692367442 and was fixed in
-  057eb35d. The recovery check already used `-in @("normal", "refilling")`.
+- **The CI gates still accept `normal` OR `refilling`** for "warmup is over" /
+  "it is live", so an older VPS binary passes too. Waiting for `normal` alone
+  raced the old refill (run 37692367442, fixed in 057eb35d).
 - Only `warmup` (not started yet) and `rescue`/`recovering` (an outage) are
   "not delivering the live stream".
 - To read what the VPS did, use the host's mirrored audit rows:

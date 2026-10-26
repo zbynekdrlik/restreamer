@@ -194,7 +194,7 @@ const REFILL_PROBE_FIRST_RUNG: i64 = 1;
 /// CHUNKS when the cushion is below `target_chunks`, or `None` when it is at /
 /// above target (the steady state), when the target is non-positive (fast
 /// endpoints), or when the live edge cannot be located (probe error / no chunk
-/// ahead of `current` — the safe answer is "don't throttle").
+/// ahead of `current` — the safe answer is "no deficit").
 ///
 /// `chunk_delay_secs` is computed HOST-side (`rs-api::delivery_status`) and the
 /// VPS binary cannot see it, so the deficit MUST be derived here from what the
@@ -218,7 +218,7 @@ pub(crate) async fn detect_refill_deficit<F: ChunkFetcher>(
     }
     // Steady-state fast path: if the chunk at the target depth already exists,
     // the cushion is at or above target — nothing to refill (1 HEAD probe).
-    // A probe error is the SAFE answer "don't throttle".
+    // A probe error is the SAFE answer "no deficit".
     match fetcher.chunk_duration_ms(current + target_chunks).await {
         Ok(Some(_)) => return None,
         Err(_) => return None,
@@ -301,17 +301,16 @@ pub(crate) async fn maybe_update_refill_deficit<F: ChunkFetcher>(
             deficit_secs,
             delivered_chunk_id = current,
             target_chunks,
-            "Refill: cushion below target, delivering slower to rebuild"
+            "Cushion below target (information only, the push stays at real time)"
         );
     } else if deficit_secs == 0 && *refilling {
         *refilling = false;
         crate::refill_audit::emit_refill_ended(audit_ring, alias);
-        tracing::info!(alias = %alias, "Refill: cushion back at target, resuming 1x");
+        tracing::info!(alias = %alias, "Cushion back at target");
     }
 }
 
-/// Clear the refill deficit when the producer goes stalled (outage) so the
-/// consumer stops throttling — there is no source to rebuild from, and the
+/// Clear the refill deficit when the producer goes stalled (outage): the
 /// rescue machinery owns the drain from here. Closes the refill-audit pair if
 /// one was open. No-op if not currently refilling and already clear.
 pub(crate) fn clear_refill_deficit(

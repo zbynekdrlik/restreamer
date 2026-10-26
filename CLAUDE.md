@@ -37,7 +37,7 @@ auto-load on their `paths:` — you do not invoke those.
 - adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
 - E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
 - Linux build for stream-pp (.deb, systemd --user GUI unit (#393 operator window), XDG paths via `rs_core::paths`) → `.claude/rules/linux-build.md` (auto)
-- VPS `delivery_mode` in CI gates (`refilling` is normal delivery, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
+- VPS `delivery_mode` in CI gates (no speed change ever: `refilling` is gone since #424, read the VPS audit rows) → `.claude/rules/e2e-delivery-modes.md` (auto)
 - frontend E2E WebSocket pushes (`waitForWsClient` + `broadcast`, the #377 guard) → `.claude/rules/e2e-ws-broadcast.md` (auto)
 - Chrome warnings outside `console` (CDP Log, raw Chrome over CDP, `--password-store=basic`) → `.claude/rules/e2e-browser-log.md` (auto)
 - YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)

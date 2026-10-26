@@ -4340,13 +4340,10 @@ jobs:
           # to max_seq+1 BEFORE warmup runs, so "chunk_id > 1" is no longer a
           # reliable "warmup done" signal. Gate instead on delivery_mode flipping
           # out of "warmup" on all non-fast endpoints.
-          # Warmup is over once the mode is "normal" OR "refilling". #296: right
-          # after the disk-cache prefill a buffered endpoint below its 120 s
-          # target delivers slightly slower to rebuild the cushion, so it goes
-          # prefill -> refilling, often within seconds. Waiting for "normal" only
-          # raced that (run 37692367442: prefill_ready 22:51:00, refill_started
-          # 22:51:38, this check began 22:51:48 and saw "refilling" for 300 s;
-          # the green runs merely polled before refill started).
+          # Warmup is over once the mode is "normal" OR "refilling". Since #424
+          # the VPS never reports "refilling" (the push never runs slower than
+          # real time); it is still accepted so an older VPS binary passes too.
+          # Waiting for "normal" only once raced the old refill (run 37692367442).
           Write-Host "Waiting for VPS warmup to finish (delivery_mode normal or refilling)..."
           $maxWait = 60
           $bufferReady = $false
@@ -5994,20 +5991,17 @@ jobs:
           # RESCUE_REFILL_TARGET_SECS (120s of continuous producer
           # activity), then exits rescue. Budget (#318): the full path is
           # re-anchor (~2.5min: OBS reconnect + chunker + VPS pickup) +
-          # recovering (~2min) + REFILLING, which delivers DELIBERATELY
-          # slower than realtime to rebuild an up-to-120s cushion deficit
-          # (producer_lag.rs #296) -- several minutes BY DESIGN when the
+          # recovering (~2min). (Before #424 a REFILLING phase followed,
+          # delivering slower than real time; the push now never changes
+          # speed, so that phase is gone.)
           # deficit is deep. The old 420s window lost that race twice on
           # identical green-elsewhere code (run 30097365437 a1+a2) while a
           # zero-deficit path passed in 271s (run 30088500034). 900s fits
           # the physics; a genuine wedge no longer needs the deadline at
           # all -- the chunk-progress stall check below catches it in 120s.
           # #318 fix v2: PASS = live delivery RESTORED, not cushion refilled.
-          # After a full drain, mode=normal is ~100 MINUTES away BY DESIGN
-          # (refill.rs REFILL_SPEED_FACTOR = 0.98: "rebuilds ~100s of cushion
-          # in ~1.4h") -- no CI window can wait for it, and run 30131235537
-          # proved a perfectly healthy recovery (chunks advancing, live video
-          # pushing) red-flagged for 10.7min of correct refilling. The #238/
+          # A drained cushion is not rebuilt within the event (#424: no speed
+          # change), so mode=normal is the bar, never a full cushion. The #238/
           # #280 guarantee is "endpoints return to LIVE delivery": require
           # producer_active AND mode normal-or-refilling SUSTAINED for 3
           # consecutive polls; the stall detector below still fails a wedge

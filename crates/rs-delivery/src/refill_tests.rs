@@ -292,3 +292,33 @@ async fn a_drained_cushion_is_measured_at_the_consumer() {
         run.deficit_secs
     );
 }
+
+/// The deficit is information only (#424, owner 2026-10-26): no code that
+/// pushes may read it, on the rust path or the ffmpeg path. Only the producer
+/// that measures it and the state that holds it may name it, so a slowdown
+/// cannot come back through it.
+#[test]
+fn nothing_in_the_push_path_reads_the_deficit() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let allowed = ["buffer_state.rs", "producer_lag.rs", "endpoint_producer.rs"];
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(&src).expect("read src") {
+        let path = entry.expect("dir entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") || allowed.contains(&name) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read source");
+        let production = text.split("#[cfg(test)]").next().unwrap_or_default();
+        if production.contains("refill_deficit_secs") {
+            offenders.push(name.to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the cushion deficit must never reach the push path: {offenders:?}"
+    );
+}

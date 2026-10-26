@@ -43,8 +43,9 @@ pub struct BufferState {
     /// cushion currently sits BELOW its configured target. 0 = at/above
     /// target, the steady state. Written by the producer's periodic live-edge
     /// HEAD-probe (`producer_lag`), measured at the consumer's last pushed
-    /// chunk (#424). Information only: since #424 nothing changes the push
-    /// speed for it, because YouTube flags any off-real-time ingest. Fast
+    /// chunk (#424). Information only: the push path never reads it, since
+    /// YouTube flags any off-real-time ingest (a source-scan test,
+    /// `refill_tests::nothing_in_the_push_path_reads_the_deficit`, keeps it so). Fast
     /// endpoints never write it. Cleared to 0 by the producer when it goes
     /// stalled (outage).
     pub refill_deficit_secs: AtomicU64,

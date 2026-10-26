@@ -11,7 +11,6 @@
 //! bad). Owner decision 2026-10-26: the outgoing stream never runs slower
 //! or faster than real time. The deficit is measured and audited
 //! (`buffer_refill_started` / `_ended`, `producer_lag`) as information only.
-#![allow(dead_code)]
 
 /// Deficit (in CHUNKS) of a buffered endpoint whose live edge is `max_id` and
 /// whose read/deliver pointer is `current`, for a configured cushion of
