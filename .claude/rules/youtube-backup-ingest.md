@@ -48,9 +48,9 @@ a ~2 s content hole. Three layers fix it; keep all three.
   its last ~8 s. The log line `rtmp_push: publish finished (#424)` carries
   `queued_at_start` / `waited_ms` / the outcome. The rescue switch keeps
   `shutdown()`, because it must not wait on a dead link.
-- **`slow_pacing(by)` is the #296 refill** (#424). It moves the pusher's pacing
-  anchor; the tee forwards it to the primary only. A sleep between chunks
-  does nothing: per-tag pacing catches it up on the next chunk.
+- **There is no pacing slowdown, ever** (owner 2026-10-26). #424 briefly added
+  `slow_pacing` for the #296 refill, and YouTube flagged every refill window as
+  `videoIngestionStarved` (health bad). The pusher sends at real time only.
 - `repush_flv_bytes` (the re-send below) goes to the primary only: the backup
   already has that chunk.
 - **The live consumer keeps the backup ONE chunk ahead** (`feed_backup_ahead`,

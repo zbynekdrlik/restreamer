@@ -255,7 +255,7 @@ pub(crate) async fn detect_refill_deficit<F: ChunkFetcher>(
 
 /// Non-fast producer wrapper (#296): every `LAG_PROBE_INTERVAL_ITERS` fetches,
 /// re-measure the below-target cushion deficit and publish it on the shared
-/// `BufferState` so the consumer can throttle (or stop throttling). Emits the
+/// `BufferState` (information only since #424, nothing paces on it). Emits the
 /// refill-started / refill-ended audit transition. `refilling` is the
 /// producer-local edge tracker for that transition. No-op for fast endpoints
 /// (they use the #294 read-delay ratchet, not this) — the caller gates on

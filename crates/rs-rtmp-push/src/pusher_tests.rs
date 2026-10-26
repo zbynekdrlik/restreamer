@@ -477,24 +477,3 @@ async fn pace_tag_sleeps_until_the_tag_is_due() {
         "a corrupt far-future ts sleeps the cap only"
     );
 }
-
-/// #424: `slow_pacing` moves the anchor forward by exactly `by`, so every
-/// following tag is due that much later; with no anchor yet it does nothing.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn slow_pacing_moves_the_anchor_forward() {
-    let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
-    p.slow_pacing(Duration::from_millis(300));
-    assert_eq!(
-        p.state.pacing_anchor, None,
-        "no chunk sent, nothing to slow"
-    );
-
-    let anchor = Instant::now();
-    p.state.pacing_anchor = Some(anchor);
-    p.slow_pacing(Duration::from_millis(300));
-    p.slow_pacing(Duration::from_millis(40));
-    assert_eq!(
-        p.state.pacing_anchor,
-        Some(anchor + Duration::from_millis(340))
-    );
-}

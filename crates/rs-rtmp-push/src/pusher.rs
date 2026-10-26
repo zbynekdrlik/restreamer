@@ -714,29 +714,6 @@ impl RtmpPusher {
         self.state.regression_reanchor_count
     }
 
-    /// #424: send everything after this point `by` later on the wire: the
-    /// #296 slow refill rebuilding a drained cushion. Tags are paced against
-    /// the wall-clock anchor, so a sleep BETWEEN chunks only lets the next
-    /// chunk burst until it catches up again; the slowdown has to move the
-    /// anchor itself.
-    /// Before the first media chunk there is no anchor and nothing to slow.
-    pub fn slow_pacing(&mut self, by: Duration) {
-        match self.state.pacing_anchor.as_mut() {
-            Some(anchor) => {
-                *anchor += by;
-                tracing::debug!(
-                    by_ms = by.as_millis() as u64,
-                    last_output_ts_ms = self.state.last_output_ts_ms,
-                    "rtmp_push: pacing slowed (refill)"
-                );
-            }
-            None => tracing::debug!(
-                by_ms = by.as_millis() as u64,
-                "rtmp_push: pacing not slowed: no chunk sent yet"
-            ),
-        }
-    }
-
     /// #424: end the publish without losing its tail (`Session::finish`):
     /// unpublish, wait up to `max_wait` for the upstream to acknowledge every
     /// queued byte, then close. `None` when no session was open.
