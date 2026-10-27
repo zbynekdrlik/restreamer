@@ -241,7 +241,9 @@ pub fn freeze_tail(
     let mut segments: Vec<Vec<u8>> = Vec::new();
     let mut current: Option<(u64, Vec<u8>)> = None;
     for (ts, kind, body) in events {
-        let index = (ts - end) / SEGMENT_MS;
+        // Silence may start before the last picture (audio ended early): it
+        // belongs to the first segment.
+        let index = ts.saturating_sub(end) / SEGMENT_MS;
         if current.as_ref().is_none_or(|(i, _)| *i != index) {
             segments.extend(current.take().map(|(_, s)| s));
             let mut s = FLV_HEADER.to_vec();
