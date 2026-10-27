@@ -17,6 +17,7 @@ use crate::audit_ring::{AuditRing, RingRowParts};
 use crate::backup_mirror::{EndpointPusher, PushTarget, build_endpoint_pusher};
 use crate::endpoint_stats::Stats;
 use crate::endpoint_task::PrefetchedChunk;
+use crate::source_end_tail::{TailOutcome, hold_tail};
 
 #[derive(Debug)]
 struct Inner {
@@ -106,10 +107,11 @@ pub fn resumed_row(alias: &str, chunk_id: i64) -> RingRowParts {
     }
 }
 
-/// The endpoint played the source out to `ended_at`: end its publish (the
-/// primary and the YouTube backup), show it as ended, and wait for the next
+/// The endpoint played the source out to `ended_at`: show it as ended, hold
+/// the freeze `tail` on the live publish (#424, `source_end_tail`), end the
+/// publish (the primary and the YouTube backup), and wait for the next
 /// chunk. Returns that chunk on a fresh pusher, or `None` on a stop or a
-/// closed channel.
+/// closed channel. A chunk during the tail cuts it short and resumes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn idle_until_resume(
     target: &PushTarget,
@@ -119,14 +121,28 @@ pub(crate) async fn idle_until_resume(
     stats: &Stats,
     audit_ring: &Option<Arc<AuditRing>>,
     rust_pusher: &mut Option<EndpointPusher>,
+    tail: Vec<Vec<u8>>,
 ) -> Option<PrefetchedChunk> {
     let alias = target.alias.as_str();
-    if let Some(mut p) = rust_pusher.take() {
-        p.finish().await;
-    }
     stats.lock().await.delivery_mode = ENDED_DELIVERY_MODE.to_string();
     if let Some(r) = audit_ring {
         r.push_parts(ended_row(alias, ended_at));
+    }
+    let mut outcome = TailOutcome::Held;
+    if let Some(p) = rust_pusher.as_mut().filter(|_| !tail.is_empty()) {
+        let started = tokio::time::Instant::now();
+        outcome = hold_tail(p, &tail, rx, stop_rx, alias).await;
+        tracing::info!(
+            alias,
+            ended_at,
+            segments = tail.len(),
+            held_ms = started.elapsed().as_millis() as u64,
+            outcome = outcome.label(),
+            "source ended: freeze tail sent before the unpublish (#424)"
+        );
+    }
+    if let Some(mut p) = rust_pusher.take() {
+        p.finish().await;
     }
     tracing::info!(
         alias,
@@ -134,16 +150,20 @@ pub(crate) async fn idle_until_resume(
         "source ended on purpose: publish closed, waiting for the source"
     );
 
-    let chunk = loop {
-        tokio::select! {
-            c = rx.recv() => break c,
-            changed = stop_rx.changed() => {
-                if changed.is_err() || *stop_rx.borrow() {
-                    break None;
+    let chunk = match outcome {
+        TailOutcome::Resumed(c) => c,
+        TailOutcome::Stop => return None,
+        TailOutcome::Held => loop {
+            tokio::select! {
+                c = rx.recv() => break c,
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break None;
+                    }
                 }
             }
-        }
-    }?;
+        }?,
+    };
 
     *rust_pusher = Some(build_endpoint_pusher(target, stats).await);
     stats.lock().await.delivery_mode = "normal".to_string();
