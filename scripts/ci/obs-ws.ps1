@@ -9,7 +9,7 @@
 #   GetCurrentProgramScene, GetStreamServiceSettings
 #
 # Env: OBS_WS_HOST (127.0.0.1), OBS_WS_PORT (4455), OBS_WS_PASSWORD (optional),
-#      OBS_TEST_SCENE (Development), RIG_LEASE_URL (http://dev1:8890/rig-lease.json).
+#      OBS_TEST_SCENE (Development), RIG_LEASE_URL (http://dev1.local:8890/rig-lease.json).
 
 $script:ObsSocket = $null
 $script:ObsTimeoutMs = 10000
@@ -158,7 +158,7 @@ function Test-ObsProcess {
 # stale, else $null. Unreachable / unparseable -> $null with a warning (fail-open,
 # the same semantics as rig-lease-wait.ps1; this one never waits).
 function Get-RigLeaseHolder {
-  $url = if ($env:RIG_LEASE_URL) { $env:RIG_LEASE_URL } else { "http://dev1:8890/rig-lease.json" }
+  $url = if ($env:RIG_LEASE_URL) { $env:RIG_LEASE_URL } else { "http://dev1.local:8890/rig-lease.json" }
   try {
     $lease = Invoke-RestMethod -Uri $url -Method GET -TimeoutSec 5 -Headers @{ "Cache-Control" = "no-cache" }
   } catch {

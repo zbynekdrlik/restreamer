@@ -140,6 +140,8 @@ async fn consumer_task<P: OutputProcessFactory>(
     // during a keepalive bridge. #124: populated for ALL rust-pusher endpoints
     // (fast AND non-fast); moved (not cloned) into the Arc at the push site.
     let mut last_chunk_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
+    // #424: the last delivered chunk with a keyframe, frozen after a source end.
+    let mut last_keyframe_chunk: Option<std::sync::Arc<Vec<u8>>> = None;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
@@ -397,8 +399,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                         // delivered the last chunk: stop sending until the
                         // source is back, then go on with a fresh session.
                         KeepaliveOutcome::SourceEnded(end) => {
+                            let tail = crate::source_end_tail::tail_for(&alias, &last_chunk_bytes, &last_keyframe_chunk);
+                            last_keyframe_chunk = None;
                             let Some(c) = crate::source_end::idle_until_resume(
-                                &push_target, end, &mut rx, &mut stop_rx, &stats, &audit_ring, &mut rust_pusher,
+                                &push_target, end, &mut rx, &mut stop_rx, &stats, &audit_ring, &mut rust_pusher, tail,
                             )
                             .await
                             else {
@@ -634,7 +638,11 @@ async fn consumer_task<P: OutputProcessFactory>(
                     // into the Arc instead of cloning — no per-chunk memcpy on
                     // the high-bitrate production endpoints.
                     if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
-                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data));
+                        let bytes = std::sync::Arc::new(chunk.data);
+                        if crate::source_end_tail::has_keyframe(&bytes) {
+                            last_keyframe_chunk = Some(std::sync::Arc::clone(&bytes));
+                        }
+                        last_chunk_bytes = Some(bytes);
                     }
                 }
             }

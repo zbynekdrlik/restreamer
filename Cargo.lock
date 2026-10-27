@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2688,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "async-trait",
  "axum",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "anyhow",
  "axum",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "rs-facebook"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "rs-ffmpeg"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "serde",
  "serde_json",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "bytes",
  "bytesio",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "rs-rtmp-push"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "anyhow",
  "axum",
@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.29.58"
+version = "0.29.59"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",

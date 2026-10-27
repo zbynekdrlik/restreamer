@@ -32,7 +32,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "job-owner.ps1")
 
-$Base = if ($env:RIG_LEASE_API) { $env:RIG_LEASE_API.TrimEnd("/") } else { "http://dev1:8890" }
+$Base = if ($env:RIG_LEASE_API) { $env:RIG_LEASE_API.TrimEnd("/") } else { "http://dev1.local:8890" }
 $Token = $env:RIG_LEASE_TOKEN
 $StateDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $LeaseFile = Join-Path $StateDir "rig-lease-id"

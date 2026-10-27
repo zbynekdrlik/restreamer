@@ -62,9 +62,17 @@ reconnect keeps the outage path (keepalive, rescue, alerts).
    or rescue once the endpoint delivered the end. It checks at entry and at the
    top of each loop, before the escalation gate.
    `source_end::idle_until_resume` then:
-   - `shutdown()`s the pusher (primary + YouTube backup);
    - sets `delivery_mode = "ended"` and writes `endpoint_source_ended`;
+   - holds the **freeze tail** (#424, `source_end_tail.rs`): 20 s of the last
+     keyframe repeated (at most the live bitrate) plus AAC-LC silence, pushed in
+     ~1 s segments on the live publish. YouTube drops the last ~9-14 s before an
+     unpublish (also OBS-direct: camera-box A/B, VOD `wISCgipxLoo`, 14.3 s), so
+     the loss falls on the padding. A chunk mid-tail cuts it and resumes. No
+     tail (logged warn) without a keyframe chunk, after a codec change, or for
+     audio other than AAC-LC mono/stereo;
+   - `finish()`es the pusher (primary + YouTube backup);
    - waits on `rx`.
+   - `endpoint_task` keeps `last_keyframe_chunk` next to `last_chunk_bytes`.
 
    The next chunk rebuilds the pusher (`build_endpoint_pusher`), writes
    `endpoint_source_resumed`, and runs `reset_after_rescue` (a new session).

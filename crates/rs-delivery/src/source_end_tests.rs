@@ -109,6 +109,7 @@ async fn an_ended_endpoint_closes_its_publish_and_resumes_on_the_next_chunk() {
                 &stats,
                 &audit,
                 &mut pusher,
+                Vec::new(),
             )
             .await;
             (got, pusher)
@@ -163,6 +164,7 @@ async fn a_stop_while_ended_ends_the_wait() {
             &stats,
             &audit,
             &mut pusher,
+            Vec::new(),
         )
         .await
         .map(|c| c.chunk_id)
@@ -199,6 +201,7 @@ async fn a_closed_channel_while_ended_ends_the_wait() {
             &stats,
             &Some(Arc::clone(&ring)),
             &mut pusher,
+            Vec::new(),
         ),
     )
     .await

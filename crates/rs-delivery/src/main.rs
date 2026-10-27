@@ -49,6 +49,7 @@ pub mod rust_rescue_push;
 mod s3_fetch;
 pub mod s3_fetch_profile;
 mod source_end;
+mod source_end_tail;
 mod test_file_sink;
 
 #[cfg(test)]

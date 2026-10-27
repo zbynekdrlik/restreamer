@@ -57,7 +57,7 @@ may only START and STOP OBS streaming. CI never kills, relaunches, schedules, re
   - **The job TAKES the lease while it streams** (camera-box contract, #349 comments
     6179376408 + 6179710985; camera-box issue 1432). `rig-lease-hold.ps1 -Action Acquire` runs
     between the final re-check and Start:
-    - POST `http://dev1:8890/rig-lease/acquire` with `Bearer $RIG_LEASE_TOKEN` (repo secret);
+    - POST `http://dev1.local:8890/rig-lease/acquire` with `Bearer $RIG_LEASE_TOKEN` (repo secret);
     - a 409 retries inside the job's deadline, then fails naming the holder;
     - a detached `-Action Beat` copy heartbeats every 30 s;
     - `-Action Release` runs in `if: always() && env.RIG_LEASE_HELD == 'true'` after the OBS
@@ -199,7 +199,7 @@ UNKNOWN or refuses: CI fails closed there. restreamer reads ONLY that verdict.
       `MEASUREMENT` for a few polls with no recent FOREIGN, rerun the failed job. Never
       loosen the guard, and never play anything into the mix yourself.
     - **A timeout at "Rig lease: take it before StartStream (#349)" is rig state too.** The
-      lease (dev1:8890) is held per JOB, not per run, so a foreign holder can take it in the
+      lease (dev1.local:8890) is held per JOB, not per run, so a foreign holder can take it in the
       gap between two E2E jobs of one run (camera-box `av-soak`, 8 h, run 38984897525). The
       job spends its 3600 s budget and fails before StartStream, with nothing touched. Read
       the holder and its `ttl_s` in the job log; rerun after it ends, or let the next push
