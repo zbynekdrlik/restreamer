@@ -216,6 +216,69 @@ fn each_segment_covers_one_second_of_the_tail() {
     }
 }
 
+/// A chunk whose audio stops more than one AAC frame before its video (an
+/// encoder that ends the audio track early): the silence starts before the
+/// last picture and belongs to the first segment.
+fn chunk_with_early_audio_end(base: u32) -> Vec<u8> {
+    let mut tags = vec![
+        (VIDEO, 0, AVC_SEQ.to_vec()),
+        (
+            AUDIO,
+            0,
+            vec![0xaf, 0, AAC_LC_48K_STEREO[0], AAC_LC_48K_STEREO[1]],
+        ),
+    ];
+    let mut media = vec![(VIDEO, base, keyframe(20_000))];
+    for i in 1..31u32 {
+        let mut p = vec![0x27, 1, 0, 0, 0];
+        p.resize(2_000, 0xcd);
+        media.push((VIDEO, base + i * 33, p));
+    }
+    for i in 0..44u32 {
+        media.push((
+            AUDIO,
+            base + i * 1024 * 1000 / 48_000,
+            vec![0xaf, 1, 0x55, 0x66],
+        ));
+    }
+    media.sort_by_key(|t| (t.1, t.0));
+    tags.extend(media);
+    flv(&tags)
+}
+
+#[test]
+fn silence_that_starts_before_the_last_picture_goes_into_the_first_segment() {
+    let last = chunk_with_early_audio_end(5_000);
+    let end = last_media_ts(&last);
+    assert_eq!(end, 5_990, "fixture: video ends at 5990");
+    let segments = freeze_tail(&last, &last, TAIL_HOLD).unwrap();
+    assert_eq!(segments.len(), 20);
+    let first = media_of(&segments[..1]);
+    let audio: Vec<u64> = first
+        .iter()
+        .filter(|t| t.kind == AUDIO)
+        .map(|t| t.ts)
+        .collect();
+    assert_eq!(
+        audio[0],
+        5_917 + 21,
+        "silence continues the audio track (last frame 5917)"
+    );
+    assert!(audio[0] < end);
+    let all = media_of(&segments);
+    for kind in [AUDIO, VIDEO] {
+        let ts: Vec<u64> = all
+            .iter()
+            .filter(|t| t.kind == kind)
+            .map(|t| t.ts)
+            .collect();
+        assert!(
+            ts.windows(2).all(|w| w[0] < w[1]),
+            "track {kind} stays monotonic"
+        );
+    }
+}
+
 #[test]
 fn every_segment_is_a_chunk_the_pusher_takes() {
     let last = chunk(5_000, AAC_LC_48K_STEREO, true, AVC_SEQ);
