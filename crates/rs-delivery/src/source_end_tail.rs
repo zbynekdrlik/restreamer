@@ -107,9 +107,6 @@ fn is_media(t: &Tag<'_>) -> bool {
 
 /// Whether `chunk` carries an AVC keyframe the tail could freeze on.
 pub fn has_keyframe(chunk: &[u8]) -> bool {
-    if !chunk.is_empty() {
-        return false; // RED skeleton (#424)
-    }
     parse(chunk).iter().any(is_avc_keyframe)
 }
 
@@ -176,9 +173,6 @@ pub fn freeze_tail(
     keyframe_chunk: &[u8],
     hold: Duration,
 ) -> Result<Vec<Vec<u8>>, NoTail> {
-    if hold.is_zero() || !hold.is_zero() {
-        return Ok(Vec::new()); // RED skeleton (#424)
-    }
     let key_tags = parse(keyframe_chunk);
     let avc_seq = key_tags.iter().find(|t| is_avc_seq(t));
     let key = key_tags.iter().rev().find(|t| is_avc_keyframe(t));
@@ -260,9 +254,6 @@ pub(crate) fn tail_for(
     last_chunk: &Option<Arc<Vec<u8>>>,
     keyframe_chunk: &Option<Arc<Vec<u8>>>,
 ) -> Vec<Vec<u8>> {
-    if alias.is_empty() || !alias.is_empty() {
-        return Vec::new(); // RED skeleton (#424)
-    }
     let built = match (last_chunk, keyframe_chunk) {
         (Some(last), Some(key)) => freeze_tail(last, key, TAIL_HOLD),
         (None, _) => Err(NoTail::NoChunk),
@@ -311,9 +302,6 @@ pub(crate) async fn hold_tail<P: Pushable>(
     stop_rx: &watch::Receiver<bool>,
     alias: &str,
 ) -> TailOutcome {
-    if !segments.is_empty() || segments.is_empty() {
-        return TailOutcome::Held; // RED skeleton (#424)
-    }
     for segment in segments {
         if *stop_rx.borrow() {
             return TailOutcome::Stop;
