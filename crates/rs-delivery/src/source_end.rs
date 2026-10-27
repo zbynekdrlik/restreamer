@@ -129,7 +129,7 @@ pub(crate) async fn idle_until_resume(
         r.push_parts(ended_row(alias, ended_at));
     }
     let mut outcome = TailOutcome::Held;
-    if let Some(p) = rust_pusher.as_mut().filter(|_| !tail.is_empty()) {
+    if let Some(p) = rust_pusher.as_mut() {
         let started = tokio::time::Instant::now();
         outcome = hold_tail(p, &tail, rx, stop_rx, alias).await;
         tracing::info!(
@@ -138,7 +138,7 @@ pub(crate) async fn idle_until_resume(
             segments = tail.len(),
             held_ms = started.elapsed().as_millis() as u64,
             outcome = outcome.label(),
-            "source ended: freeze tail sent before the unpublish (#424)"
+            "source ended: freeze tail held before the unpublish (#424)"
         );
     }
     if let Some(mut p) = rust_pusher.take() {

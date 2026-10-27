@@ -142,6 +142,81 @@ fn the_tail_freezes_the_last_keyframe_with_silence_for_the_whole_hold() {
 }
 
 #[test]
+fn tags_round_trip_every_timestamp_byte() {
+    let bytes = flv(&[
+        (VIDEO, 0x0012_3456, vec![0x17, 1, 0, 0, 0]),
+        (AUDIO, 0x7f65_4321, vec![0xaf, 1, 9]),
+    ]);
+    let tags = parse(&bytes);
+    let got: Vec<(u8, u32, &[u8])> = tags.iter().map(|t| (t.kind, t.ts, t.body)).collect();
+    assert_eq!(
+        got,
+        vec![
+            (VIDEO, 0x0012_3456, &[0x17, 1, 0, 0, 0][..]),
+            (AUDIO, 0x7f65_4321, &[0xaf, 1, 9][..]),
+        ]
+    );
+    assert!(parse(b"FLV").is_empty(), "a short header is no FLV");
+    assert!(parse(b"FLV\x01\x05\0\0\0").is_empty());
+    assert!(!has_keyframe(b"FLV"));
+}
+
+#[test]
+fn sequence_headers_are_told_apart_from_media() {
+    let tag = |kind, body: &'static [u8]| Tag { kind, ts: 0, body };
+    assert!(is_avc_seq(&tag(VIDEO, &[0x17, 0])));
+    assert!(!is_avc_seq(&tag(VIDEO, &[0x17, 1])), "a keyframe");
+    assert!(!is_avc_seq(&tag(VIDEO, &[0x12, 0])), "not AVC");
+    assert!(!is_avc_seq(&tag(AUDIO, &[0x07, 0])), "not video");
+    assert!(is_aac_seq(&tag(AUDIO, &[0xaf, 0, 0x11, 0x90])));
+    assert!(!is_aac_seq(&tag(AUDIO, &[0xaf, 1, 0x11, 0x90])), "a frame");
+    assert!(!is_aac_seq(&tag(AUDIO, &[0x2f, 0, 0x11, 0x90])), "not AAC");
+    assert!(
+        !is_aac_seq(&tag(VIDEO, &[0xaf, 0, 0x11, 0x90])),
+        "not audio"
+    );
+}
+
+/// The exact tags of a short tail: video goes on after the last tag of any
+/// kind, audio after the last AUDIO tag, and nothing reaches the hold's end.
+#[test]
+fn a_short_tail_has_exactly_these_tags() {
+    let mut inter = vec![0x27, 1, 0, 0, 0];
+    inter.resize(50, 0xcd);
+    let last = flv(&[
+        (VIDEO, 0, AVC_SEQ.to_vec()),
+        (AUDIO, 0, vec![0xaf, 0, 0x11, 0x90]),
+        (VIDEO, 1000, keyframe(100)),
+        (AUDIO, 1000, vec![0xaf, 1, 0x55]),
+        (VIDEO, 1010, inter),
+    ]);
+    // Audio frames every 21.33 ms from 1000: 1021, 1043, then 1064 is the
+    // hold's end itself and is left out.
+    let segments = freeze_tail(&last, &last, Duration::from_millis(54)).unwrap();
+    assert_eq!(segments.len(), 1);
+    let got: Vec<(u8, u64)> = media_of(&segments).iter().map(|t| (t.kind, t.ts)).collect();
+    assert_eq!(got, vec![(AUDIO, 1021), (AUDIO, 1043), (VIDEO, 1043)]);
+}
+
+#[test]
+fn each_segment_covers_one_second_of_the_tail() {
+    let last = chunk(5_000, AAC_LC_48K_STEREO, true, AVC_SEQ);
+    let end = last_media_ts(&last);
+    let segments = freeze_tail(&last, &last, TAIL_HOLD).unwrap();
+    assert_eq!(segments.len(), 20);
+    for (k, s) in segments.iter().enumerate() {
+        let from = end + 1000 * k as u64;
+        let media = media_of(std::slice::from_ref(s));
+        assert!(!media.is_empty());
+        assert!(
+            media.iter().all(|t| (from..from + 1000).contains(&t.ts)),
+            "segment {k} holds only [{from}, {})",
+            from + 1000
+        );
+    }
+}
+
+#[test]
 fn every_segment_is_a_chunk_the_pusher_takes() {
     let last = chunk(5_000, AAC_LC_48K_STEREO, true, AVC_SEQ);
     let segments = freeze_tail(&last, &last, TAIL_HOLD).unwrap();
@@ -295,6 +370,10 @@ fn ffmpeg_decodes_the_tail_as_frozen_picture_and_silence() {
         .expect("ffmpeg must be installed (CI installs it)");
     assert!(status.success());
     let source = std::fs::read(&src).unwrap();
+    assert!(
+        last_media_ts(&source) < 3_000,
+        "the source parses to its 2 s of timestamps"
+    );
     let hold = Duration::from_secs(3);
     let segments = freeze_tail(&source, &source, hold).expect("a tail for real AAC-LC + AVC");
 

@@ -33,6 +33,9 @@ const SEGMENT_MS: u64 = 1000;
 const MIN_VIDEO_STEP_MS: u64 = 33;
 const MAX_VIDEO_STEP_MS: u64 = 1000;
 const AAC_FRAME_SAMPLES: f64 = 1024.0;
+/// Upper bound of tags per track, far above a real hold (20 s of 96 kHz AAC
+/// is 1875 frames): no timestamp arithmetic can make the tail unbounded.
+const MAX_TAGS_PER_TRACK: usize = 4096;
 
 /// AAC-LC raw frames that decode to digital silence (the frames hls.js uses).
 const SILENT_MONO: &[u8] = &[0x00, 0xc8, 0x00, 0x80, 0x23, 0x80];
@@ -68,10 +71,10 @@ struct Tag<'a> {
 }
 
 fn parse(bytes: &[u8]) -> Vec<Tag<'_>> {
-    if bytes.len() < 9 || &bytes[..3] != b"FLV" {
+    let Some(header) = bytes.get(..9).filter(|h| h.starts_with(b"FLV")) else {
         return Vec::new();
-    }
-    let mut i = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize + 4;
+    };
+    let mut i = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) as usize + 4;
     let mut tags = Vec::new();
     while i + 11 <= bytes.len() {
         let len = u32::from_be_bytes([0, bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
@@ -117,7 +120,7 @@ fn silence_for(config: &[u8]) -> Result<(u32, &'static [u8]), NoTail> {
     };
     let object_type = a >> 3;
     let channels = (b >> 3) & 0x0f;
-    let rate = SAMPLE_RATES.get(usize::from(((a & 0x07) << 1) | (b >> 7)));
+    let rate = SAMPLE_RATES.get(usize::from((u16::from_be_bytes([a, b]) >> 7) & 0x0f));
     let silent = match channels {
         1 => Some(SILENT_MONO),
         2 => Some(SILENT_STEREO),
@@ -193,16 +196,18 @@ pub fn freeze_tail(
         .ok_or(NoTail::NoAudioConfig)?;
     let (rate, silent) = silence_for(&aac_seq.body[2..])?;
 
-    let last_ts = |kind: u8| {
-        last_tags
-            .iter()
-            .filter(|t| t.kind == kind && is_media(t))
-            .map(|t| u64::from(t.ts))
-            .max()
-    };
-    let (last_video, last_audio) = (last_ts(VIDEO), last_ts(AUDIO));
-    let end = last_video.max(last_audio).ok_or(NoTail::NoChunk)?;
-    let tail_end = end + hold.as_millis() as u64;
+    let media = || last_tags.iter().filter(|t| is_media(t));
+    let end = media()
+        .map(|t| u64::from(t.ts))
+        .max()
+        .ok_or(NoTail::NoChunk)?;
+    let last_audio = media()
+        .filter(|t| t.kind == AUDIO)
+        .map(|t| u64::from(t.ts))
+        .max()
+        .unwrap_or(end);
+    let hold_ms = hold.as_millis() as u64;
+    let tail_end = end + hold_ms;
 
     let mut events: Vec<(u64, u8, Vec<u8>)> = Vec::new();
     let mut frozen = key.body.to_vec();
@@ -212,21 +217,25 @@ pub fn freeze_tail(
         key.body.len(),
         media_span_ms(&key_tags),
     );
-    let first_video = last_video.unwrap_or(end) + MIN_VIDEO_STEP_MS;
-    for v in (first_video..tail_end).step_by(step as usize) {
-        events.push((v, VIDEO, frozen.clone()));
-    }
+    let video = (MIN_VIDEO_STEP_MS..hold_ms)
+        .step_by(step as usize)
+        .map(|offset| end + offset);
+    events.extend(
+        video
+            .take(MAX_TAGS_PER_TRACK)
+            .map(|v| (v, VIDEO, frozen.clone())),
+    );
     let frame_ms = AAC_FRAME_SAMPLES * 1000.0 / f64::from(rate);
     let mut silence = vec![aac_seq.body[0], 1];
     silence.extend_from_slice(silent);
-    let audio_from = last_audio.unwrap_or(end) as f64;
-    let frames = (hold.as_millis() as f64 / frame_ms).ceil() as u64 + 1;
-    for n in 1..=frames {
-        let a = (audio_from + n as f64 * frame_ms).round() as u64;
-        if a < tail_end {
-            events.push((a, AUDIO, silence.clone()));
-        }
-    }
+    let audio = (1..)
+        .map(|n: u32| (last_audio as f64 + f64::from(n) * frame_ms).round() as u64)
+        .take_while(|&a| a < tail_end);
+    events.extend(
+        audio
+            .take(MAX_TAGS_PER_TRACK)
+            .map(|a| (a, AUDIO, silence.clone())),
+    );
     events.sort_by_key(|e| (e.0, e.1));
 
     let mut segments: Vec<Vec<u8>> = Vec::new();
