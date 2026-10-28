@@ -51,6 +51,7 @@ pub mod s3_fetch_profile;
 mod source_end;
 mod source_end_tail;
 mod test_file_sink;
+pub(crate) mod warmup_push;
 
 #[cfg(test)]
 mod api_update_start_tests;

@@ -189,6 +189,31 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     mode: RescuePushMode,
 ) -> bool {
+    rescue_push_loop(
+        &mut pusher,
+        alias,
+        source,
+        buffer_state,
+        stats,
+        stop_rx,
+        mode,
+    )
+    .await
+}
+
+/// The rescue push loop over a BORROWED pusher, so the caller still owns it
+/// when the loop returns and can end its publish cleanly (#424: the warmup
+/// clip `finish()`es its publish before the content publish starts).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rescue_push_loop<P: crate::pushable::Pushable>(
+    pusher: &mut P,
+    alias: &str,
+    source: crate::rescue_segments::RescueClipSource,
+    buffer_state: Arc<BufferState>,
+    stats: Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    mode: RescuePushMode,
+) -> bool {
     let mut continuous_active_ms: u64 = 0;
     let mut last_check = Instant::now();
     // #259: the rescue state that drives WHICH segment we push. `refilling` +

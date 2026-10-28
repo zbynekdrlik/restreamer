@@ -344,11 +344,12 @@ pub(crate) async fn run_defensive_rescue(
 /// the initial cache fill (~120s). Fast endpoints still skip rescue per
 /// the low-latency design trade-off.
 ///
-/// The pusher runs as a background `tokio::task` so it streams in
-/// parallel with the chunk-probe loop. When the probe loop exits (buffer
-/// target met, or stop signal), the handle is aborted — terminating the
-/// rescue stream cleanly. This closes the 2026-05-30 stream.lan blank-
-/// warmup gap (gap #3 of 3 in the design spec).
+/// The pusher runs as a background `tokio::task` (`warmup_push::WarmupPush`)
+/// so it streams in parallel with the chunk-probe loop. When the probe loop
+/// exits (buffer target met, or stop signal), the clip's publish is ENDED
+/// cleanly (#424: unpublish + drain on the primary, backup shut down and
+/// awaited) before this returns. This closes the 2026-05-30 stream.lan
+/// blank-warmup gap (gap #3 of 3 in the design spec).
 ///
 /// `svc_type` is the endpoint's service type, parsed ONCE by the caller
 /// (#192): this function never re-parses `ep_cfg.service_type`.
@@ -411,7 +412,7 @@ pub(crate) async fn run_warmup_loop_with_pusher<
     audit_ring: Option<&std::sync::Arc<crate::audit_ring::AuditRing>>,
     pusher: Option<P>,
 ) -> bool {
-    let warmup_handle: Option<tokio::task::JoinHandle<bool>> = if let Some(pusher) = pusher {
+    let warmup: Option<crate::warmup_push::WarmupPush> = if let Some(pusher) = pusher {
         // Resolve the rescue clip source BEFORE spawning so the audit_ring
         // borrow stays local to this function — the spawned task only owns
         // the resolved source. Warmup mode always shows the "Vysielanie sa o
@@ -439,30 +440,14 @@ pub(crate) async fn run_warmup_loop_with_pusher<
             s.rescue_eta_secs = Some(delivery_delay_ms / 1000);
         }
 
-        // Construct a dummy BufferState with producer_active=false so
-        // the rescue loop's refill-detection exit condition never
-        // fires during warmup. Warmup has its own exit logic — the
-        // probe loop below decides when to stop.
-        let dummy_buffer_state = std::sync::Arc::new(crate::buffer_state::BufferState::new());
-        dummy_buffer_state
-            .producer_active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        let stats_clone = stats.clone();
-        let alias_owned = alias.to_string();
-        let mut warmup_stop = stop_rx.clone();
-        Some(tokio::spawn(async move {
-            crate::rust_rescue_push::rust_rescue_push_with_pusher(
-                pusher,
-                &alias_owned,
-                source,
-                dummy_buffer_state,
-                stats_clone,
-                &mut warmup_stop,
-                crate::rust_rescue_push::RescuePushMode::Warmup,
-            )
-            .await
-        }))
+        // #424: the clip runs on its OWN stop channel, so the end below can
+        // finish its publish instead of aborting it.
+        Some(crate::warmup_push::WarmupPush::spawn(
+            pusher,
+            alias.to_string(),
+            source,
+            stats.clone(),
+        ))
     } else {
         None
     };
@@ -632,21 +617,15 @@ pub(crate) async fn run_warmup_loop_with_pusher<
         }
     };
 
-    // Tear down the warmup rescue pusher task.
-    // Aborting the JoinHandle drops the spawned task; the RtmpPusher
-    // inside is dropped, which closes its session (kill_on_drop-equivalent
-    // for pure-rust). No external ffmpeg process to reap.
-    //
-    // Review finding #3: AWAIT the aborted handle so the spawned task
-    // actually unwinds (dropping the RtmpPusher's Session and closing
-    // its TCP socket) BEFORE this function returns. Without the await,
-    // consumer_task immediately constructs a new RtmpPusher to the same
-    // RTMP URL and the still-alive warmup Session would race to publish
-    // — YouTube/FB would reject one of the two as publish-busy.
-    if let Some(handle) = warmup_handle {
-        handle.abort();
-        let _ = handle.await;
-        tracing::info!(alias, "Warmup rescue pusher stopped");
+    // #424: end the warmup publish CLEANLY before the consumer builds the
+    // content pusher on the same key(s): the primary unpublishes
+    // (FCUnpublish + deleteStream) and drains its send queue, then the backup
+    // mirror is shut down and awaited. An abort here used to drop both
+    // sessions mid-stream, and the dropped backup was not even awaited, so
+    // the content backup publish could overlap it (the go-live repeat).
+    // `stop` is bounded; only a hung end is aborted, with a warning.
+    if let Some(warmup) = warmup {
+        warmup.stop(alias).await;
     }
 
     if !stopped {

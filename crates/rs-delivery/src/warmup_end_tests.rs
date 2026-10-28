@@ -25,7 +25,7 @@ struct Rec {
     log: Log,
     push_ms: u64,
     finish_hangs: bool,
-    gone: Gone,
+    _gone: Gone,
 }
 
 /// Set (and logged) when the pusher is dropped: its session is gone.
@@ -53,7 +53,7 @@ impl Rec {
             log: Arc::clone(log),
             push_ms,
             finish_hangs: false,
-            gone: Gone {
+            _gone: Gone {
                 name,
                 log: Arc::clone(log),
                 flag: Arc::clone(&flag),
@@ -250,4 +250,74 @@ async fn the_warmup_backup_session_is_gone_before_the_content_publish() {
         matches!((finish, gone), (Some(f), Some(g)) if f < g),
         "the primary is unpublished first, then the backup is stopped: {events:?}"
     );
+}
+
+/// A warmup end that hangs (the primary's finish never returns) is aborted
+/// after `WARMUP_STOP_MAX_WAIT`, so the content publish still starts.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_hung_warmup_end_is_aborted_after_the_bound() {
+    use crate::warmup_push::{WARMUP_STOP_MAX_WAIT, WarmupEnd, WarmupPush};
+    let _wd = watchdog("a_hung_warmup_end_is_aborted_after_the_bound");
+    assert_eq!(
+        WARMUP_STOP_MAX_WAIT,
+        Duration::from_secs(20),
+        "the primary's 15 s drain bound plus 5 s for the backup"
+    );
+    let setup = youtube_tee(true);
+    let log = Arc::clone(&setup.log);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let warmup = WarmupPush::spawn(
+        setup.tee,
+        "e2e rtmp".to_string(),
+        crate::rescue_segments::RescueClipSource::Countdown,
+        stats,
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let started = tokio::time::Instant::now();
+    let end = tokio::time::timeout(Duration::from_secs(60), warmup.stop("e2e rtmp"))
+        .await
+        .expect("the stop is bounded");
+    let waited = started.elapsed();
+
+    assert_eq!(end, WarmupEnd::Aborted);
+    assert!(
+        waited >= WARMUP_STOP_MAX_WAIT && waited < WARMUP_STOP_MAX_WAIT + Duration::from_secs(1),
+        "aborted at the bound, not before and not much after: {waited:?}"
+    );
+    let events = log.lock().unwrap().clone();
+    assert!(events.contains(&"primary finish"), "{events:?}");
+    assert!(
+        events.contains(&"primary gone"),
+        "the aborted task dropped its sessions: {events:?}"
+    );
+}
+
+/// A clean end reports `Finished` without waiting for the bound.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_clean_warmup_end_reports_finished_at_once() {
+    use crate::warmup_push::{WarmupEnd, WarmupPush};
+    let _wd = watchdog("a_clean_warmup_end_reports_finished_at_once");
+    let setup = youtube_tee(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let warmup = WarmupPush::spawn(
+        setup.tee,
+        "e2e rtmp".to_string(),
+        crate::rescue_segments::RescueClipSource::Countdown,
+        stats,
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let started = tokio::time::Instant::now();
+    let end = tokio::time::timeout(Duration::from_secs(60), warmup.stop("e2e rtmp"))
+        .await
+        .expect("the stop is bounded");
+
+    assert_eq!(end, WarmupEnd::Finished);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(setup.backup_gone.load(Ordering::SeqCst));
 }
