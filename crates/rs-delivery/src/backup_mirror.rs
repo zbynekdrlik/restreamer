@@ -33,7 +33,7 @@
 //! after that chunk.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rs_ffmpeg::ServiceType;
@@ -42,6 +42,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::audit_ring::{AuditRing, RingRowParts};
+use crate::chunk_push_log::{Ingest, chunk_push_line};
 use crate::endpoint_rtmp_url::{build_backup_rtmp_url, build_rtmp_url};
 use crate::endpoint_stats::Stats;
 use crate::endpoint_task::PrefetchedChunk;
@@ -130,21 +131,45 @@ pub struct BackupIngestStatus {
     /// Whole chunks the tee dropped because the backup queue was full.
     pub dropped_chunks: u64,
     pub last_error: Option<String>,
+    /// #424: the S3 chunk id of the backup's last successful push (`None`
+    /// before one, or when it pushed only clip segments).
+    pub last_chunk_id: Option<i64>,
 }
 
 /// Live state of one backup mirror, shared by the tee (drops), the mirror
 /// task (pushes, deaths) and the endpoint stats.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BackupMirrorState {
     connected: AtomicBool,
     reconnect_count: AtomicU32,
     chunks_pushed: AtomicU64,
     dropped_chunks: AtomicU64,
     last_error: std::sync::Mutex<Option<String>>,
+    /// `NO_CHUNK_ID` until a labelled chunk was pushed.
+    last_chunk_id: AtomicI64,
+}
+
+/// `BackupMirrorState::last_chunk_id` before any labelled chunk.
+const NO_CHUNK_ID: i64 = i64::MIN;
+
+impl Default for BackupMirrorState {
+    fn default() -> Self {
+        Self {
+            connected: AtomicBool::new(false),
+            reconnect_count: AtomicU32::new(0),
+            chunks_pushed: AtomicU64::new(0),
+            dropped_chunks: AtomicU64::new(0),
+            last_error: std::sync::Mutex::new(None),
+            last_chunk_id: AtomicI64::new(NO_CHUNK_ID),
+        }
+    }
 }
 
 impl BackupMirrorState {
-    fn note_pushed(&self, reconnect_count: u32) {
+    fn note_pushed(&self, reconnect_count: u32, chunk_id: Option<i64>) {
+        if let Some(id) = chunk_id {
+            self.last_chunk_id.store(id, Ordering::Relaxed);
+        }
         self.connected.store(true, Ordering::Relaxed);
         self.reconnect_count
             .store(reconnect_count, Ordering::Relaxed);
@@ -177,6 +202,8 @@ impl BackupMirrorState {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            last_chunk_id: Some(self.last_chunk_id.load(Ordering::Relaxed))
+                .filter(|id| *id != NO_CHUNK_ID),
         }
     }
 }
@@ -241,15 +268,15 @@ fn backup_died_row(
 /// own reconnect and backoff. Runs until the queue closes or it is aborted.
 async fn run_mirror<P: Pushable>(
     mut pusher: P,
-    mut rx: mpsc::Receiver<Arc<[u8]>>,
+    mut rx: mpsc::Receiver<MirrorChunk>,
     state: Arc<BackupMirrorState>,
     alias: String,
     audit_ring: Option<Arc<AuditRing>>,
 ) {
     let mut backoff = MirrorBackoff::default();
-    while let Some(chunk) = rx.recv().await {
-        let result =
-            tokio::time::timeout(BACKUP_WRITE_TIMEOUT, pusher.push_flv_bytes(&chunk)).await;
+    while let Some(MirrorChunk { chunk_id, data }) = rx.recv().await {
+        let start_unix_ms = crate::endpoint_stats::unix_ms_now();
+        let result = tokio::time::timeout(BACKUP_WRITE_TIMEOUT, pusher.push_flv_bytes(&data)).await;
         // Drain the backup pusher's A/V invariant edges (it queues them until
         // taken). They are not audited: the endpoint's push-stage invariant
         // episode belongs to the primary (outage-notifier keying).
@@ -257,7 +284,18 @@ async fn run_mirror<P: Pushable>(
         let err = match result {
             Ok(Ok(())) => {
                 backoff.on_ok(Instant::now());
-                state.note_pushed(pusher.reconnect_count());
+                state.note_pushed(pusher.reconnect_count(), chunk_id);
+                // #424: which chunk the backup pushed when, at which wire ts.
+                if let Some(line) = chunk_push_line(
+                    &alias,
+                    Ingest::Backup,
+                    chunk_id,
+                    pusher.last_wire_span(),
+                    start_unix_ms,
+                    crate::endpoint_stats::unix_ms_now(),
+                ) {
+                    tracing::info!(target: "chunk_push", "{line}");
+                }
                 continue;
             }
             Ok(Err(e)) => e,
@@ -287,8 +325,15 @@ async fn run_mirror<P: Pushable>(
 
 /// One endpoint's backup ingest: a task with its own pusher, fed through a
 /// bounded queue the tee never waits on.
+/// One queued backup payload: the bytes plus, for a live chunk, its S3 id
+/// (`None` for a rescue / warmup clip segment).
+struct MirrorChunk {
+    chunk_id: Option<i64>,
+    data: Arc<[u8]>,
+}
+
 pub(crate) struct BackupMirror {
-    tx: mpsc::Sender<Arc<[u8]>>,
+    tx: mpsc::Sender<MirrorChunk>,
     state: Arc<BackupMirrorState>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -317,8 +362,12 @@ impl BackupMirror {
 
     /// Queue one chunk for the backup; never waits. A full queue (or a
     /// stopped mirror) drops the chunk and counts it.
-    pub fn offer(&self, data: &[u8]) {
-        if self.tx.try_send(Arc::from(data)).is_err() {
+    pub fn offer(&self, chunk_id: Option<i64>, data: &[u8]) {
+        let chunk = MirrorChunk {
+            chunk_id,
+            data: Arc::from(data),
+        };
+        if self.tx.try_send(chunk).is_err() {
             self.state.note_dropped();
         }
     }
@@ -365,6 +414,9 @@ pub(crate) struct TeePusher<P> {
     /// Chunks `offer_ahead` gave the backup that the primary has not pushed
     /// yet. Each `push_flv_bytes` consumes one instead of offering.
     pre_offered: u32,
+    /// #424: the chunk id of the next `push_flv_bytes` payload
+    /// (`Pushable::label_chunk`), taken by that push.
+    next_chunk_id: Option<i64>,
 }
 
 impl<P> TeePusher<P> {
@@ -373,6 +425,7 @@ impl<P> TeePusher<P> {
             primary,
             backup,
             pre_offered: 0,
+            next_chunk_id: None,
         }
     }
 
@@ -383,9 +436,9 @@ impl<P> TeePusher<P> {
 
     /// Offer `data` to the backup now, ahead of its primary push. A no-op
     /// without a backup.
-    pub fn offer_ahead(&mut self, data: &[u8]) {
+    pub fn offer_ahead(&mut self, chunk_id: i64, data: &[u8]) {
         if let Some(backup) = &self.backup {
-            backup.offer(data);
+            backup.offer(Some(chunk_id), data);
             self.pre_offered += 1;
         }
     }
@@ -406,7 +459,7 @@ impl<P> TeePusher<P> {
 /// order.
 pub(crate) fn feed_backup_ahead<P>(
     tee: &mut TeePusher<P>,
-    current: &[u8],
+    current: &PrefetchedChunk,
     current_offered: bool,
     rx: &mut mpsc::Receiver<PrefetchedChunk>,
     lookahead: &mut Option<PrefetchedChunk>,
@@ -415,12 +468,12 @@ pub(crate) fn feed_backup_ahead<P>(
         return;
     }
     if !current_offered {
-        tee.offer_ahead(current);
+        tee.offer_ahead(current.chunk_id, &current.data);
     }
     if lookahead.is_none()
         && let Ok(next) = rx.try_recv()
     {
-        tee.offer_ahead(&next.data);
+        tee.offer_ahead(next.chunk_id, &next.data);
         *lookahead = Some(next);
     }
 }
@@ -448,11 +501,12 @@ impl<P: Pushable> TeePusher<P> {
 
 impl<P: Pushable + Send> Pushable for TeePusher<P> {
     async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
+        let chunk_id = self.next_chunk_id.take();
         if let Some(backup) = &self.backup {
             if self.pre_offered > 0 {
                 self.pre_offered -= 1;
             } else {
-                backup.offer(data);
+                backup.offer(chunk_id, data);
             }
         }
         self.primary.push_flv_bytes(data).await
@@ -484,6 +538,14 @@ impl<P: Pushable + Send> Pushable for TeePusher<P> {
 
     fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
         self.primary.last_upstream_ack_at()
+    }
+
+    fn last_wire_span(&self) -> Option<rs_rtmp_push::WireSpan> {
+        self.primary.last_wire_span()
+    }
+
+    fn label_chunk(&mut self, chunk_id: i64) {
+        self.next_chunk_id = Some(chunk_id);
     }
 }
 

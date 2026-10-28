@@ -336,6 +336,10 @@ impl Session {
     pub async fn close(mut self) {
         if let Some(h) = self.read_loop_handle.take() {
             h.abort();
+            // #424: the read loop holds a clone of the io; wait until it is
+            // gone so the socket closes before `close` (and `finish`) returns
+            // and a publish built right after never overlaps this one.
+            let _ = h.await;
         }
         // `self.io` is intentionally held until here so the Arc stays alive
         // long enough for the read-loop abort to complete before the TcpIO

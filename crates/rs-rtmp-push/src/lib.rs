@@ -17,6 +17,7 @@ mod skew;
 mod state;
 pub mod tls;
 mod url;
+mod wire_span;
 
 pub use av_invariant::{
     AV_INVARIANT_TOLERANCE_MS, AvInvariantEvent, AvInvariantGuard, AvInvariantViolation,
@@ -29,3 +30,4 @@ pub use pusher::RtmpPusher;
 pub use session::{DrainOutcome, FINISH_MAX_WAIT, FinishReport};
 pub use skew::{GuardMode, MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};
+pub use wire_span::WireSpan;

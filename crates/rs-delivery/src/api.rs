@@ -734,13 +734,12 @@ pub struct LogsResponse {
     pub entries: Vec<LogEntry>,
 }
 
-const MAX_LOG_ENTRIES: usize = 1000;
-
 async fn get_logs(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<LogQueryParams>,
 ) -> Json<LogsResponse> {
-    let limit = params.limit.unwrap_or(100).min(MAX_LOG_ENTRIES);
+    // The buffer bounds the answer (#424: head + gap line + tail).
+    let limit = params.limit.unwrap_or(100);
     let entries = state.log_buffer.recent("", limit);
     Json(LogsResponse { entries })
 }

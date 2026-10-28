@@ -344,11 +344,12 @@ pub(crate) async fn run_defensive_rescue(
 /// the initial cache fill (~120s). Fast endpoints still skip rescue per
 /// the low-latency design trade-off.
 ///
-/// The pusher runs as a background `tokio::task` so it streams in
-/// parallel with the chunk-probe loop. When the probe loop exits (buffer
-/// target met, or stop signal), the handle is aborted — terminating the
-/// rescue stream cleanly. This closes the 2026-05-30 stream.lan blank-
-/// warmup gap (gap #3 of 3 in the design spec).
+/// The pusher runs as a background `tokio::task` (`warmup_push::WarmupPush`)
+/// so it streams in parallel with the chunk-probe loop. When the probe loop
+/// exits (buffer target met, or stop signal), the clip's publish is ENDED
+/// cleanly (#424: unpublish + drain on the primary, backup shut down and
+/// awaited) before this returns. This closes the 2026-05-30 stream.lan
+/// blank-warmup gap (gap #3 of 3 in the design spec).
 ///
 /// `svc_type` is the endpoint's service type, parsed ONCE by the caller
 /// (#192): this function never re-parses `ep_cfg.service_type`.
@@ -366,11 +367,52 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     audit_ring: Option<&std::sync::Arc<crate::audit_ring::AuditRing>>,
 ) -> bool {
     // R3 GREEN: always push rescue during warmup for non-fast endpoints.
-    // The outer `if let Some(rescue_url) = ...` guard from the pre-fix
-    // body is GONE — `resolve_rescue_bytes(None, ...)` falls back to
-    // DEFAULT_RESCUE_FLV so blank-warmup is impossible. Fast endpoints
-    // continue to skip rescue per design (low-latency trade-off).
-    let warmup_handle: Option<tokio::task::JoinHandle<bool>> = if !ep_cfg.is_fast {
+    // Fast endpoints skip rescue per design (low-latency trade-off).
+    // #368: the warmup clip reaches the YouTube backup ingest too, so the
+    // pusher comes from the one factory. Nothing connects here: both
+    // pushers dial on their first segment.
+    let pusher = if !ep_cfg.is_fast {
+        let target =
+            crate::backup_mirror::PushTarget::for_endpoint(ep_cfg, svc_type, audit_ring.cloned());
+        Some(crate::backup_mirror::build_endpoint_pusher(&target, stats).await)
+    } else {
+        None
+    };
+    run_warmup_loop_with_pusher(
+        fetcher,
+        alias,
+        ep_cfg,
+        start_chunk_id,
+        delivery_delay_ms,
+        rescue_video_url,
+        stats,
+        stop_rx,
+        audit_ring,
+        pusher,
+    )
+    .await
+}
+
+/// `run_warmup_loop` with the warmup clip's pusher injected (`None` for a
+/// fast endpoint, which never shows the clip), so tests can drive it with a
+/// recording pusher.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_warmup_loop_with_pusher<
+    F: crate::endpoint_task::ChunkFetcher,
+    P: crate::pushable::Pushable + Send + 'static,
+>(
+    fetcher: &F,
+    alias: &str,
+    ep_cfg: &crate::api::EndpointConfig,
+    start_chunk_id: i64,
+    delivery_delay_ms: u64,
+    rescue_video_url: Option<&str>,
+    stats: &crate::endpoint_task::Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    audit_ring: Option<&std::sync::Arc<crate::audit_ring::AuditRing>>,
+    pusher: Option<P>,
+) -> bool {
+    let warmup: Option<crate::warmup_push::WarmupPush> = if let Some(pusher) = pusher {
         // Resolve the rescue clip source BEFORE spawning so the audit_ring
         // borrow stays local to this function — the spawned task only owns
         // the resolved source. Warmup mode always shows the "Vysielanie sa o
@@ -380,6 +422,15 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         let audit_ring_owned: Option<std::sync::Arc<crate::audit_ring::AuditRing>> =
             audit_ring.cloned();
         let source = resolve_rescue_source(rescue_video_url, &audit_ring_owned, alias).await;
+        tracing::info!(
+            alias,
+            source = %source.describe(
+                crate::rust_rescue_push::RescuePushMode::Warmup,
+                false,
+                RESCUE_REFILL_TARGET_SECS,
+            ),
+            "rust_rescue_push: starting the warmup clip"
+        );
 
         // Seed warmup stats so the dashboard reflects warmup state from the
         // first frame. The probe loop below updates rescue_eta_secs each tick.
@@ -389,33 +440,14 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
             s.rescue_eta_secs = Some(delivery_delay_ms / 1000);
         }
 
-        // Construct a dummy BufferState with producer_active=false so
-        // `rust_rescue_push`'s refill-detection exit condition never
-        // fires during warmup. Warmup has its own exit logic — the
-        // probe loop below decides when to stop, and we abort this
-        // handle. The pusher here is purely a fire-and-forget "keep
-        // pushing bytes until aborted" worker.
-        let dummy_buffer_state = std::sync::Arc::new(crate::buffer_state::BufferState::new());
-        dummy_buffer_state
-            .producer_active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        // #368: the warmup clip reaches the YouTube backup ingest too.
-        let target =
-            crate::backup_mirror::PushTarget::for_endpoint(ep_cfg, svc_type, audit_ring_owned);
-        let stats_clone = stats.clone();
-        let mut warmup_stop = stop_rx.clone();
-        Some(tokio::spawn(async move {
-            crate::rust_rescue_push::rust_rescue_push(
-                target,
-                source,
-                dummy_buffer_state,
-                stats_clone,
-                &mut warmup_stop,
-                crate::rust_rescue_push::RescuePushMode::Warmup,
-            )
-            .await
-        }))
+        // #424: the clip runs on its OWN stop channel, so the end below can
+        // finish its publish instead of aborting it.
+        Some(crate::warmup_push::WarmupPush::spawn(
+            pusher,
+            alias.to_string(),
+            source,
+            stats.clone(),
+        ))
     } else {
         None
     };
@@ -585,21 +617,15 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         }
     };
 
-    // Tear down the warmup rescue pusher task.
-    // Aborting the JoinHandle drops the spawned task; the RtmpPusher
-    // inside is dropped, which closes its session (kill_on_drop-equivalent
-    // for pure-rust). No external ffmpeg process to reap.
-    //
-    // Review finding #3: AWAIT the aborted handle so the spawned task
-    // actually unwinds (dropping the RtmpPusher's Session and closing
-    // its TCP socket) BEFORE this function returns. Without the await,
-    // consumer_task immediately constructs a new RtmpPusher to the same
-    // RTMP URL and the still-alive warmup Session would race to publish
-    // — YouTube/FB would reject one of the two as publish-busy.
-    if let Some(handle) = warmup_handle {
-        handle.abort();
-        let _ = handle.await;
-        tracing::info!(alias, "Warmup rescue pusher stopped");
+    // #424: end the warmup publish CLEANLY before the consumer builds the
+    // content pusher on the same key(s): the primary unpublishes
+    // (FCUnpublish + deleteStream) and drains its send queue, then the backup
+    // mirror is shut down and awaited. An abort here used to drop both
+    // sessions mid-stream, and the dropped backup was not even awaited, so
+    // the content backup publish could overlap it (the go-live repeat).
+    // `stop` is bounded; only a hung end is aborted, with a warning.
+    if let Some(warmup) = warmup {
+        warmup.stop(alias).await;
     }
 
     if !stopped {

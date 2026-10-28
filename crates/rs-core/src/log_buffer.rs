@@ -22,27 +22,56 @@ pub struct LogEntry {
 /// whole copy. A push that finds the lock taken drops its entry and counts
 /// it in `dropped()`. Only this in-memory view loses it: the file log
 /// (restreamer.log) gets every line through its own non-blocking writer.
+///
+/// A buffer built with [`LogBuffer::with_head`] also PINS its first entries
+/// (#424): the delivery VPS keeps its session start (init, warmup, the
+/// warmup-to-content switch) next to the newest tail, instead of only the
+/// last lines of a long event.
 #[derive(Clone)]
 pub struct LogBuffer {
-    inner: Arc<Mutex<VecDeque<LogEntry>>>,
-    capacity: usize,
+    inner: Arc<Mutex<Entries>>,
     dropped: Arc<AtomicU64>,
 }
 
+/// The pinned head plus the evicting tail.
+struct Entries {
+    head: Vec<LogEntry>,
+    head_capacity: usize,
+    tail: VecDeque<LogEntry>,
+    tail_capacity: usize,
+    /// Entries evicted from the tail since the head filled: the gap between
+    /// the head and the tail.
+    evicted: u64,
+}
+
+/// Target of the synthetic entry `recent` puts between the tail and the
+/// pinned head when entries in between were evicted.
+pub const LOG_GAP_TARGET: &str = "log_buffer::gap";
+
 impl LogBuffer {
+    /// A plain ring of the last `capacity` entries.
     pub fn new(capacity: usize) -> Self {
+        Self::with_head(0, capacity)
+    }
+
+    /// The first `head` entries are kept for good; after them, a ring of the
+    /// last `tail` entries.
+    pub fn with_head(head: usize, tail: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-            capacity,
+            inner: Arc::new(Mutex::new(Entries {
+                head: Vec::with_capacity(head),
+                head_capacity: head,
+                tail: VecDeque::with_capacity(tail),
+                tail_capacity: tail,
+                evicted: 0,
+            })),
             dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Push a log entry into the buffer, evicting the oldest if full.
+    /// Push a log entry: into the pinned head while it has room, else into
+    /// the tail, evicting the tail's oldest when full.
     pub fn push(&self, entry: LogEntry) {
-        if self.capacity == 0 {
-            return;
-        }
         let mut buf = match self.inner.try_lock() {
             Ok(buf) => buf,
             Err(TryLockError::Poisoned(p)) => p.into_inner(),
@@ -51,10 +80,18 @@ impl LogBuffer {
                 return;
             }
         };
-        if buf.len() >= self.capacity {
-            buf.pop_front();
+        if buf.head.len() < buf.head_capacity {
+            buf.head.push(entry);
+            return;
         }
-        buf.push_back(entry);
+        if buf.tail_capacity == 0 {
+            return;
+        }
+        if buf.tail.len() >= buf.tail_capacity {
+            buf.tail.pop_front();
+            buf.evicted += 1;
+        }
+        buf.tail.push_back(entry);
     }
 
     /// Entries `push` dropped because the buffer was locked at that moment.
@@ -62,11 +99,24 @@ impl LogBuffer {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Return recent log entries whose target starts with `prefix`, newest first.
+    /// Return recent log entries whose target starts with `prefix`, newest
+    /// first: the tail, then (for a pinned head) a [`LOG_GAP_TARGET`] entry
+    /// counting the evicted entries in between, then the head.
     pub fn recent(&self, prefix: &str, limit: usize) -> Vec<LogEntry> {
         let buf = self.inner.lock().unwrap();
-        buf.iter()
+        let gap = (buf.head_capacity > 0 && buf.evicted > 0).then(|| LogEntry {
+            level: "WARN".into(),
+            target: LOG_GAP_TARGET.into(),
+            message: format!(
+                "{} log entries between the session start and the newest ones were evicted",
+                buf.evicted
+            ),
+        });
+        buf.tail
+            .iter()
             .rev()
+            .chain(gap.iter())
+            .chain(buf.head.iter().rev())
             .filter(|e| e.target.starts_with(prefix))
             .take(limit)
             .cloned()
@@ -156,6 +206,93 @@ mod tests {
             message: "hello".into(),
         });
         assert!(buf.recent("test", 10).is_empty());
+    }
+
+    fn numbered(i: usize) -> LogEntry {
+        LogEntry {
+            level: "INFO".into(),
+            target: "rs_delivery".into(),
+            message: format!("msg-{i}"),
+        }
+    }
+
+    fn messages(buf: &LogBuffer, prefix: &str, limit: usize) -> Vec<String> {
+        buf.recent(prefix, limit)
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    /// #424: the session start survives a long run: the head is pinned, the
+    /// tail rolls, and a gap entry counts what was evicted in between.
+    #[test]
+    fn a_pinned_head_keeps_the_session_start() {
+        let buf = LogBuffer::with_head(2, 3);
+        for i in 0..9 {
+            buf.push(numbered(i));
+        }
+        assert_eq!(
+            messages(&buf, "", 100),
+            vec![
+                "msg-8",
+                "msg-7",
+                "msg-6",
+                "4 log entries between the session start and the newest ones were evicted",
+                "msg-1",
+                "msg-0",
+            ]
+        );
+        let gap = &buf.recent("", 100)[3];
+        assert_eq!(gap.target, LOG_GAP_TARGET);
+        assert_eq!(gap.level, "WARN");
+        // The gap is an entry of its own target: a prefix query skips it.
+        assert_eq!(
+            messages(&buf, "rs_delivery", 100),
+            vec!["msg-8", "msg-7", "msg-6", "msg-1", "msg-0"]
+        );
+        // `limit` still counts from the newest.
+        assert_eq!(messages(&buf, "", 2), vec!["msg-8", "msg-7"]);
+    }
+
+    /// No gap entry while nothing was evicted, and none without a head.
+    #[test]
+    fn a_gap_entry_appears_only_after_an_eviction_past_a_head() {
+        let buf = LogBuffer::with_head(2, 3);
+        for i in 0..5 {
+            buf.push(numbered(i));
+        }
+        assert_eq!(
+            messages(&buf, "", 100),
+            vec!["msg-4", "msg-3", "msg-2", "msg-1", "msg-0"]
+        );
+        buf.push(numbered(5));
+        assert_eq!(
+            messages(&buf, "", 100),
+            vec![
+                "msg-5",
+                "msg-4",
+                "msg-3",
+                "1 log entries between the session start and the newest ones were evicted",
+                "msg-1",
+                "msg-0",
+            ]
+        );
+
+        let plain = LogBuffer::new(2);
+        for i in 0..5 {
+            plain.push(numbered(i));
+        }
+        assert_eq!(messages(&plain, "", 100), vec!["msg-4", "msg-3"]);
+    }
+
+    /// A head with no tail keeps exactly the first entries.
+    #[test]
+    fn a_head_without_a_tail_keeps_only_the_first_entries() {
+        let buf = LogBuffer::with_head(2, 0);
+        for i in 0..5 {
+            buf.push(numbered(i));
+        }
+        assert_eq!(messages(&buf, "", 100), vec!["msg-1", "msg-0"]);
     }
 
     #[test]
