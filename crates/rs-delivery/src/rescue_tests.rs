@@ -601,3 +601,6 @@ async fn defensive_rescue_activates_closes_the_live_pusher_and_returns_on_stop()
         "a RescueActivated row for this endpoint at chunk 41 is required"
     );
 }
+
+#[path = "warmup_end_tests.rs"]
+mod warmup_end;
