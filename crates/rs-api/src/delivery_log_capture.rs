@@ -83,14 +83,16 @@ pub(crate) fn decide_log_capture(
     }
 }
 
-/// Fetch the VPS's log over HTTP (`GET /api/logs?limit=5000`) and render it as
+/// Fetch the VPS's log over HTTP (`GET /api/logs?limit=20000`) and render it as
 /// chronological text lines. Returns `None` when the VPS is unreachable / the
 /// response is non-success / the body cannot be parsed (all the cases where the
 /// S3 fallback must take over). `Some("")` is possible for a reachable VPS with
 /// an empty log and is treated as "try S3" by the decider.
 async fn fetch_vps_log_http(instance: &DeliveryInstance) -> Option<String> {
     let client = reqwest::Client::new();
-    let url = format!("http://{}:8000/api/logs?limit=5000", instance.ipv4);
+    // #424: the whole VPS buffer: its pinned session start, the gap line and
+    // the newest tail (rs-delivery `VPS_LOG_HEAD_ENTRIES`/`_TAIL_ENTRIES`).
+    let url = format!("http://{}:8000/api/logs?limit=20000", instance.ipv4);
     let resp = match client
         .get(&url)
         .bearer_auth(&instance.auth_token)

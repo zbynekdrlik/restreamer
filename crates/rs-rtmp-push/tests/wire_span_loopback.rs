@@ -11,6 +11,22 @@ use av_flv::*;
 use rs_rtmp_push::{PusherConfig, RtmpPusher, WireSpan};
 use std::time::Duration;
 
+/// Tags of `av_chunk(f, f, f + 480, _)`: 13 video (every 40 ms) + 25 audio
+/// (every 20 ms).
+const TAGS_PER_CHUNK: usize = 38;
+
+/// Wait (bounded) until the recording server holds `n` tags: the server
+/// records asynchronously, and a starved runner may lag behind the push.
+async fn wait_recorded(recorded: &tokio::sync::Mutex<Vec<RecordedTag>>, n: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while recorded.lock().await.len() < n {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the server did not record {n} tags within 10 s"));
+}
+
 #[tokio::test]
 async fn the_wire_span_is_what_each_push_put_on_the_wire() {
     let (url, recorded, _server, sub_ready) = spawn_recording_xiu_server().await;
@@ -26,8 +42,9 @@ async fn the_wire_span_is_what_each_push_put_on_the_wire() {
 
     push_within(&mut pusher, &av_chunk(0, 0, 480, 1), "chunk 1").await;
     let first = pusher.last_wire_span().expect("chunk 1 span");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_recorded(&recorded, TAGS_PER_CHUNK).await;
     let rec = recorded.lock().await;
+    assert_eq!(rec.len(), TAGS_PER_CHUNK);
     assert_eq!(
         first,
         WireSpan {
@@ -36,17 +53,16 @@ async fn the_wire_span_is_what_each_push_put_on_the_wire() {
         },
         "chunk 1: the first tag sent and the highest one"
     );
-    let chunk1_tags = rec.len();
     drop(rec);
 
     push_within(&mut pusher, &av_chunk(500, 500, 980, 1), "chunk 2").await;
     let second = pusher.last_wire_span().expect("chunk 2 span");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_recorded(&recorded, 2 * TAGS_PER_CHUNK).await;
     let rec = recorded.lock().await;
     assert_eq!(
         second,
         WireSpan {
-            first_ts_ms: u64::from(rec[chunk1_tags].timestamp_ms),
+            first_ts_ms: u64::from(rec[TAGS_PER_CHUNK].timestamp_ms),
             last_ts_ms: u64::from(rec.iter().map(|r| r.timestamp_ms).max().unwrap()),
         },
         "chunk 2 has its own span, not chunk 1's"

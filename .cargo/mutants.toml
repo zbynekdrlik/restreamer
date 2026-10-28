@@ -45,6 +45,9 @@ exclude_re = [
     "DeliveryOrchestrator::stop_delivery",
     "DeliveryOrchestrator::get_delivery_status",
     "delivery_logs",
+    # #424: plain HTTP GET of a VPS at its fixed :8000 (network I/O, untestable
+    # in-process); the source choice is tested in `decide_log_capture`.
+    "fetch_vps_log_http",
     "upload_rescue_video",
     "tail_lines",
     "S3Client::upload_public_object",

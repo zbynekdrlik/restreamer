@@ -42,6 +42,8 @@ pub(crate) enum WarmupEnd {
     Finished,
     /// The end hung past [`WARMUP_STOP_MAX_WAIT`]; the task was aborted.
     Aborted,
+    /// The warmup task panicked: its sessions were dropped, not finished.
+    Panicked,
 }
 
 /// The running warmup clip push of one endpoint.
@@ -95,7 +97,8 @@ impl WarmupPush {
         let _ = self.stop_tx.send(true);
         let mut task = self.task;
         let end = match tokio::time::timeout(WARMUP_STOP_MAX_WAIT, &mut task).await {
-            Ok(_) => WarmupEnd::Finished,
+            Ok(Ok(())) => WarmupEnd::Finished,
+            Ok(Err(_join_error)) => WarmupEnd::Panicked,
             Err(_elapsed) => {
                 task.abort();
                 let _ = task.await;
@@ -114,6 +117,11 @@ impl WarmupPush {
                 waited_ms,
                 max_wait_ms = WARMUP_STOP_MAX_WAIT.as_millis() as u64,
                 "warmup publish end hung; task aborted, its sessions dropped without unpublish (#424)"
+            ),
+            WarmupEnd::Panicked => tracing::error!(
+                alias,
+                waited_ms,
+                "warmup push task panicked; its sessions were dropped without unpublish (#424)"
             ),
         }
         end

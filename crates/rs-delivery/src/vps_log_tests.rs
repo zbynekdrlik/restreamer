@@ -1,5 +1,5 @@
 //! #424: the VPS `/api/logs` serves the pinned session start AND the newest
-//! tail, so the host's post-mortem capture (limit 5000) holds the go-live too
+//! tail, so the host's post-mortem capture (limit 20000) holds the go-live too
 //! (it used to hold only the last 1000 lines of a long event).
 
 use crate::api::{LogsResponse, router};
@@ -14,7 +14,7 @@ const TOKEN: &str = "vps-log-token";
 
 #[tokio::test]
 async fn the_log_serves_the_session_start_and_the_newest_tail() {
-    assert_eq!((VPS_LOG_HEAD_ENTRIES, VPS_LOG_TAIL_ENTRIES), (2500, 2499));
+    assert_eq!((VPS_LOG_HEAD_ENTRIES, VPS_LOG_TAIL_ENTRIES), (10000, 9999));
     let mut state = AppState::new_for_test();
     state.log_buffer = vps_log_buffer();
     state.auth_token = tokio::sync::RwLock::new(Some(TOKEN.to_string()));
@@ -28,7 +28,7 @@ async fn the_log_serves_the_session_start_and_the_newest_tail() {
     }
     let req = Request::builder()
         // The host's capture asks for exactly the whole buffer.
-        .uri("/api/logs?limit=5000")
+        .uri("/api/logs?limit=20000")
         .header("authorization", format!("Bearer {TOKEN}"))
         .body(Body::empty())
         .unwrap();

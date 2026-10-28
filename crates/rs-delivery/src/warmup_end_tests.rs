@@ -25,6 +25,7 @@ struct Rec {
     log: Log,
     push_ms: u64,
     finish_hangs: bool,
+    finish_panics: bool,
     _gone: Gone,
 }
 
@@ -53,6 +54,7 @@ impl Rec {
             log: Arc::clone(log),
             push_ms,
             finish_hangs: false,
+            finish_panics: false,
             _gone: Gone {
                 name,
                 log: Arc::clone(log),
@@ -92,6 +94,7 @@ impl Pushable for Rec {
         if self.finish_hangs {
             std::future::pending::<()>().await;
         }
+        assert!(!self.finish_panics, "the warmup finish panicked (test)");
     }
 
     fn reconnect_count(&self) -> u32 {
@@ -320,4 +323,70 @@ async fn a_clean_warmup_end_reports_finished_at_once() {
         started.elapsed()
     );
     assert!(setup.backup_gone.load(Ordering::SeqCst));
+}
+
+/// A warmup task that panicked is reported as such, never as a clean end.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_panicked_warmup_task_is_reported_as_panicked() {
+    use crate::warmup_push::{WarmupEnd, WarmupPush};
+    let _wd = watchdog("a_panicked_warmup_task_is_reported_as_panicked");
+    let log: Log = Arc::default();
+    let (mut primary, _gone) = Rec::new("primary", &log, 400);
+    primary.finish_panics = true;
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let warmup = WarmupPush::spawn(
+        primary,
+        "e2e rtmp".to_string(),
+        crate::rescue_segments::RescueClipSource::Countdown,
+        stats,
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let end = tokio::time::timeout(Duration::from_secs(60), warmup.stop("e2e rtmp"))
+        .await
+        .expect("the stop is bounded");
+
+    assert_eq!(end, WarmupEnd::Panicked);
+}
+
+/// An endpoint stop during warmup ends the clip's publish the same clean way
+/// (unpublish, backup stopped) and reports the stop.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_endpoint_stop_during_warmup_finishes_the_publish_too() {
+    let _wd = watchdog("an_endpoint_stop_during_warmup_finishes_the_publish_too");
+    let setup = youtube_tee(false);
+    let log = Arc::clone(&setup.log);
+    let backup_gone = Arc::clone(&setup.backup_gone);
+    let alias = unique_alias("warmup-stop");
+    let ep_cfg = test_endpoint_config(&alias, false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let _ = stop_tx.send(true);
+    });
+
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(60),
+        run_warmup_loop_with_pusher(
+            &PacedFetcher,
+            &alias,
+            &ep_cfg,
+            0,
+            600_000, // never met: the stop ends the warmup
+            None,
+            &stats,
+            &mut stop_rx,
+            None,
+            Some(setup.tee),
+        ),
+    )
+    .await
+    .expect("the warmup ends within the bound");
+
+    let gone_at_return = backup_gone.load(Ordering::SeqCst);
+    assert!(stopped, "an endpoint stop returns true");
+    let events = log.lock().unwrap().clone();
+    assert!(events.contains(&"primary finish"), "{events:?}");
+    assert!(gone_at_return, "{events:?}");
 }
