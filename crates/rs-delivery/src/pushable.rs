@@ -52,6 +52,15 @@ pub(crate) trait Pushable {
     fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
         None
     }
+    /// #424: first/last outgoing media ts of the last successful push, for
+    /// the per-chunk push log. `None` = unknown (a mock) or nothing sent.
+    fn last_wire_span(&self) -> Option<rs_rtmp_push::WireSpan> {
+        None
+    }
+    /// #424: the S3 chunk id of the NEXT `push_flv_bytes` payload, so a
+    /// mirror (the YouTube backup) can log which chunk it pushed. A plain
+    /// pusher logs nothing itself and ignores it.
+    fn label_chunk(&mut self, _chunk_id: i64) {}
 }
 
 impl Pushable for RtmpPusher {
@@ -81,5 +90,9 @@ impl Pushable for RtmpPusher {
 
     fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
         RtmpPusher::last_upstream_ack_at(self)
+    }
+
+    fn last_wire_span(&self) -> Option<rs_rtmp_push::WireSpan> {
+        RtmpPusher::last_wire_span(self)
     }
 }

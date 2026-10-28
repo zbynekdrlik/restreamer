@@ -591,7 +591,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                 // primary pushes (and maybe reconnects and re-sends) this one.
                 crate::backup_mirror::feed_backup_ahead(
                     pusher,
-                    &chunk.data,
+                    &chunk,
                     from_lookahead,
                     &mut rx,
                     &mut lookahead,

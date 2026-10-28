@@ -734,7 +734,7 @@ pub struct LogsResponse {
     pub entries: Vec<LogEntry>,
 }
 
-const MAX_LOG_ENTRIES: usize = 1000;
+const MAX_LOG_ENTRIES: usize = crate::VPS_LOG_HEAD_ENTRIES + crate::VPS_LOG_TAIL_ENTRIES + 1;
 
 async fn get_logs(
     State(state): State<Arc<AppState>>,

@@ -25,6 +25,9 @@ pub struct RtmpPusher {
     /// Guard edges not yet taken by the consumer (which turns them into
     /// `AvInvariantViolated` / `AvInvariantRestored` audit rows).
     av_events: Vec<AvInvariantEvent>,
+    /// #424: the wire span of the last SUCCESSFUL `push_flv_bytes` (cleared
+    /// when a push starts), for the VPS per-chunk push log.
+    last_wire_span: Option<crate::WireSpan>,
 }
 
 /// Catch-up factor expressed as percent of real-time. 120 = at most 1.2×
@@ -171,7 +174,15 @@ impl RtmpPusher {
             skew: SkewTracker::default(),
             av_guard: AvInvariantGuard::default(),
             av_events: Vec::new(),
+            last_wire_span: None,
         }
+    }
+
+    /// #424: first/last outgoing media ts of the last successful
+    /// `push_flv_bytes`; `None` before one, while one runs, or after a
+    /// failed one.
+    pub fn last_wire_span(&self) -> Option<crate::WireSpan> {
+        self.last_wire_span
     }
 
     pub fn last_output_ts_ms(&self) -> u64 {
@@ -484,6 +495,7 @@ impl RtmpPusher {
     /// exactly the chunk's content relation, and each track's wire timeline
     /// stays monotonic and continuous across chunk boundaries (#103).
     pub async fn push_flv_bytes(&mut self, bytes: &[u8]) -> Result<(), PushError> {
+        self.last_wire_span = None;
         // Lazy connect.
         if self.session.is_none() {
             let is_reconnect = self.state.last_output_ts_ms > 0;
@@ -522,6 +534,7 @@ impl RtmpPusher {
         let mut bytes_sent: u64 = 0;
         let mut max_audio_output_ts: u64 = 0;
         let mut max_video_output_ts: u64 = 0;
+        let mut wire_span: Option<crate::WireSpan> = None;
 
         for i in 0..tags.len() {
             let tag = &tags[i];
@@ -620,6 +633,7 @@ impl RtmpPusher {
                     _ => {}
                 }
                 self.state.last_output_ts_ms = self.state.last_output_ts_ms.max(output_ts_u64);
+                crate::WireSpan::note(&mut wire_span, output_ts_u64);
             }
         }
 
@@ -702,6 +716,7 @@ impl RtmpPusher {
             "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} av_skew_ms={av_skew_ms} send_elapsed_ms={send_elapsed_ms} pacing_residual_ms={pacing_residual_ms} target_ms={target_ms} actual_ms={actual_ms} reanchor={regression_reanchor_count}"
         );
 
+        self.last_wire_span = wire_span;
         Ok(())
     }
 

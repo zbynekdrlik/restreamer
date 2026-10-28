@@ -250,9 +250,22 @@ pub(crate) async fn rescue_push_loop<P: crate::pushable::Pushable>(
         // SPS/PPS and starts with an IDR keyframe, and the swap only happens
         // between whole segments — see rescue_segments module docs.
         let segment = source.pick(mode, refilling, eta);
+        let start_unix_ms = crate::endpoint_stats::unix_ms_now();
         tokio::select! {
             res = pusher.push_flv_bytes(segment) => {
                 let push_ok = res.is_ok();
+                // #424: the clip segments are in the per-chunk push log too
+                // (`chunk_id=-`): the warmup-to-content switch shows there.
+                if let Some(line) = crate::chunk_push_log::chunk_push_line(
+                    alias,
+                    crate::chunk_push_log::Ingest::Primary,
+                    None,
+                    pusher.last_wire_span(),
+                    start_unix_ms,
+                    crate::endpoint_stats::unix_ms_now(),
+                ) {
+                    tracing::info!(target: "chunk_push", "{line}");
+                }
                 if let Err(e) = res {
                     tracing::warn!(alias, "rust_rescue_push: push error: {e}; backing off");
                     // Backoff but observe stop signal so shutdown latency

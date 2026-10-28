@@ -489,6 +489,10 @@ pub(super) async fn push_chunk(
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
+    // #424: the backup mirror logs which chunk it pushed; the primary's
+    // line is below.
+    pusher.label_chunk(chunk_id);
+    let start_unix_ms = crate::endpoint_stats::unix_ms_now();
     let mut action = handle_rust_push(
         pusher,
         data,
@@ -538,6 +542,18 @@ pub(super) async fn push_chunk(
     // The re-sends are used up: if the last one failed too, the next chunk
     // is an ordinary first push.
     telemetry.clear_resend_pending();
+    // #424: which chunk the primary pushed when, at which wire ts (nothing
+    // when the last attempt failed).
+    if let Some(line) = crate::chunk_push_log::chunk_push_line(
+        alias,
+        crate::chunk_push_log::Ingest::Primary,
+        Some(chunk_id),
+        pusher.last_wire_span(),
+        start_unix_ms,
+        crate::endpoint_stats::unix_ms_now(),
+    ) {
+        tracing::info!(target: "chunk_push", "{line}");
+    }
     action
 }
 

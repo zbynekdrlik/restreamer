@@ -14,6 +14,7 @@ mod api_source;
 mod audit_ring;
 pub mod backup_mirror;
 pub mod buffer_state;
+pub(crate) mod chunk_push_log;
 mod clock_endpoint;
 pub mod db;
 mod disk_cache;
@@ -59,10 +60,26 @@ mod api_update_start_tests;
 mod backup_status_tests;
 #[cfg(test)]
 mod test_file_sink_lifecycle_tests;
+#[cfg(test)]
+mod vps_log_tests;
 
 pub use audit_ring::AuditRing;
 pub use disk_cache::DiskCache;
 pub use endpoint_task::EndpointHandle;
+
+/// #424: the VPS log keeps its first entries (init, warmup, the
+/// warmup-to-content switch) for the whole event, next to the newest tail.
+/// ~3 lines/s per endpoint in steady push: the head covers the first minutes
+/// of a CI-sized endpoint set.
+pub(crate) const VPS_LOG_HEAD_ENTRIES: usize = 4000;
+/// The rolling tail of the VPS log (the newest entries).
+pub(crate) const VPS_LOG_TAIL_ENTRIES: usize = 6000;
+
+/// The VPS in-memory log served by `/api/logs` and captured by the host at
+/// delivery stop.
+pub(crate) fn vps_log_buffer() -> LogBuffer {
+    LogBuffer::with_head(VPS_LOG_HEAD_ENTRIES, VPS_LOG_TAIL_ENTRIES)
+}
 
 /// In-memory audit ring capacity (last N rows retained for /api/status
 /// `?since=<cursor>` polling).
@@ -153,7 +170,7 @@ impl AppState {
             event_identifier: RwLock::new(None),
             delivery_delay_ms: RwLock::new(0),
             rescue_video_url: RwLock::new(None),
-            log_buffer: LogBuffer::new(5000),
+            log_buffer: vps_log_buffer(),
             db_pool,
             audit_ring,
             disk_cache: RwLock::new(None),

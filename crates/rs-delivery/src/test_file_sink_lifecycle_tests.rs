@@ -342,3 +342,40 @@ async fn rescue_loop_pushes_the_clip_into_the_sink() {
     assert!(stopped, "a stop signal returns true");
     slot.reconcile(async { false }).await;
 }
+
+/// #424: a REAL `RtmpPusher`, through `Pushable` and through the tee, reports
+/// the wire span of its last push (the per-chunk push log reads it).
+#[tokio::test]
+async fn a_real_push_reports_its_wire_span_through_the_tee() {
+    let slot = TestFileSinkSlot::new("127.0.0.1:0");
+    slot.reconcile(async { true }).await;
+    let addr = slot
+        .status()
+        .await
+        .expect("the sink must be running")
+        .local_addr;
+    let mut tee = crate::backup_mirror::TeePusher::new(
+        RtmpPusher::new(
+            format!("rtmp://{addr}/live/e2e-span-key"),
+            PusherConfig::default(),
+        ),
+        None,
+    );
+    assert_eq!(crate::pushable::Pushable::last_wire_span(&tee), None);
+
+    let clip = crate::rescue_segments::SEG_WARMUP;
+    tokio::time::timeout(
+        WAIT,
+        crate::pushable::Pushable::push_flv_bytes(&mut tee, clip),
+    )
+    .await
+    .expect("the clip push is bounded")
+    .expect("the clip push succeeds");
+
+    let span = crate::pushable::Pushable::last_wire_span(&tee).expect("a span after a push");
+    assert!(
+        span.last_ts_ms > span.first_ts_ms,
+        "a whole clip segment spans time on the wire: {span:?}"
+    );
+    crate::pushable::Pushable::close(&mut tee).await;
+}

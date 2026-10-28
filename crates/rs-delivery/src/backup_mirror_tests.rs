@@ -601,7 +601,7 @@ async fn the_backup_gets_the_next_chunk_while_the_primary_is_stuck_on_the_curren
     let mut lookahead = None;
     let current = rx.recv().await.expect("chunk 1");
 
-    feed_backup_ahead(&mut tee, &current.data, false, &mut rx, &mut lookahead);
+    feed_backup_ahead(&mut tee, &current, false, &mut rx, &mut lookahead);
     let stuck =
         tokio::time::timeout(Duration::from_secs(5), tee.push_flv_bytes(&current.data)).await;
     assert!(stuck.is_err(), "the primary is stuck on chunk 1");
@@ -644,13 +644,7 @@ async fn a_look_ahead_chunk_reaches_the_backup_exactly_once_and_in_order() {
                 Err(_) => break,
             },
         };
-        feed_backup_ahead(
-            &mut tee,
-            &current.data,
-            from_lookahead,
-            &mut rx,
-            &mut lookahead,
-        );
+        feed_backup_ahead(&mut tee, &current, from_lookahead, &mut rx, &mut lookahead);
         tee.push_flv_bytes(&current.data)
             .await
             .expect("primary push");
@@ -677,7 +671,7 @@ async fn without_a_backup_the_consumer_queue_is_left_alone() {
     tx.send(prefetched(2)).await.expect("queue");
     let mut lookahead = None;
 
-    feed_backup_ahead(&mut tee, &chunk(1), false, &mut rx, &mut lookahead);
+    feed_backup_ahead(&mut tee, &prefetched(1), false, &mut rx, &mut lookahead);
 
     assert!(lookahead.is_none(), "no look-ahead without a backup");
     assert_eq!(
@@ -688,3 +682,65 @@ async fn without_a_backup_the_consumer_queue_is_left_alone() {
 }
 
 const PREFETCH_TEST_DEPTH: usize = 10;
+
+/// #424: the backup knows which S3 chunk it pushed: a labelled push and a
+/// look-ahead offer carry their chunk id to the mirror; a clip segment
+/// (unlabelled) leaves it alone.
+#[tokio::test(start_paused = true)]
+async fn the_backup_records_the_chunk_id_it_pushed() {
+    let mut tee = tee_with(Mock::default(), Mock::default(), None);
+    let state = tee.backup.as_ref().expect("backup").state();
+    assert_eq!(state.snapshot().last_chunk_id, None, "nothing pushed yet");
+
+    // A clip segment carries no chunk id.
+    tee.push_flv_bytes(&chunk(1)).await.expect("push");
+    settle(100, || state.snapshot().chunks_pushed == 1).await;
+    assert_eq!(state.snapshot().chunks_pushed, 1);
+    assert_eq!(state.snapshot().last_chunk_id, None);
+
+    Pushable::label_chunk(&mut tee, 29);
+    tee.push_flv_bytes(&chunk(2)).await.expect("push");
+    settle(100, || state.snapshot().chunks_pushed == 2).await;
+    assert_eq!(state.snapshot().last_chunk_id, Some(29));
+
+    // The label is used up by that push: the next clip push keeps 29.
+    tee.push_flv_bytes(&chunk(3)).await.expect("push");
+    settle(100, || state.snapshot().chunks_pushed == 3).await;
+    assert_eq!(state.snapshot().last_chunk_id, Some(29));
+
+    // A look-ahead offer carries its own id.
+    tee.offer_ahead(31, &chunk(4));
+    settle(100, || state.snapshot().chunks_pushed == 4).await;
+    assert_eq!(state.snapshot().last_chunk_id, Some(31));
+}
+
+/// #424: the tee reports the PRIMARY's wire span (the backup logs its own).
+#[test]
+fn the_tee_reports_the_primary_s_wire_span() {
+    struct Spanned(Option<rs_rtmp_push::WireSpan>);
+    impl Pushable for Spanned {
+        async fn push_flv_bytes(&mut self, _data: &[u8]) -> Result<(), PushError> {
+            Ok(())
+        }
+        async fn close(&mut self) {}
+        async fn finish(&mut self) {}
+        fn reconnect_count(&self) -> u32 {
+            0
+        }
+        fn av_skew_ms(&self) -> i64 {
+            0
+        }
+        fn take_av_invariant_events(&mut self) -> Vec<rs_rtmp_push::AvInvariantEvent> {
+            Vec::new()
+        }
+        fn last_wire_span(&self) -> Option<rs_rtmp_push::WireSpan> {
+            self.0
+        }
+    }
+    let span = rs_rtmp_push::WireSpan {
+        first_ts_ms: 7,
+        last_ts_ms: 990,
+    };
+    let tee = TeePusher::new(Spanned(Some(span)), None);
+    assert_eq!(Pushable::last_wire_span(&tee), Some(span));
+}
