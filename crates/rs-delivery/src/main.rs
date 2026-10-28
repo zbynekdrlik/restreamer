@@ -69,11 +69,11 @@ pub use endpoint_task::EndpointHandle;
 
 /// #424: the VPS log keeps its first entries (init, warmup, the
 /// warmup-to-content switch) for the whole event, next to the newest tail.
-/// ~3 lines/s per endpoint in steady push: the head covers the first minutes
-/// of a CI-sized endpoint set.
-pub(crate) const VPS_LOG_HEAD_ENTRIES: usize = 4000;
+/// Head + tail + the gap line = 5000, exactly what the host's post-mortem
+/// capture asks for (`/api/logs?limit=5000`, rs-api `delivery_log_capture`).
+pub(crate) const VPS_LOG_HEAD_ENTRIES: usize = 2500;
 /// The rolling tail of the VPS log (the newest entries).
-pub(crate) const VPS_LOG_TAIL_ENTRIES: usize = 6000;
+pub(crate) const VPS_LOG_TAIL_ENTRIES: usize = 2499;
 
 /// The VPS in-memory log served by `/api/logs` and captured by the host at
 /// delivery stop.
