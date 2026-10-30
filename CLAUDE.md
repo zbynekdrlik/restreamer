@@ -47,6 +47,7 @@ auto-load on their `paths:` — you do not invoke those.
 - per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 - control-room tabs (box-hosted Chrome, per-destination YT profiles, CDP screencast relay) → `.claude/rules/control-rooms.md` (auto)
 - deliberate OBS stop = end of program, not outage (obs-websocket outputState, `/api/source`, `ended` mode, #408) → `.claude/rules/deliberate-obs-stop.md` (auto)
+- camera-box release gate (main run waits for the YouTube verdict, red-run evidence, token check) → `.claude/rules/camera-box-release-gate.md` (auto)
 - stress/concurrency tests on starved CI runners (count-based stop, runner-scaled liveness cap, injection proofs) → `.claude/rules/load-robust-tests.md` (auto)
 
 ## Project Structure
@@ -147,7 +148,7 @@ It reaches terminal `cancelled` within seconds and lets the successor start. **T
 | `ci.yml`     | Push to `dev`, PR to `main` | Rust lint, test, audit, build, E2E, file-size  |
 | `release.yml`| `restreamer-v*` tag         | Windows release (Tauri NSIS + delivery binary) |
 
-Auto-release flow: `dev → PR to main → merge → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release`
+Auto-release flow: `dev → PR to main → merge → E2E → camera-box YouTube measurement → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release`
 
 ## Deployment Targets
 

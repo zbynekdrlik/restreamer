@@ -1169,6 +1169,11 @@ jobs:
           fi
 
           echo "OK: e2e-gate depends on both E2E test jobs."
+      - name: "Verify the camera-box release gate wiring (#357)"
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install pyyaml
+          python3 scripts/ci/verify_camera_box_gate.py
+          python3 scripts/ci/verify_camera_box_gate.py --self-test
       - name: Verify auto-release depends on e2e-gate (not just rust-ci-gate)
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -1857,6 +1862,21 @@ jobs:
         run: python tests/ci/test_rig_lease_hold.py
       - name: "Run the job-owner /proc walk under a fake Runner.Worker (#349, #417)"
         run: python tests/ci/test_job_owner.py
+      - name: "Run the camera-box release gate on fixtures and a fake gh (#357)"
+        run: python tests/ci/test_camera_box_gate.py
+
+  camera-box-token-check:
+    name: Camera-box token check (#357)
+    # #357: CAMERA_BOX_ACTIONS_TOKEN is used only at the end of a main run. This finds a
+    # lost or expired token on dev, ~2 h earlier, and starts nothing on camera-box.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove the token may dispatch camera-box workflows
+        env:
+          GH_TOKEN: ${{ secrets.CAMERA_BOX_ACTIONS_TOKEN }}
+        run: python3 scripts/ci/camera_box_gate.py token-check
 
   rust-ci-gate:
     name: Rust CI Gate
@@ -1878,6 +1898,7 @@ jobs:
         mutation-plan,
         mutation-testing,
         obs-scripts-test,
+        camera-box-token-check,
       ]
     runs-on: ubuntu-latest
     steps:
@@ -1898,6 +1919,7 @@ jobs:
           echo "mutation-plan:  ${{ needs.mutation-plan.result }}"
           echo "mutation-testing: ${{ needs.mutation-testing.result }}"
           echo "obs-scripts-test: ${{ needs.obs-scripts-test.result }}"
+          echo "camera-box-token-check: ${{ needs.camera-box-token-check.result }}"
 
           FAILED=0
 
@@ -1947,7 +1969,8 @@ jobs:
             "secret-scan:${{ needs.secret-scan.result }}" \
             "test-integrity:${{ needs.test-integrity.result }}" \
             "frontend-e2e:${{ needs.frontend-e2e.result }}" \
-            "obs-scripts-test:${{ needs.obs-scripts-test.result }}"; do
+            "obs-scripts-test:${{ needs.obs-scripts-test.result }}" \
+            "camera-box-token-check:${{ needs.camera-box-token-check.result }}"; do
             name="${job_result%%:*}"
             result="${job_result##*:}"
             if [[ "$result" != "success" ]]; then
@@ -7497,10 +7520,97 @@ jobs:
           Stop-ProgramAudioWatchdog
           Assert-NoProgramAudioBreach
 
+  camera-box-release-gate:
+    name: Camera-box YouTube measurement
+    # #357 (owner decision 28.10.2026): only camera-box's full-path E2E measures what YouTube
+    # recorded, so every release waits for its verdict. Contract: camera-box issue 1404.
+    # Main push only. It needs all three stream-lan jobs because camera-box takes the rig
+    # lease itself: none of ours may hold it. A hosted runner, so ~1 h of waiting does not
+    # block the box.
+    needs: [e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push-stream-lan]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.e2e-streaming-test.result == 'success' && needs.e2e-obs-youtube-test.result == 'success' && needs.e2e-fb-push-stream-lan.result == 'success'
+    runs-on: ubuntu-latest
+    # camera-box: up to 105 min of job, and up to one more such job ahead of it on the
+    # hardware concurrency group. The script's own deadline is 225 min.
+    timeout-minutes: 235
+    outputs:
+      verdict: ${{ steps.measure.outputs.verdict }}
+    env:
+      CHUNKS: s3://restreamer-chunks-fsn1/95da874e-6b06-41e5-99db-6f47a459c48b/E2E-Test/
+    steps:
+      - uses: actions/checkout@v4
+      - name: Measure this version on YouTube
+        id: measure
+        env:
+          GH_TOKEN: ${{ secrets.CAMERA_BOX_ACTIONS_TOKEN }}
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          python3 scripts/ci/camera_box_gate.py measure \
+            --caller "restreamer@${VERSION}" \
+            --out "$RUNNER_TEMP/measurement"
+      # #357 + #424: the next delivery of this event wipes the prefix, so a red run's chunks
+      # are copied right away, as the only record of what was pushed.
+      - name: Copy the chunks of the red run
+        if: failure() && steps.measure.outputs.verdict == 'red'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          pip install awscli
+          mkdir -p "$RUNNER_TEMP/evidence/chunks"
+          cp "$RUNNER_TEMP"/measurement/verdict-*.json "$RUNNER_TEMP/evidence/"
+          aws s3 cp "$CHUNKS" "$RUNNER_TEMP/evidence/chunks/" --recursive \
+            --exclude '*' --include '*.bin' \
+            --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 --only-show-errors
+          COUNT=$(find "$RUNNER_TEMP/evidence/chunks" -name '*.bin' | wc -l)
+          echo "copied $COUNT chunks"
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "::error::no chunks under $CHUNKS"
+            exit 1
+          fi
+      - name: Keep the chunks of the red run
+        if: failure() && steps.measure.outputs.verdict == 'red'
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-box-red-chunks
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 14
+
+  camera-box-red-evidence:
+    name: Camera-box red run delivery log
+    # #357: the rest of the red run's evidence. The log lives on the box, which is why this is
+    # its own job. Read-only: no OBS, no rig, no delivery.
+    needs: [camera-box-release-gate]
+    if: always() && needs.camera-box-release-gate.outputs.verdict == 'red'
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
+    runs-on: [self-hosted, linux, stream-lan]
+    timeout-minutes: 10
+    steps:
+      - name: Find the delivery log of the measured session
+        run: |
+          set -euo pipefail
+          EVENT_ID=$(curl -sS -m 10 http://127.0.0.1:8910/api/v1/events | jq -e '.[] | select(.name == "E2E-Test") | .id')
+          LOG=$(ls -t "$HOME"/.config/restreamer/delivery-logs/*-evt"${EVENT_ID}"-inst*.log | sed -n 1p)
+          echo "newest delivery log of event $EVENT_ID: $LOG"
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp "$LOG" "$RUNNER_TEMP/evidence/"
+      - name: Keep the delivery log
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-box-red-delivery-log
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 14
+
   e2e-gate:
     name: E2E Gate
     if: always()
-    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push-stream-lan]
+    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push-stream-lan, camera-box-release-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
@@ -7511,6 +7621,7 @@ jobs:
           echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
           echo "e2e-obs-youtube-test:  ${{ needs.e2e-obs-youtube-test.result }}"
           echo "e2e-fb-push-stream-lan:  ${{ needs.e2e-fb-push-stream-lan.result }}"
+          echo "camera-box-release-gate: ${{ needs.camera-box-release-gate.result }}"
 
           # Gate must always pass
           if [[ "${{ needs.rust-ci-gate.result }}" != "success" ]]; then
@@ -7533,6 +7644,11 @@ jobs:
             if [[ "${{ needs.e2e-fb-push-stream-lan.result }}" != "success" ]]; then
               echo "FAIL: E2E FB Push (stream-lan) did not succeed (result: ${{ needs.e2e-fb-push-stream-lan.result }})"
               echo "E2E tests must pass on every dev/main run."
+              exit 1
+            fi
+            # #357: on the main push, what YouTube recorded has to pass too.
+            if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" && "${{ needs.camera-box-release-gate.result }}" != "success" ]]; then
+              echo "FAIL: camera-box YouTube measurement did not succeed (result: ${{ needs.camera-box-release-gate.result }})"
               exit 1
             fi
             echo "All E2E tests passed!"
