@@ -122,6 +122,13 @@ def evaluate_cases(tmp: Path) -> None:
             "unknown",
             "pass",
         ),
+        (
+            "reasons as a string do not split into characters",
+            {"verdict-1.json": {"youtube_leg": {"pass": False, "reasons": "bad"}}},
+            "success",
+            "red",
+            "no reasons",
+        ),
         ("cancelled run is not measured", good, "cancelled", "unknown", "cancelled"),
         ("timed out run is not measured", good, "timed_out", "unknown", "timed_out"),
     ]
@@ -159,6 +166,9 @@ if args[:2] == ["run", "download"]:
     json.dump(s["verdict"], open(out + "/verdict-77.json", "w"))
     sys.exit(0)
 if args[:2] == ["run", "view"]:
+    if n < s.get("log_failures", 0):
+        open(state, "w").write(str(n + 1))
+        sys.stderr.write("HTTP 502\\n"); sys.exit(1)
     print(s.get("log", "")); sys.exit(0)
 if args[0] == "api":
     path = next(a for a in args[1:] if "repos/" in a)
@@ -181,7 +191,7 @@ sys.stderr.write("unexpected gh call\\n"); sys.exit(9)
 
 DONE_OK = {"status": "completed", "conclusion": "success", "html_url": "u"}
 RUNNING = {"status": "in_progress", "conclusion": None, "html_url": "u"}
-OUR_LOG = "E2E_CALLER: restreamer@1.2.3\n"
+OUR_LOG = "full-path\tPer-point report\t2026-10-30T09:00:00.0Z   E2E_CALLER: restreamer@1.2.3\n"
 
 
 def run_cli(tmp: Path, name: str, scenario: dict, *args: str):
@@ -259,6 +269,15 @@ def measure_cases(tmp: Path) -> None:
     check("measure: a run with another caller fails", p.returncode == 1, p.stdout)
     check("measure: foreign run is unknown", o.get("verdict") == "unknown", o)
     check("measure: says the caller is wrong", "caller" in p.stdout, p.stdout)
+
+    p, o, _ = measure(tmp, "probe-caller", log=OUR_LOG.replace("1.2.3", "1.2.3-probe"))
+    check("measure: a probe run does not answer for the release", o.get("verdict") == "unknown", o)
+
+    p, o, _ = measure(tmp, "log-blip", run_states=[DONE_OK], log_failures=2)
+    check("measure: a log blip is retried", p.returncode == 0, p.stdout + p.stderr)
+
+    p, o, _ = measure(tmp, "log-dead", run_states=[DONE_OK], log_failures=99)
+    check("measure: an unreadable log fails", o.get("verdict") == "unknown", o)
 
     p, o, _ = measure(tmp, "cancelled", run_states=[{"status": "completed", "conclusion": "cancelled", "html_url": "u"}])
     check("measure: superseded run fails", p.returncode == 1 and o.get("verdict") == "unknown", (p.returncode, o))
@@ -350,6 +369,11 @@ def release_cases(tmp: Path) -> None:
     check(
         "release-check: running measurement fails",
         rc("r-run", dict(both, **{"Camera-box+YouTube+measurement": running})) == 1,
+    )
+    queued = [{"status": "queued", "conclusion": None, "started_at": None}]
+    check(
+        "release-check: a queued rerun beats an older green",
+        rc("r-queued", dict(both, **{"Camera-box+YouTube+measurement": ok + queued})) == 1,
     )
 
 

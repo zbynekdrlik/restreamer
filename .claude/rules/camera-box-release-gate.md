@@ -14,6 +14,10 @@ YouTube leg blocks the release. Contract: camera-box issue 1404, `measure=true` 
 - **Job `camera-box-release-gate`** (hosted, main push only, needed by `e2e-gate`) runs after all
   three stream-lan jobs, because camera-box takes the rig lease itself. It adds ~50-65 min to a
   main run, up to 225 min when camera-box's hardware queue is busy.
+- **The gate sits in the `stream-lan-box` concurrency group** on a hosted runner. A dev deploy
+  during the wait would be the build camera-box measures, and main would be tagged unmeasured.
+  The verdict carries no Restreamer version, so this group is the only binding of verdict to
+  build; a deploy by hand during the wait is not covered.
 - **`scripts/ci/camera_box_gate.py`**: `measure`, `token-check`, `release-check`. Only
   `.youtube_leg.pass is True` passes. `.overall_pass` also covers cameras, and a camera fault does
   not block us. A missing or malformed verdict, a cancelled run, an expired token and a run with
@@ -25,6 +29,9 @@ YouTube leg blocks the release. Contract: camera-box issue 1404, `measure=true` 
 - **A second dispatch on camera-box `main` cancels the first** (their workflow concurrency): the
   gate then fails as `unknown`. So does a newer pending job on their `loopback-e2e-hardware` group.
   Rerun the job once; two of the same failure are real.
+- **"A camera fault never blocks" holds only once a verdict exists.** A camera-box failure before
+  it (a box off `origin/main`, the version-integrity gate, no `recording-verdict.exe` for its
+  commit) leaves no verdict file, which is `unknown` and blocks the release.
 - **A red verdict** keeps the evidence, because the next delivery of E2E-Test wipes the S3 prefix:
   artifact `camera-box-red-chunks` (chunks + verdict, from the gate job) and
   `camera-box-red-delivery-log` (job `camera-box-red-evidence`, on the box).

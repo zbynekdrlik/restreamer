@@ -69,7 +69,8 @@ def evaluate(artifact_dir: Path, conclusion: str) -> Result:
     passed = leg.get("pass")
     if passed is True:
         return Result("pass")
-    reasons = [str(r) for r in leg.get("reasons") or []]
+    listed = leg.get("reasons")
+    reasons = [str(r) for r in listed] if isinstance(listed, list) else []
     if passed is False:
         return Result("red", reasons or ["youtube_leg.pass is false, no reasons given"])
     return unknown(f"youtube_leg.pass is {passed!r}, not a boolean")
@@ -77,6 +78,17 @@ def evaluate(artifact_dir: Path, conclusion: str) -> Result:
 
 def gh(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+
+
+def gh_retried(*args: str) -> subprocess.CompletedProcess:
+    """For the one-shot reads after a run: a blip must not waste an hour of rig time."""
+    for _ in range(MAX_API_FAILURES - 1):
+        p = gh(*args)
+        if p.returncode == 0:
+            return p
+        print(f"gh {args[0]} {args[1]} failed, retrying: {p.stderr.strip()[-300:]}")
+        time.sleep(float(os.environ.get("GATE_POLL_S", "30")))
+    return gh(*args)
 
 
 def workflow_run_ids() -> dict[int, str] | None:
@@ -141,7 +153,7 @@ def wait_for_run(run_id: int, deadline_min: float) -> tuple[str | None, str]:
 
 def run_is_ours(run_id: int, caller: str) -> tuple[bool, str]:
     """A foreign dispatch must never answer for this release: the caller is in the log."""
-    p = gh("run", "view", str(run_id), "-R", CAMERA_BOX, "--log")
+    p = gh_retried("run", "view", str(run_id), "-R", CAMERA_BOX, "--log")
     if p.returncode != 0:
         return False, f"could not read the run log: {p.stderr.strip()}"
     if re.search(rf"E2E_CALLER:\s*{re.escape(caller)}\s*$", p.stdout, re.M):
@@ -153,7 +165,7 @@ def read_verdict(run_id: int, caller: str, conclusion: str, out: Path) -> Result
     ours, why = run_is_ours(run_id, caller)
     if not ours:
         return unknown(why)
-    p = gh("run", "download", str(run_id), "-R", CAMERA_BOX, "-n", ARTIFACT, "-D", str(out))
+    p = gh_retried("run", "download", str(run_id), "-R", CAMERA_BOX, "-n", ARTIFACT, "-D", str(out))
     if p.returncode != 0:
         return unknown(f"artifact {ARTIFACT} missing: {p.stderr.strip()}")
     return evaluate(out, conclusion)
@@ -224,7 +236,8 @@ def cmd_release_check(args: argparse.Namespace) -> int:
             print(f"::error::reading check {name} failed: {p.stderr.strip()}")
             failed = True
             continue
-        runs = sorted(json.loads(p.stdout), key=lambda r: r.get("started_at") or "")
+        # A rerun still queued has no started_at, and it is the newest attempt.
+        runs = sorted(json.loads(p.stdout), key=lambda r: r.get("started_at") or "9")
         latest = runs[-1] if runs else None
         if not latest or latest["status"] != "completed" or latest["conclusion"] != "success":
             state = f"{latest['status']}/{latest['conclusion']}" if latest else "never ran"

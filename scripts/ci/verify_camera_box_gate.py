@@ -46,6 +46,9 @@ def check_gate(jobs: dict) -> list[str]:
             errs.append(f"{GATE} must need {job}")
         if f"needs.{job}.result == 'success'" not in cond:
             errs.append(f"{GATE} must require {job} to succeed")
+    # Deploys share this group: none may swap the build while camera-box measures it.
+    if gate.get("concurrency", {}).get("group") != jobs["deploy-stream-lan"]["concurrency"]["group"]:
+        errs.append(f"{GATE} must share the deploy's concurrency group")
     if gate.get("runs-on") != "ubuntu-latest":
         errs.append(f"{GATE} must not hold the box while it waits")
     if "continue-on-error" in gate or any("continue-on-error" in s for s in gate["steps"]):
@@ -60,9 +63,14 @@ def check_gate(jobs: dict) -> list[str]:
         errs.append(f"{GATE} must dispatch with {SECRET}")
     if "steps.measure.outputs.verdict" not in str(gate.get("outputs", {}).get("verdict")):
         errs.append(f"{GATE} must expose the verdict")
-    run = text_of(gate)
-    if "|| true" in run:
+    if measure and "||" in str(measure.get("run")):
         errs.append(f"{GATE} must not swallow a failure")
+    for step in gate["steps"]:
+        if "red run" in str(step.get("name")):
+            if "steps.measure.outputs.verdict == 'red'" not in str(step.get("if")) or not str(
+                step.get("if")
+            ).startswith("failure()"):
+                errs.append(f"{GATE} evidence step must run on a failed red measurement")
     return errs
 
 
@@ -135,6 +143,16 @@ MUTATIONS = [
     (CI, "run: python tests/ci/test_camera_box_gate.py", "run: echo", "test_camera_box_gate"),
     (CI, "if: always() && needs.camera-box-release-gate.outputs.verdict == 'red'",
      "if: needs.camera-box-release-gate.outputs.verdict == 'red'", "always()"),
+    (CI, "# camera-box measures, and this main version would then be tagged unmeasured.\n    concurrency:\n      group: stream-lan-box",
+     "# camera-box measures, and this main version would then be tagged unmeasured.\n    concurrency:\n      group: other", "concurrency group"),
+    (CI, "e2e-fb-push-stream-lan.result == 'success'\n    runs-on: ubuntu-latest\n", "e2e-fb-push-stream-lan.result == 'success'\n    runs-on: [self-hosted, linux, stream-lan]\n", "must not hold the box"),
+    (CI, "python3 scripts/ci/camera_box_gate.py measure \\\n", "python3 scripts/ci/camera_box_gate.py token-check \\\n", "must run the measure step"),
+    (CI, "        id: measure\n        env:\n          GH_TOKEN: ${{ secrets.CAMERA_BOX_ACTIONS_TOKEN }}", "        id: measure\n        env:\n          GH_TOKEN: ${{ github.token }}", "must dispatch with"),
+    (CI, "verdict: ${{ steps.measure.outputs.verdict }}", "verdict: pass", "expose the verdict"),
+    (CI, "--out \"$RUNNER_TEMP/measurement\"", "--out \"$RUNNER_TEMP/measurement\" || echo", "swallow"),
+    (CI, "- name: Copy the chunks of the red run\n        if: failure() && steps.measure.outputs.verdict == 'red'", "- name: Copy the chunks of the red run\n        if: failure()", "evidence step"),
+    (CI, "if: always() && needs.camera-box-release-gate.outputs.verdict == 'red'", "if: always() && needs.camera-box-release-gate.result == 'failure'", "must run on a red verdict"),
+    (RELEASE, "    name: Build delivery binary (Linux)\n    needs: validate\n", "    name: Build delivery binary (Linux)\n", "must need validate"),
     (RELEASE, "release-check --repo", "--help #", "release-check"),
     (RELEASE, "      checks: read\n", "", "checks: read"),
 ]

@@ -7525,8 +7525,13 @@ jobs:
     # #357 (owner decision 28.10.2026): only camera-box's full-path E2E measures what YouTube
     # recorded, so every release waits for its verdict. Contract: camera-box issue 1404.
     # Main push only. It needs all three stream-lan jobs because camera-box takes the rig
-    # lease itself: none of ours may hold it. A hosted runner, so ~1 h of waiting does not
-    # block the box.
+    # lease itself: none of ours may hold it. A hosted runner, so no box runner idles here.
+    # In stream-lan-box all the same: a dev deploy during the wait would be the build that
+    # camera-box measures, and this main version would then be tagged unmeasured.
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
     needs: [e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push-stream-lan]
     if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.e2e-streaming-test.result == 'success' && needs.e2e-obs-youtube-test.result == 'success' && needs.e2e-fb-push-stream-lan.result == 'success'
     runs-on: ubuntu-latest
