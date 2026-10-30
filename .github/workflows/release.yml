@@ -18,6 +18,9 @@ jobs:
   validate:
     name: Validate tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -40,6 +43,12 @@ jobs:
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # #357: a manual dispatch or a hand-pushed tag used to bypass all E2E.
+      - name: Require the green gates on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/camera_box_gate.py release-check --repo "$GITHUB_REPOSITORY" --sha "$(git rev-parse HEAD)"
 
   build-delivery:
     name: Build delivery binary (Linux)
