@@ -1896,9 +1896,9 @@ jobs:
         test-integrity,
         frontend-e2e,
         mutation-plan,
+        camera-box-token-check,
         mutation-testing,
         obs-scripts-test,
-        camera-box-token-check,
       ]
     runs-on: ubuntu-latest
     steps:
