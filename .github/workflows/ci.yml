@@ -737,7 +737,13 @@ jobs:
           for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
           [ -S "$XDG_RUNTIME_DIR/bus" ] || { echo "the user manager did not start"; exit 1; }
           mkdir -p ~/stand-in ~/.config/systemd/user/restreamer.service.d
-          cp /bin/sleep ~/stand-in/Restreamer
+          # A script, not a copy of /bin/sleep: since ubuntu-26.04 /bin/sleep is
+          # the rust-coreutils multicall binary, which picks its tool from its
+          # own file name, so a copy named Restreamer exits at once. A #! script
+          # gets comm=Restreamer (what --restart-app looks for) and stays the
+          # unit's main process while its sleep child runs.
+          printf '#!/bin/sh\nsleep "$@"\n' > ~/stand-in/Restreamer
+          chmod +x ~/stand-in/Restreamer
           printf '[Service]\nExecStart=\nExecStart=%%h/stand-in/Restreamer infinity\n' \
             > ~/.config/systemd/user/restreamer.service.d/stand-in.conf
           systemctl --user daemon-reload
