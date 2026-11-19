@@ -137,7 +137,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -2573,7 +2573,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3759,15 +3759,14 @@ dependencies = [
 
 [[package]]
 name = "openssl"
-version = "0.10.76"
+version = "0.10.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "951c002c75e16ea2c65b8c7e4d3d51d5530d8dfa7d060b4776828c88cfb18ecf"
+checksum = "4de8111e94a56adca7ebfe6c365b6d42f99deb69b74b6becacd4204e2f193aa2"
 dependencies = [
  "bitflags 2.11.0",
  "cfg-if",
  "foreign-types 0.3.2",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -3800,9 +3799,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.112"
+version = "0.9.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57d55af3b3e226502be1526dfdba67ab0e9c96fc293004e79576b2b9edb0dbdb"
+checksum = "19c413d6ec9ebaf5e1c829d355cb3e9f783778d700f135be0921d52fce3c60ae"
 dependencies = [
  "cc",
  "libc",
@@ -4349,7 +4348,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4358,9 +4357,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.18"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "bytes",
  "getrandom 0.4.1",
@@ -4380,16 +4379,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

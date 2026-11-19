@@ -14,26 +14,21 @@
 #
 # When an entry's expiry date passes, that CI step FAILS the build -- forcing
 # a periodic human re-check instead of an ignore living forever unreviewed.
-# Default expiry is 2026-10-31 for entries with no advisory-specific date.
+# Entries were last re-checked 2026-11-19 (cargo audit with an empty ignore list
+# against the current Cargo.lock); the next re-check is due 2027-01-31.
 
 [advisories]
 ignore = [
-    # RUSTSEC-2023-0071: Marvin Attack timing side-channel in RSA PKCS#1 v1.5 decryption | dep: rsa <- sqlx-mysql (unused DB backend, this project runs SQLite only via sqlx-sqlite) | expires: 2026-10-31
+    # RUSTSEC-2023-0071: Marvin Attack timing side-channel in RSA PKCS#1 v1.5 decryption, no patched 0.9.x | dep: rsa 0.9 is a DEV-dependency of rs-api only (signs test Cloudflare Access JWTs in access_unit_tests.rs), never in a shipped binary, and nothing decrypts with it | expires: 2027-01-31
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained (informational, repo archived) | dep: rustls-pemfile <- rust-s3, no fix available upstream | expires: 2026-10-31
+    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained (informational, repo archived) | dep: rustls-pemfile 1.0.4 <- reqwest 0.11 <- streamhub (vendored xiu RTMP stack) and 2.2.0 <- axum-server 0.7; no maintained drop-in reachable without those upstreams moving | expires: 2027-01-31
     "RUSTSEC-2025-0134",
-    # RUSTSEC-2026-0037: quinn-proto panic-DoS on invalid QUIC transport params, patched >=0.11.14 | dep: was pulled in transitively; as of 2026-07-25 quinn-proto no longer appears in Cargo.lock at all (cargo tree -i quinn-proto: empty) -- this ignore is currently a harmless no-op, kept per #281's "carry every currently-ignored ID" decision rather than pruned in this PR | expires: 2026-10-31
-    "RUSTSEC-2026-0037",
-    # RUSTSEC-2026-0049: rustls-webpki CRL distribution-point matching bug, patched >=0.103.10 | dep: rustls-webpki <- rustls <- attohttpc <- aws-creds <- rust-s3; current lockfile is already at 0.103.13 (>= patched) -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
-    "RUSTSEC-2026-0049",
-    # RUSTSEC-2026-0098: rustls-webpki URI name-constraint bypass, patched >=0.103.12,<0.104.0-alpha.1 or >=0.104.0-alpha.6 | dep: same rustls-webpki chain as RUSTSEC-2026-0049; current lockfile 0.103.13 already satisfies the patched range -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
-    "RUSTSEC-2026-0098",
-    # RUSTSEC-2026-0099: rustls-webpki wildcard name-constraint bypass, patched >=0.103.12,<0.104.0-alpha.1 or >=0.104.0-alpha.6 | dep: same rustls-webpki chain as RUSTSEC-2026-0049; current lockfile 0.103.13 already satisfies the patched range -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
-    "RUSTSEC-2026-0099",
-    # RUSTSEC-2026-0194: quick-xml quadratic run time checking a start tag for duplicate attribute names (DoS) | dep: quick-xml <- rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling reachable without a rust-s3 major bump, tracked in #207); quick-xml here only parses XML responses from our own trusted Hetzner S3 bucket, so the crafted-XML DoS is out of threat model | expires: 2026-10-31
+    # RUSTSEC-2026-0194: quick-xml quadratic run time checking a start tag for duplicate attribute names (DoS), patched >=0.41.0 | dep: quick-xml 0.38.4 <- aws-creds <- rust-s3, which pins quick-xml ^0.38; quick-xml here only parses XML responses from our own trusted Hetzner S3 bucket, so the crafted-XML DoS is out of threat model | expires: 2027-01-31
     "RUSTSEC-2026-0194",
-    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation (DoS) | dep: same quick-xml <- rust-s3 -> aws-creds chain as RUSTSEC-2026-0194, same #207 tracking, same trusted-input threat model | expires: 2026-10-31
+    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation (DoS), patched >=0.41.0 | dep: same quick-xml <- aws-creds <- rust-s3 chain as RUSTSEC-2026-0194, same trusted-input threat model | expires: 2027-01-31
     "RUSTSEC-2026-0195",
-    # RUSTSEC-2026-0258: h2 unbounded empty DATA frames (DoS), patched >=0.4.16 | dep: h2 0.3.27 <- hyper 0.14.32 <- hyper-tls/reqwest 0.11.27 <- streamhub 0.2.4 <- rtmp 0.6.5 (xiu RTMP-ingest fork, #354); h2 has NO patched 0.3.x release (the fix is only in the 0.4 line, which needs hyper 1.x -- our OWN h2 0.4.13 instance, pulled via axum/reqwest 0.12, is bumped to the patched 0.4.16 in the same PR) -- this instance is pinned by the vendored xiu RTMP stack's own reqwest 0.11 dep, not by our code, and reqwest here is an outbound HTTP CLIENT (not an inbound HTTP/2 server accepting untrusted connections), so the attack needs us to connect to a malicious HTTP/2 peer, not an inbound RTMP publisher | expires: 2026-10-31
+    # RUSTSEC-2026-0258: h2 unbounded empty DATA frames (DoS), patched >=0.4.16 | dep: h2 0.3.27 <- hyper 0.14 <- reqwest 0.11 <- streamhub <- rtmp (vendored xiu RTMP stack, #354); h2 has NO patched 0.3.x release, and reqwest here is an outbound HTTP CLIENT (not an inbound HTTP/2 server), so the attack needs us to connect to a malicious HTTP/2 peer, not an inbound RTMP publisher | expires: 2027-01-31
     "RUSTSEC-2026-0258",
+    # RUSTSEC-2026-0459: bundled SQLite <3.54.0 can return uninitialized page-cache memory when a db is opened with a -wal of a different page size, patched libsqlite3-sys >=0.39 | dep: libsqlite3-sys 0.30.1 <- sqlx-sqlite 0.8.6 (pins ^0.30; the fix needs sqlx 0.9, tracked in #431); only our own process writes restreamer.db and its -wal, so no less-trusted party can plant the files | expires: 2027-01-31
+    "RUSTSEC-2026-0459",
 ]
