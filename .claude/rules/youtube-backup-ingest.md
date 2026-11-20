@@ -48,6 +48,25 @@ a ~2 s content hole. Three layers fix it; keep all three.
   its last ~8 s. The log line `rtmp_push: publish finished (#424)` carries
   `queued_at_start` / `waited_ms` / the outcome. The rescue switch keeps
   `shutdown()`, because it must not wait on a dead link.
+- **The warmup clip ends with `finish()` too** (#424 go-live repeat,
+  `warmup_push::WarmupPush`). It runs on its OWN stop channel; at buffer-ready
+  `run_warmup_loop` signals it and awaits the task, which finishes the tee
+  (primary unpublish + drain, backup shut down and awaited) BEFORE the
+  consumer builds the content pusher on the same keys. Never go back to
+  `handle.abort()`: the dropped `BackupMirror` only aborts its task without
+  waiting, so the content backup publish could overlap the warmup one. Only an
+  end hung past `WARMUP_STOP_MAX_WAIT` (20 s) is aborted (warn log).
+  `Session::close` awaits its aborted read loop (it holds an io clone), so a
+  socket is closed when close/finish return.
+- **Per-chunk push log (#424):** target `chunk_push`, one line per successful
+  push and ingest: `chunk_push alias=.. ingest=primary|backup chunk_id=<id|->
+  first_ts=.. last_ts=.. start_unix_ms=.. end_unix_ms=..` (wire ts from
+  `RtmpPusher::last_wire_span`; `-` = clip segment). The tee learns the id via
+  `Pushable::label_chunk` (consumed by the next push) and `offer_ahead(id, ..)`.
+  The VPS log keeps its first 10000 entries plus the newest 9999 and a gap
+  line (`LogBuffer::with_head`); the host capture asks `/api/logs?limit=20000`.
+  To read a go-live: grep the captured delivery log for `chunk_push` around
+  `warmup publish ended cleanly`.
 - **There is no pacing slowdown, ever** (owner 2026-10-26). #424 briefly added
   `slow_pacing` for the #296 refill, and YouTube flagged every refill window as
   `videoIngestionStarved` (health bad). The pusher sends at real time only.
