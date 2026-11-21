@@ -243,6 +243,72 @@ mod tests {
         );
     }
 
+    /// #432 regression: a body that keeps flowing must complete however long it
+    /// takes. Main run 44628833530 lost chunk 145 for ~2 min: every GET of the
+    /// 4.8 MB object was cut at the 20 s TOTAL request timeout while its body
+    /// was still arriving ("error decoding response body" every ~20 s), and
+    /// each retry restarted from byte 0, so the YouTube output froze 48 s.
+    ///
+    /// A local server sends a 2 MB body in 20 pieces with 150 ms gaps (~3 s in
+    /// total) under an injected 1 s bound: never idle for 1 s, but 3x longer
+    /// than the bound in total.
+    #[tokio::test]
+    async fn a_slow_but_flowing_s3_body_completes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const PIECES: usize = 20;
+        const PIECE: usize = 100_000;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut req = [0u8; 4096];
+                    let _ = sock.read(&mut req).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\
+                         x-amz-meta-duration-ms: 2000\r\n\
+                         x-amz-meta-host-emit-ts: 1715380800000\r\n\r\n",
+                        PIECES * PIECE
+                    );
+                    if sock.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for _ in 0..PIECES {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        if sock.write_all(&[7u8; PIECE]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://{addr}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        let fetcher = S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(1)).unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(20), fetcher.fetch_chunk_with_meta(145))
+                .await
+                .expect("the fetch itself must end");
+
+        let chunk = result
+            .expect("a slow but flowing body must not fail (#432)")
+            .expect("the object exists");
+        assert_eq!(chunk.data.len(), PIECES * PIECE);
+        assert!(chunk.data.iter().all(|&b| b == 7));
+        assert_eq!(chunk.duration_ms, 2000);
+        assert_eq!(chunk.host_emit_ts, Some(1_715_380_800_000));
+    }
+
     #[test]
     fn only_a_typed_http_404_is_not_found() {
         assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
