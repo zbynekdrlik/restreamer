@@ -97,7 +97,8 @@ pub async fn query(pool: &SqlitePool, f: Filter) -> Result<Vec<MetricsRow>> {
         f.limit.unwrap_or(2000).clamp(1, 20000)
     ));
 
-    let mut q = sqlx::query(&sql);
+    // Filter values are all bound below; LIMIT is a clamped integer (#431).
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }
