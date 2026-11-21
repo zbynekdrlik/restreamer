@@ -351,6 +351,67 @@ mod tests {
         assert_eq!(chunk.host_emit_ts, Some(1_715_380_800_000));
     }
 
+    /// Review of #432: a body that stops after the headers must fail at the
+    /// idle bound, not hang (reqwest bounds it with a different mechanism
+    /// than a server that never answers).
+    #[tokio::test]
+    async fn a_body_that_stops_midway_is_bounded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut req = [0u8; 4096];
+                let _ = sock.read(&mut req).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                    .await;
+                let _ = sock.write_all(&[7u8; 10_000]).await;
+                held.push(sock); // never sends the rest
+            }
+        });
+
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://{addr}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        let fetcher = S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(1)).unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(8), fetcher.fetch_chunk_with_meta(1)).await;
+        match result {
+            Ok(Err(S3FetchError::Fetch(m))) => {
+                assert!(
+                    m.contains("timed out"),
+                    "the cut must read as a timeout: {m}"
+                )
+            }
+            Ok(_) => panic!("a stalled body must fail"),
+            Err(_) => panic!("a stalled body must be bounded by the idle timeout"),
+        }
+    }
+
+    /// Review of #432: a failed chunk GET goes into the audit row and the
+    /// dashboard, so its message must not carry the presigned URL (access key
+    /// id + a live signature), whose digits could also misclassify the error.
+    #[tokio::test]
+    async fn a_failed_get_message_carries_no_presigned_url() {
+        let fetcher = refusing_fetcher().await;
+        match fetcher.fetch_chunk_with_meta(7).await {
+            Err(S3FetchError::Fetch(m)) => {
+                assert!(!m.contains("X-Amz-"), "presigned query leaked: {m}");
+                assert!(!m.contains("evt/7.bin"), "the URL leaked: {m}");
+            }
+            other => panic!("expected Err(Fetch), got {:?}", other.map(|o| o.is_some())),
+        }
+    }
+
     #[test]
     fn only_a_typed_http_404_is_not_found() {
         assert!(is_not_found(&S3Error::HttpFailWithBody(404, String::new())));
