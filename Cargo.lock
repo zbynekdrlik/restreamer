@@ -2743,6 +2743,7 @@ version = "0.29.62"
 dependencies = [
  "chrono",
  "dashmap",
+ "libsqlite3-sys",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

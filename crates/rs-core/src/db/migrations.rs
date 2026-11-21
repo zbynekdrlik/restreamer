@@ -31,7 +31,7 @@ pub const MAX_SCHEMA_VERSION: i32 = 30;
 /// Table names must come from trusted code constants — never user input.
 async fn column_exists(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
+    table: &'static str,
     column: &str,
 ) -> sqlx::Result<bool> {
     let query = format!("SELECT name FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -48,9 +48,9 @@ async fn column_exists(
 /// name and type (e.g. `"auth_token TEXT NOT NULL DEFAULT ''"`).
 async fn add_column_if_missing(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
+    table: &'static str,
     column: &str,
-    col_def: &str,
+    col_def: &'static str,
 ) -> sqlx::Result<()> {
     if column_exists(tx, table, column).await? {
         return Ok(());
@@ -68,9 +68,9 @@ async fn add_column_if_missing(
 /// already exists on the table.
 async fn rename_column_if_old_exists(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
-    old_name: &str,
-    new_name: &str,
+    table: &'static str,
+    old_name: &'static str,
+    new_name: &'static str,
 ) -> sqlx::Result<()> {
     if column_exists(tx, table, new_name).await? {
         return Ok(());

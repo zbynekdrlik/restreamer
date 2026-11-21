@@ -24,6 +24,11 @@ const S3_REQUEST_TIMEOUT_SECS: u64 = 20;
 /// once; this only has to outlive the connect.
 const PRESIGN_EXPIRY_SECS: u32 = 300;
 
+/// Backstop for one chunk GET as a whole: a peer that trickles a byte just
+/// inside every idle bound must not hold a fetch permit forever. Far above
+/// any real 4.8 MB read, and equal to the presign lifetime.
+const S3_GET_MAX_SECS: u64 = PRESIGN_EXPIRY_SECS as u64;
+
 /// The whole `source()` chain of an error, so a body cut reads "error
 /// decoding response body: operation timed out" instead of only its head.
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
@@ -125,14 +130,12 @@ impl S3Fetcher {
         )
         .map_err(|e| S3FetchError::Credentials(e.to_string()))?;
 
-        // Bound the per-GET fetch so a wedged/blackhole connection fails fast
-        // into the existing retry-with-backoff instead of hanging on the reqwest
-        // client for minutes (holding a fetch permit — #252/#276). MUST use
-        // `with_request_timeout`, NOT `set_request_timeout`: on the tokio backend
-        // the latter only sets a dead struct field, while the former rebuilds the
-        // cached reqwest client with `.timeout(request_timeout)` (which bounds the
-        // whole request, connect + body). Order matters — `with_path_style` then
-        // clones that timeout-bearing client.
+        // The HEAD request (rust-s3) keeps a TOTAL bound: it has no body. MUST
+        // use `with_request_timeout`, NOT `set_request_timeout`: on the tokio
+        // backend the latter only sets a dead struct field, while the former
+        // rebuilds the cached reqwest client with `.timeout(..)`. Order matters:
+        // `with_path_style` then clones that timeout-bearing client. The chunk
+        // GET uses `http` below instead (#432).
         let bucket = Bucket::new(&config.bucket, region, credentials)
             .map_err(|e| S3FetchError::Bucket(e.to_string()))?
             .with_request_timeout(request_timeout)
@@ -169,9 +172,14 @@ impl S3Fetcher {
         let response = self
             .http
             .get(&url)
+            .timeout(Duration::from_secs(S3_GET_MAX_SECS))
             .send()
             .await
-            .map_err(|e| S3FetchError::Fetch(format!("reqwest: {}", error_chain(&e))))?;
+            // Never the URL: it is presigned (access key id + a live signature)
+            // and the message goes into the audit row and the dashboard.
+            .map_err(|e| {
+                S3FetchError::Fetch(format!("reqwest: {}", error_chain(&e.without_url())))
+            })?;
         match response.status().as_u16() {
             200 => {}
             404 => return Ok(None),
@@ -187,7 +195,10 @@ impl S3Fetcher {
         let duration_ms = header_i64("x-amz-meta-duration-ms").unwrap_or(0);
         let host_emit_ts = header_i64("x-amz-meta-host-emit-ts");
         let data = response.bytes().await.map_err(|e| {
-            S3FetchError::Fetch(format!("reqwest: {} (chunk {chunk_id})", error_chain(&e)))
+            S3FetchError::Fetch(format!(
+                "reqwest: {} (chunk {chunk_id})",
+                error_chain(&e.without_url())
+            ))
         })?;
         // s3_upload_complete_ts (stage B) cannot be carried via S3 header —
         // unknown at PUT time. Always None here; backfilled from
@@ -243,10 +254,9 @@ mod tests {
     /// GET is sent) but never writes a response — the exact wedged nbg1 GET.
     /// Deterministic + fast: an injected 1s bound; the outer 8s ceiling detects a
     /// regression (unbounded GET -> ceiling trips -> RED; bounded -> the fetcher
-    /// returns Err(Fetch) in ~1s -> GREEN). This asserts EFFECTIVE behavior, so
-    /// it also fails a naive `set_request_timeout` "fix" (a no-op on the tokio
-    /// backend — it sets a dead struct field, never rebuilding the reqwest
-    /// client; only `with_request_timeout` rebuilds it).
+    /// returns Err(Fetch) in ~1s -> GREEN). Since #432 the GET's client bounds
+    /// this by its connect/idle-read timeouts; a body that stops midway is
+    /// `a_body_that_stops_midway_is_bounded`.
     #[tokio::test]
     async fn wedged_s3_get_is_bounded_by_request_timeout() {
         use tokio::net::TcpListener;

@@ -35,6 +35,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+# Floor only: keeps the bundled SQLite at the RUSTSEC-2026-0459 fix (#431).
+libsqlite3-sys = { version = ">=0.39, <0.41", default-features = false }
 local-ip-address = "0.6"
 
 # #414: the box file dialog, transient and modal over the dashboard window.

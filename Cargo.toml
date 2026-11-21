@@ -47,6 +47,9 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # Database
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+# Floor only, never used directly: keeps the bundled SQLite at the RUSTSEC-2026-0459
+# fix (sqlx-sqlite 0.9 would also accept 0.30, #431).
+libsqlite3-sys = { version = ">=0.39, <0.41", default-features = false }
 
 # HTTP client
 jsonwebtoken = "9"
