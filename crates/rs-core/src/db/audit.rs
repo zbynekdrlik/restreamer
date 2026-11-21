@@ -182,7 +182,8 @@ pub async fn query(pool: &SqlitePool, f: Filter) -> Result<Vec<AuditLogRow>> {
         sql.push_str(&format!(" OFFSET {}", off.max(0)));
     }
 
-    let mut q = sqlx::query(&sql);
+    // Filter values are all bound below; LIMIT/OFFSET are integers (#431).
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for b in binds {
         q = match b {
             BindValue::Int(i) => q.bind(i),

@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 sqlx.workspace = true
+# SQLite floor for RUSTSEC-2026-0459, see the workspace Cargo.toml (#431).
+libsqlite3-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
