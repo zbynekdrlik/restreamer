@@ -7,14 +7,35 @@ use s3::error::S3Error;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Per-GET request timeout for S3 chunk fetches. Without a client-side timeout a
-/// wedged/blackhole GET hangs on the reqwest client until the OS TCP timeout
-/// (minutes), holding a `max_concurrent` fetch semaphore permit — which starves
-/// #252 recovery fetches (endpoint never returns to live) and blocks the #276
-/// live-edge hot path. 20s clears the measured legit-GET p99 (8.2–16.4s,
-/// #275/#276) with margin so slow-but-completing GETs still succeed, while
-/// failing a true wedge fast into the existing retry-with-backoff.
-const S3_GET_REQUEST_TIMEOUT_SECS: u64 = 20;
+/// Bound for one S3 request. Without a client-side bound a wedged/blackhole
+/// GET hangs on the reqwest client until the OS TCP timeout (minutes),
+/// holding a `max_concurrent` fetch semaphore permit, which starves #252
+/// recovery fetches and blocks the #276 live-edge hot path.
+///
+/// For the chunk GET it is an IDLE bound (connect, and every body read): a
+/// body that keeps flowing completes however slow it is, a connection that
+/// sends nothing for this long fails into the retry. It used to be a TOTAL
+/// 20 s request timeout, which cut slow-but-flowing 4.8 MB bodies every 20 s
+/// and restarted them from byte 0 (#432: chunk 145 lost for ~2 min, the
+/// YouTube output froze 48 s). HEAD has no body, so its total bound stays.
+const S3_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// Lifetime of the presigned URL of one chunk GET. The request starts at
+/// once; this only has to outlive the connect.
+const PRESIGN_EXPIRY_SECS: u32 = 300;
+
+/// The whole `source()` chain of an error, so a body cut reads "error
+/// decoding response body: operation timed out" instead of only its head.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut msg = e.to_string();
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        msg.push_str(": ");
+        msg.push_str(&src.to_string());
+        cur = src.source();
+    }
+    msg
+}
 
 /// An S3 error that means "the object does not exist". Only the typed HTTP
 /// status counts: without rust-s3's `fail-on-err` feature a 404 arrives as an
@@ -68,6 +89,8 @@ pub struct ChunkData {
 
 pub struct S3Fetcher {
     bucket: Box<Bucket>,
+    /// The chunk GET client: idle-bounded, never total-bounded (#432).
+    http: reqwest::Client,
     event_identifier: String,
 }
 
@@ -76,13 +99,14 @@ impl S3Fetcher {
         Self::new_with_timeout(
             config,
             event_identifier,
-            Duration::from_secs(S3_GET_REQUEST_TIMEOUT_SECS),
+            Duration::from_secs(S3_REQUEST_TIMEOUT_SECS),
         )
     }
 
-    /// Construct a fetcher with an explicit per-GET request timeout. Dependency
-    /// injection seam so the timeout behavior is unit-testable at a fast bound;
-    /// production callers use `new` (which passes `S3_GET_REQUEST_TIMEOUT_SECS`).
+    /// Construct a fetcher with an explicit request bound (`S3_REQUEST_TIMEOUT_SECS`
+    /// in production): the HEAD total timeout and the chunk GET's connect and
+    /// idle-read timeout. Dependency-injection seam so the bounds are
+    /// unit-testable fast.
     fn new_with_timeout(
         config: &S3Config,
         event_identifier: &str,
@@ -115,47 +139,65 @@ impl S3Fetcher {
             .map_err(|e| S3FetchError::Bucket(e.to_string()))?
             .with_path_style();
 
+        let http = reqwest::Client::builder()
+            .connect_timeout(request_timeout)
+            .read_timeout(request_timeout)
+            .build()
+            .map_err(|e| S3FetchError::Bucket(error_chain(&e)))?;
+
         Ok(Self {
             bucket,
+            http,
             event_identifier: event_identifier.to_string(),
         })
     }
 
     /// Fetch a chunk with metadata (duration_ms from S3 object metadata header).
-    /// Uses direct GET with key `{event}/{seq}.bin`.
+    /// GETs the key `{event}/{seq}.bin` through a presigned URL with the
+    /// idle-bounded client (#432), so the `x-amz-meta-*` headers come along.
     pub async fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
     ) -> Result<Option<ChunkData>, S3FetchError> {
         let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
+        let url = self
+            .bucket
+            .presign_get(&key, PRESIGN_EXPIRY_SECS, None)
+            .await
+            .map_err(|e| S3FetchError::Fetch(format!("presign: {e}")))?;
 
-        match self.bucket.get_object(&key).await {
-            Ok(response) if response.status_code() == 200 => {
-                let headers = response.headers();
-                let duration_ms = headers
-                    .get("x-amz-meta-duration-ms")
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .unwrap_or(0);
-                let host_emit_ts = headers
-                    .get("x-amz-meta-host-emit-ts")
-                    .and_then(|v| v.parse::<i64>().ok());
-                // s3_upload_complete_ts (stage B) cannot be carried via
-                // S3 header — unknown at PUT time. Always None here;
-                // backfilled from chunk_records DB in LifecycleAwarePusher.
-                Ok(Some(ChunkData {
-                    data: response.to_vec(),
-                    duration_ms,
-                    host_emit_ts,
-                    s3_upload_complete_ts: None,
-                }))
-            }
-            Ok(response) if response.status_code() == 404 => Ok(None),
-            Ok(response) => Err(S3FetchError::Fetch(format!(
-                "status {}",
-                response.status_code()
-            ))),
-            Err(e) => absent_or_fetch_error(e),
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| S3FetchError::Fetch(format!("reqwest: {}", error_chain(&e))))?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            code => return Err(S3FetchError::Fetch(format!("status {code}"))),
         }
+        let header_i64 = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok())
+        };
+        let duration_ms = header_i64("x-amz-meta-duration-ms").unwrap_or(0);
+        let host_emit_ts = header_i64("x-amz-meta-host-emit-ts");
+        let data = response.bytes().await.map_err(|e| {
+            S3FetchError::Fetch(format!("reqwest: {} (chunk {chunk_id})", error_chain(&e)))
+        })?;
+        // s3_upload_complete_ts (stage B) cannot be carried via S3 header —
+        // unknown at PUT time. Always None here; backfilled from
+        // chunk_records DB in LifecycleAwarePusher.
+        Ok(Some(ChunkData {
+            data: data.to_vec(),
+            duration_ms,
+            host_emit_ts,
+            s3_upload_complete_ts: None,
+        }))
     }
 
     /// Get chunk duration via HEAD request (no data download).
