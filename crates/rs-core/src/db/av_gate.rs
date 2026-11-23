@@ -159,10 +159,12 @@ pub async fn save(pool: &SqlitePool, s: &AvGateSessionRow) -> Result<()> {
 }
 
 /// Fetch one session by id.
+// Dynamic SQL below splices only the compile-time `COLUMNS` constant; every
+// value is bound (sqlx 0.9 `AssertSqlSafe`, #431).
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<AvGateSessionRow>> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM av_gate_sessions WHERE id = ?1"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await?;
@@ -172,10 +174,10 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<AvGateSessionRow>
 /// Every session that has not reached `done`/`failed`, oldest first. Read by
 /// the boot reconcile.
 pub async fn list_unfinished(pool: &SqlitePool) -> Result<Vec<AvGateSessionRow>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM av_gate_sessions \
          WHERE state NOT IN ('done', 'failed') ORDER BY created_at ASC"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(row_to_session).collect())
@@ -183,10 +185,10 @@ pub async fn list_unfinished(pool: &SqlitePool) -> Result<Vec<AvGateSessionRow>>
 
 /// Sessions whose teardown failed and must be retried, oldest first.
 pub async fn list_cleanup_pending(pool: &SqlitePool) -> Result<Vec<AvGateSessionRow>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM av_gate_sessions \
          WHERE cleanup_pending != 0 ORDER BY created_at ASC"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(row_to_session).collect())

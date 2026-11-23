@@ -31,11 +31,12 @@ pub const MAX_SCHEMA_VERSION: i32 = 30;
 /// Table names must come from trusted code constants — never user input.
 async fn column_exists(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
+    table: &'static str,
     column: &str,
 ) -> sqlx::Result<bool> {
     let query = format!("SELECT name FROM pragma_table_info('{table}') WHERE name = ?1");
-    let row: Option<String> = sqlx::query_scalar(&query)
+    // `table` comes from migration code, never input; `column` is bound (#431).
+    let row: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(column)
         .fetch_optional(&mut **tx)
         .await?;
@@ -47,16 +48,19 @@ async fn column_exists(
 /// name and type (e.g. `"auth_token TEXT NOT NULL DEFAULT ''"`).
 async fn add_column_if_missing(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
+    table: &'static str,
     column: &str,
-    col_def: &str,
+    col_def: &'static str,
 ) -> sqlx::Result<()> {
     if column_exists(tx, table, column).await? {
         return Ok(());
     }
-    sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {col_def}"))
-        .execute(&mut **tx)
-        .await?;
+    // Table and column definition come from migration code, never input (#431).
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {table} ADD COLUMN {col_def}"
+    )))
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -64,16 +68,17 @@ async fn add_column_if_missing(
 /// already exists on the table.
 async fn rename_column_if_old_exists(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
-    old_name: &str,
-    new_name: &str,
+    table: &'static str,
+    old_name: &'static str,
+    new_name: &'static str,
 ) -> sqlx::Result<()> {
     if column_exists(tx, table, new_name).await? {
         return Ok(());
     }
-    sqlx::query(&format!(
+    // Table and column names come from migration code, never input (#431).
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}"
-    ))
+    )))
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -88,7 +93,7 @@ async fn rename_column_if_old_exists(
 /// with a semicolon, no triggers).
 async fn execute_sql_statements(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    sql: &str,
+    sql: &'static str,
 ) -> sqlx::Result<()> {
     for statement in sql.split(';') {
         let trimmed = statement.trim();

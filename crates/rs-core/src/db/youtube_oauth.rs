@@ -24,21 +24,29 @@ fn row_to_oauth(r: sqlx::sqlite::SqliteRow) -> YouTubeOAuth {
     }
 }
 
+// The queries splice only the `SELECT_COLS` constant; values are bound
+// (sqlx 0.9 `AssertSqlSafe`, #431).
 pub async fn get_oauth_by_label(pool: &SqlitePool, label: &str) -> Result<Option<YouTubeOAuth>> {
     let q = format!("SELECT {SELECT_COLS} FROM youtube_oauth WHERE label = ?1");
-    let row = sqlx::query(&q).bind(label).fetch_optional(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(q))
+        .bind(label)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(row_to_oauth))
 }
 
 pub async fn get_oauth_by_id(pool: &SqlitePool, id: i64) -> Result<Option<YouTubeOAuth>> {
     let q = format!("SELECT {SELECT_COLS} FROM youtube_oauth WHERE id = ?1");
-    let row = sqlx::query(&q).bind(id).fetch_optional(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(q))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(row_to_oauth))
 }
 
 pub async fn list_oauths(pool: &SqlitePool) -> Result<Vec<YouTubeOAuth>> {
     let q = format!("SELECT {SELECT_COLS} FROM youtube_oauth ORDER BY label");
-    let rows = sqlx::query(&q).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(q)).fetch_all(pool).await?;
     Ok(rows.into_iter().map(row_to_oauth).collect())
 }
 

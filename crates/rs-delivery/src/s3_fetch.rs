@@ -7,14 +7,40 @@ use s3::error::S3Error;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Per-GET request timeout for S3 chunk fetches. Without a client-side timeout a
-/// wedged/blackhole GET hangs on the reqwest client until the OS TCP timeout
-/// (minutes), holding a `max_concurrent` fetch semaphore permit — which starves
-/// #252 recovery fetches (endpoint never returns to live) and blocks the #276
-/// live-edge hot path. 20s clears the measured legit-GET p99 (8.2–16.4s,
-/// #275/#276) with margin so slow-but-completing GETs still succeed, while
-/// failing a true wedge fast into the existing retry-with-backoff.
-const S3_GET_REQUEST_TIMEOUT_SECS: u64 = 20;
+/// Bound for one S3 request. Without a client-side bound a wedged/blackhole
+/// GET hangs on the reqwest client until the OS TCP timeout (minutes),
+/// holding a `max_concurrent` fetch semaphore permit, which starves #252
+/// recovery fetches and blocks the #276 live-edge hot path.
+///
+/// For the chunk GET it is an IDLE bound (connect, and every body read): a
+/// body that keeps flowing completes however slow it is, a connection that
+/// sends nothing for this long fails into the retry. It used to be a TOTAL
+/// 20 s request timeout, which cut slow-but-flowing 4.8 MB bodies every 20 s
+/// and restarted them from byte 0 (#432: chunk 145 lost for ~2 min, the
+/// YouTube output froze 48 s). HEAD has no body, so its total bound stays.
+const S3_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// Lifetime of the presigned URL of one chunk GET. The request starts at
+/// once; this only has to outlive the connect.
+const PRESIGN_EXPIRY_SECS: u32 = 300;
+
+/// Backstop for one chunk GET as a whole: a peer that trickles a byte just
+/// inside every idle bound must not hold a fetch permit forever. Far above
+/// any real 4.8 MB read, and equal to the presign lifetime.
+const S3_GET_MAX_SECS: u64 = PRESIGN_EXPIRY_SECS as u64;
+
+/// The whole `source()` chain of an error, so a body cut reads "error
+/// decoding response body: operation timed out" instead of only its head.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut msg = e.to_string();
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        msg.push_str(": ");
+        msg.push_str(&src.to_string());
+        cur = src.source();
+    }
+    msg
+}
 
 /// An S3 error that means "the object does not exist". Only the typed HTTP
 /// status counts: without rust-s3's `fail-on-err` feature a 404 arrives as an
@@ -68,6 +94,8 @@ pub struct ChunkData {
 
 pub struct S3Fetcher {
     bucket: Box<Bucket>,
+    /// The chunk GET client: idle-bounded, never total-bounded (#432).
+    http: reqwest::Client,
     event_identifier: String,
 }
 
@@ -76,13 +104,14 @@ impl S3Fetcher {
         Self::new_with_timeout(
             config,
             event_identifier,
-            Duration::from_secs(S3_GET_REQUEST_TIMEOUT_SECS),
+            Duration::from_secs(S3_REQUEST_TIMEOUT_SECS),
         )
     }
 
-    /// Construct a fetcher with an explicit per-GET request timeout. Dependency
-    /// injection seam so the timeout behavior is unit-testable at a fast bound;
-    /// production callers use `new` (which passes `S3_GET_REQUEST_TIMEOUT_SECS`).
+    /// Construct a fetcher with an explicit request bound (`S3_REQUEST_TIMEOUT_SECS`
+    /// in production): the HEAD total timeout and the chunk GET's connect and
+    /// idle-read timeout. Dependency-injection seam so the bounds are
+    /// unit-testable fast.
     fn new_with_timeout(
         config: &S3Config,
         event_identifier: &str,
@@ -101,61 +130,85 @@ impl S3Fetcher {
         )
         .map_err(|e| S3FetchError::Credentials(e.to_string()))?;
 
-        // Bound the per-GET fetch so a wedged/blackhole connection fails fast
-        // into the existing retry-with-backoff instead of hanging on the reqwest
-        // client for minutes (holding a fetch permit — #252/#276). MUST use
-        // `with_request_timeout`, NOT `set_request_timeout`: on the tokio backend
-        // the latter only sets a dead struct field, while the former rebuilds the
-        // cached reqwest client with `.timeout(request_timeout)` (which bounds the
-        // whole request, connect + body). Order matters — `with_path_style` then
-        // clones that timeout-bearing client.
+        // The HEAD request (rust-s3) keeps a TOTAL bound: it has no body. MUST
+        // use `with_request_timeout`, NOT `set_request_timeout`: on the tokio
+        // backend the latter only sets a dead struct field, while the former
+        // rebuilds the cached reqwest client with `.timeout(..)`. Order matters:
+        // `with_path_style` then clones that timeout-bearing client. The chunk
+        // GET uses `http` below instead (#432).
         let bucket = Bucket::new(&config.bucket, region, credentials)
             .map_err(|e| S3FetchError::Bucket(e.to_string()))?
             .with_request_timeout(request_timeout)
             .map_err(|e| S3FetchError::Bucket(e.to_string()))?
             .with_path_style();
 
+        let http = reqwest::Client::builder()
+            .connect_timeout(request_timeout)
+            .read_timeout(request_timeout)
+            .build()
+            .map_err(|e| S3FetchError::Bucket(error_chain(&e)))?;
+
         Ok(Self {
             bucket,
+            http,
             event_identifier: event_identifier.to_string(),
         })
     }
 
     /// Fetch a chunk with metadata (duration_ms from S3 object metadata header).
-    /// Uses direct GET with key `{event}/{seq}.bin`.
+    /// GETs the key `{event}/{seq}.bin` through a presigned URL with the
+    /// idle-bounded client (#432), so the `x-amz-meta-*` headers come along.
     pub async fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
     ) -> Result<Option<ChunkData>, S3FetchError> {
         let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
+        let url = self
+            .bucket
+            .presign_get(&key, PRESIGN_EXPIRY_SECS, None)
+            .await
+            .map_err(|e| S3FetchError::Fetch(format!("presign: {e}")))?;
 
-        match self.bucket.get_object(&key).await {
-            Ok(response) if response.status_code() == 200 => {
-                let headers = response.headers();
-                let duration_ms = headers
-                    .get("x-amz-meta-duration-ms")
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .unwrap_or(0);
-                let host_emit_ts = headers
-                    .get("x-amz-meta-host-emit-ts")
-                    .and_then(|v| v.parse::<i64>().ok());
-                // s3_upload_complete_ts (stage B) cannot be carried via
-                // S3 header — unknown at PUT time. Always None here;
-                // backfilled from chunk_records DB in LifecycleAwarePusher.
-                Ok(Some(ChunkData {
-                    data: response.to_vec(),
-                    duration_ms,
-                    host_emit_ts,
-                    s3_upload_complete_ts: None,
-                }))
-            }
-            Ok(response) if response.status_code() == 404 => Ok(None),
-            Ok(response) => Err(S3FetchError::Fetch(format!(
-                "status {}",
-                response.status_code()
-            ))),
-            Err(e) => absent_or_fetch_error(e),
+        let response = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(S3_GET_MAX_SECS))
+            .send()
+            .await
+            // Never the URL: it is presigned (access key id + a live signature)
+            // and the message goes into the audit row and the dashboard.
+            .map_err(|e| {
+                S3FetchError::Fetch(format!("reqwest: {}", error_chain(&e.without_url())))
+            })?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            code => return Err(S3FetchError::Fetch(format!("status {code}"))),
         }
+        let header_i64 = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok())
+        };
+        let duration_ms = header_i64("x-amz-meta-duration-ms").unwrap_or(0);
+        let host_emit_ts = header_i64("x-amz-meta-host-emit-ts");
+        let data = response.bytes().await.map_err(|e| {
+            S3FetchError::Fetch(format!(
+                "reqwest: {} (chunk {chunk_id})",
+                error_chain(&e.without_url())
+            ))
+        })?;
+        // s3_upload_complete_ts (stage B) cannot be carried via S3 header —
+        // unknown at PUT time. Always None here; backfilled from
+        // chunk_records DB in LifecycleAwarePusher.
+        Ok(Some(ChunkData {
+            data: data.to_vec(),
+            duration_ms,
+            host_emit_ts,
+            s3_upload_complete_ts: None,
+        }))
     }
 
     /// Get chunk duration via HEAD request (no data download).
@@ -201,10 +254,9 @@ mod tests {
     /// GET is sent) but never writes a response — the exact wedged nbg1 GET.
     /// Deterministic + fast: an injected 1s bound; the outer 8s ceiling detects a
     /// regression (unbounded GET -> ceiling trips -> RED; bounded -> the fetcher
-    /// returns Err(Fetch) in ~1s -> GREEN). This asserts EFFECTIVE behavior, so
-    /// it also fails a naive `set_request_timeout` "fix" (a no-op on the tokio
-    /// backend — it sets a dead struct field, never rebuilding the reqwest
-    /// client; only `with_request_timeout` rebuilds it).
+    /// returns Err(Fetch) in ~1s -> GREEN). Since #432 the GET's client bounds
+    /// this by its connect/idle-read timeouts; a body that stops midway is
+    /// `a_body_that_stops_midway_is_bounded`.
     #[tokio::test]
     async fn wedged_s3_get_is_bounded_by_request_timeout() {
         use tokio::net::TcpListener;
@@ -241,6 +293,133 @@ mod tests {
             matches!(result.unwrap(), Err(S3FetchError::Fetch(_))),
             "a wedged GET must surface as a fetch error (timeout), not a false 404/None"
         );
+    }
+
+    /// #432 regression: a body that keeps flowing must complete however long it
+    /// takes. Main run 44628833530 lost chunk 145 for ~2 min: every GET of the
+    /// 4.8 MB object was cut at the 20 s TOTAL request timeout while its body
+    /// was still arriving ("error decoding response body" every ~20 s), and
+    /// each retry restarted from byte 0, so the YouTube output froze 48 s.
+    ///
+    /// A local server sends a 2 MB body in 20 pieces with 150 ms gaps (~3 s in
+    /// total) under an injected 1 s bound: never idle for 1 s, but 3x longer
+    /// than the bound in total.
+    #[tokio::test]
+    async fn a_slow_but_flowing_s3_body_completes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const PIECES: usize = 20;
+        const PIECE: usize = 100_000;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut req = [0u8; 4096];
+                    let _ = sock.read(&mut req).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\
+                         x-amz-meta-duration-ms: 2000\r\n\
+                         x-amz-meta-host-emit-ts: 1715380800000\r\n\r\n",
+                        PIECES * PIECE
+                    );
+                    if sock.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for _ in 0..PIECES {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        if sock.write_all(&[7u8; PIECE]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://{addr}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        let fetcher = S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(1)).unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(20), fetcher.fetch_chunk_with_meta(145))
+                .await
+                .expect("the fetch itself must end");
+
+        let chunk = result
+            .expect("a slow but flowing body must not fail (#432)")
+            .expect("the object exists");
+        assert_eq!(chunk.data.len(), PIECES * PIECE);
+        assert!(chunk.data.iter().all(|&b| b == 7));
+        assert_eq!(chunk.duration_ms, 2000);
+        assert_eq!(chunk.host_emit_ts, Some(1_715_380_800_000));
+    }
+
+    /// Review of #432: a body that stops after the headers must fail at the
+    /// idle bound, not hang (reqwest bounds it with a different mechanism
+    /// than a server that never answers).
+    #[tokio::test]
+    async fn a_body_that_stops_midway_is_bounded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut req = [0u8; 4096];
+                let _ = sock.read(&mut req).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                    .await;
+                let _ = sock.write_all(&[7u8; 10_000]).await;
+                held.push(sock); // never sends the rest
+            }
+        });
+
+        let config = crate::api::S3Config {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: format!("http://{addr}"),
+            access_key_id: "k".to_string(),
+            secret_access_key: "s".to_string(),
+        };
+        let fetcher = S3Fetcher::new_with_timeout(&config, "evt", Duration::from_secs(1)).unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(8), fetcher.fetch_chunk_with_meta(1)).await;
+        match result {
+            Ok(Err(S3FetchError::Fetch(m))) => {
+                assert!(
+                    m.contains("timed out"),
+                    "the cut must read as a timeout: {m}"
+                )
+            }
+            Ok(_) => panic!("a stalled body must fail"),
+            Err(_) => panic!("a stalled body must be bounded by the idle timeout"),
+        }
+    }
+
+    /// Review of #432: a failed chunk GET goes into the audit row and the
+    /// dashboard, so its message must not carry the presigned URL (access key
+    /// id + a live signature), whose digits could also misclassify the error.
+    #[tokio::test]
+    async fn a_failed_get_message_carries_no_presigned_url() {
+        let fetcher = refusing_fetcher().await;
+        match fetcher.fetch_chunk_with_meta(7).await {
+            Err(S3FetchError::Fetch(m)) => {
+                assert!(!m.contains("X-Amz-"), "presigned query leaked: {m}");
+                assert!(!m.contains("evt/7.bin"), "the URL leaked: {m}");
+            }
+            other => panic!("expected Err(Fetch), got {:?}", other.map(|o| o.is_some())),
+        }
     }
 
     #[test]
