@@ -237,6 +237,13 @@ fn retries_5xx(method: &Method, path: &str) -> bool {
     *method == Method::GET || path == "liveBroadcasts/bind"
 }
 
+/// An RFC 3339 instant as whole Unix seconds (Google may drop sub-seconds).
+fn start_second(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|t| t.timestamp())
+}
+
 /// A cached token is reused strictly before its refresh point.
 fn token_is_fresh(now: Instant, refresh_after: Instant) -> bool {
     now < refresh_after
@@ -501,8 +508,18 @@ impl ManageClient {
             if !is_transient_5xx(*status) {
                 return Err(err);
             }
-            // A 5xx may still have created it: look before inserting again,
-            // or the session would leave an orphan broadcast behind.
+            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
+                return Err(err);
+            };
+            retries += 1;
+            tracing::warn!(
+                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), checking in {} ms whether it was created anyway ({retries}/{MAX_5XX_RETRIES})",
+                delay.as_millis()
+            );
+            // Wait FIRST: a 5xx insert can still commit shortly after the
+            // answer. Then look before inserting again, or the session would
+            // leave an orphan broadcast behind.
+            tokio::time::sleep(delay).await;
             match self.find_upcoming_broadcast(title, scheduled_start).await {
                 Ok(Some(id)) => {
                     tracing::warn!(
@@ -513,15 +530,6 @@ impl ManageClient {
                 Ok(None) => {}
                 Err(_) => return Err(err),
             }
-            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
-                return Err(err);
-            };
-            retries += 1;
-            tracing::warn!(
-                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), not created, retry {retries}/{MAX_5XX_RETRIES} in {} ms",
-                delay.as_millis()
-            );
-            tokio::time::sleep(delay).await;
         };
         v["id"]
             .as_str()
@@ -531,37 +539,56 @@ impl ManageClient {
     }
 
     /// The id of the channel's upcoming broadcast with exactly this title and
-    /// scheduled start (compared as instants: Google may reformat it).
+    /// scheduled start. The start is compared to the second: Google may drop
+    /// the milliseconds the driver sends. Pages are followed up to
+    /// [`MAX_PAGES`].
     async fn find_upcoming_broadcast(
         &self,
         title: &str,
         scheduled_start: &str,
     ) -> Result<Option<String>> {
-        let want = chrono::DateTime::parse_from_rfc3339(scheduled_start).ok();
-        let v = self
-            .call(
-                Method::GET,
-                "liveBroadcasts",
-                &[
-                    ("part", "id,snippet"),
-                    ("broadcastStatus", "upcoming"),
-                    ("maxResults", "50"),
-                ],
-                None,
-                admit(units::LIST),
-            )
-            .await?;
-        let found = v["items"].as_array().into_iter().flatten().find(|item| {
-            let snippet = &item["snippet"];
-            let at = snippet["scheduledStartTime"]
-                .as_str()
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
-            snippet["title"].as_str() == Some(title) && want.is_some() && at == want
-        });
-        Ok(found
-            .and_then(|item| item["id"].as_str())
-            .filter(|id| !id.is_empty())
-            .map(str::to_string))
+        let Some(want) = start_second(scheduled_start) else {
+            return Ok(None);
+        };
+        let mut page_token = String::new();
+        for _ in 0..MAX_PAGES {
+            let mut query = vec![
+                ("part", "id,snippet"),
+                ("broadcastStatus", "upcoming"),
+                ("maxResults", "50"),
+            ];
+            if !page_token.is_empty() {
+                query.push(("pageToken", page_token.as_str()));
+            }
+            let page = self
+                .call(
+                    Method::GET,
+                    "liveBroadcasts",
+                    &query,
+                    None,
+                    admit(units::LIST),
+                )
+                .await?;
+            let found = page["items"].as_array().into_iter().flatten().find(|item| {
+                let snippet = &item["snippet"];
+                snippet["title"].as_str() == Some(title)
+                    && snippet["scheduledStartTime"]
+                        .as_str()
+                        .and_then(start_second)
+                        == Some(want)
+            });
+            if let Some(id) = found
+                .and_then(|item| item["id"].as_str())
+                .filter(|id| !id.is_empty())
+            {
+                return Ok(Some(id.to_string()));
+            }
+            match page["nextPageToken"].as_str() {
+                Some(t) if !t.is_empty() => page_token = t.to_string(),
+                _ => return Ok(None),
+            }
+        }
+        Ok(None)
     }
 
     /// Bind the broadcast to a stream.

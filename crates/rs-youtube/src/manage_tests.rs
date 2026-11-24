@@ -702,12 +702,57 @@ async fn an_insert_503_that_created_the_broadcast_reuses_it() {
     .await;
     let c = fast_client(&s);
     assert_eq!(
-        c.insert_broadcast("t", "2026-11-24T13:51:05.000Z")
+        c.insert_broadcast("t", "2026-11-24T13:51:05.812Z")
             .await
             .unwrap(),
         "bc-made",
-        "same title and the same instant, Google's format"
+        "same title and the same second: Google drops the milliseconds"
     );
+}
+
+#[tokio::test]
+async fn the_insert_lookup_follows_the_next_page() {
+    let s = server_with_token(3600, 1).await;
+    insert_answers(&s, 503, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/yt/liveBroadcasts"))
+        .and(query_param("pageToken", "p2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            {"id": "bc-p2", "snippet": {"title": "t", "scheduledStartTime": "2026-11-24T13:51:05Z"}}
+        ]})))
+        .with_priority(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{"id": "x", "snippet": {"title": "other", "scheduledStartTime": "2026-11-24T13:51:05Z"}}],
+            "nextPageToken": "p2"
+        })))
+        .with_priority(2)
+        .mount(&s)
+        .await;
+    assert_eq!(
+        fast_client(&s)
+            .insert_broadcast("t", "2026-11-24T13:51:05.000Z")
+            .await
+            .unwrap(),
+        "bc-p2"
+    );
+}
+
+#[test]
+fn start_second_ignores_sub_seconds_and_rejects_garbage() {
+    assert_eq!(
+        start_second("2026-11-24T13:51:05.812Z"),
+        start_second("2026-11-24T13:51:05Z")
+    );
+    assert_ne!(
+        start_second("2026-11-24T13:51:06Z"),
+        start_second("2026-11-24T13:51:05Z")
+    );
+    assert!(start_second("2026-11-24T13:51:05Z").is_some());
+    assert_eq!(start_second("x"), None);
 }
 
 #[tokio::test]
