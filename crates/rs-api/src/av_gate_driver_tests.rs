@@ -200,8 +200,10 @@ impl YtState {
     }
 }
 
+/// A scripted, persistent API error. A 4xx, because the client itself now
+/// retries a transient 5xx (#435) and would consume extra script steps.
 fn api_error(reason: &str) -> ResponseTemplate {
-    ResponseTemplate::new(500).set_body_json(json!({
+    ResponseTemplate::new(400).set_body_json(json!({
         "error": {"message": "scripted", "errors": [{"reason": reason}]}
     }))
 }
