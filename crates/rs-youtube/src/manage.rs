@@ -73,6 +73,8 @@ const fn forced(units: u32) -> Cost {
 const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// Pagination cap for the stream lookup (same bound as `streams.rs`, #200).
 const MAX_PAGES: usize = 10;
+/// First backoff before retrying a Google 5xx (#435).
+const DEFAULT_RETRY_BASE: Duration = Duration::from_secs(1);
 
 /// The manage-scope grant plus the client credentials that refresh it.
 #[derive(Clone)]
@@ -189,6 +191,8 @@ pub struct ManageClient {
     units: AtomicU32,
     /// The project-wide bucket shared with the health polling, if attached.
     quota: Option<&'static QuotaTracker>,
+    /// First backoff before a 5xx retry; it doubles per attempt (#435).
+    retry_base: Duration,
 }
 
 /// Google's `{"error": {"message", "errors": [{"reason"}]}}` as
@@ -236,6 +240,7 @@ impl ManageClient {
             cached: Mutex::new(None),
             units: AtomicU32::new(0),
             quota: None,
+            retry_base: DEFAULT_RETRY_BASE,
         }
     }
 
@@ -243,6 +248,12 @@ impl ManageClient {
     /// pay is refused before it is sent.
     pub fn with_quota_tracker(mut self, tracker: &'static QuotaTracker) -> Self {
         self.quota = Some(tracker);
+        self
+    }
+
+    /// Use `base` as the first 5xx backoff instead of one second (tests).
+    pub fn with_retry_base(mut self, base: Duration) -> Self {
+        self.retry_base = base;
         self
     }
 

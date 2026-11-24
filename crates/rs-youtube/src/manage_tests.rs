@@ -623,3 +623,107 @@ fn costs_say_whether_the_bucket_may_refuse() {
         }
     );
 }
+
+// ---- transient Google 5xx (#435) -------------------------------------------
+
+fn fast_client(s: &MockServer) -> ManageClient {
+    client(s).with_retry_base(Duration::from_millis(1))
+}
+
+/// 2026-11-24 13:51Z: Google answered liveBroadcasts.insert with a 503 and
+/// the whole av-gate session was torn down. A transient 5xx must be retried.
+#[tokio::test]
+async fn a_transient_503_on_insert_is_retried_and_succeeds() {
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"message": "The service is currently unavailable.",
+                      "errors": [{"reason": "SERVICE_UNAVAILABLE"}]}
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "bc-2"})))
+        .expect(1)
+        .with_priority(2)
+        .mount(&s)
+        .await;
+    let c = fast_client(&s);
+    assert_eq!(c.insert_broadcast("t", "x").await.unwrap(), "bc-2");
+    assert_eq!(
+        c.units_used(),
+        2 * units::INSERT,
+        "Google bills the failed attempt too, so both are charged"
+    );
+}
+
+#[tokio::test]
+async fn each_retryable_5xx_status_is_retried() {
+    for status in [500u16, 502, 503, 504] {
+        let s = server_with_token(3600, 1).await;
+        Mock::given(method("GET"))
+            .and(path("/yt/liveStreams"))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/yt/liveStreams"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"items": [{"status": {"streamStatus": "active"}}]})),
+            )
+            .with_priority(2)
+            .mount(&s)
+            .await;
+        assert_eq!(
+            fast_client(&s)
+                .stream_status("s1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("active"),
+            "HTTP {status} must be retried"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_persistent_5xx_gives_up_after_four_attempts() {
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/yt/liveStreams"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(4)
+        .mount(&s)
+        .await;
+    let c = fast_client(&s);
+    match c.stream_status("s1").await {
+        Err(YouTubeError::Api { status, .. }) => assert_eq!(status, 503),
+        other => panic!("expected the final 503, got {other:?}"),
+    }
+    assert_eq!(c.units_used(), 4 * units::LIST);
+}
+
+#[tokio::test]
+async fn a_4xx_other_than_401_is_not_retried() {
+    for status in [400u16, 403, 404, 501] {
+        let s = server_with_token(3600, 1).await;
+        Mock::given(method("GET"))
+            .and(path("/yt/liveStreams"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&s)
+            .await;
+        assert!(
+            fast_client(&s).stream_status("s1").await.is_err(),
+            "HTTP {status} is an error"
+        );
+        s.verify().await;
+    }
+}
