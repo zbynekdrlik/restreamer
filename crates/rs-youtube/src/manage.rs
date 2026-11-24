@@ -75,6 +75,8 @@ const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 const MAX_PAGES: usize = 10;
 /// First backoff before retrying a Google 5xx (#435).
 const DEFAULT_RETRY_BASE: Duration = Duration::from_secs(1);
+/// Retries after the first 5xx: 1 + 2 + 4 s of backoff at most.
+const MAX_5XX_RETRIES: u32 = 3;
 
 /// The manage-scope grant plus the client credentials that refresh it.
 #[derive(Clone)]
@@ -206,6 +208,12 @@ fn api_error_message(body: &str) -> String {
         (true, false) => message.to_string(),
         (true, true) => "unparsable error body".to_string(),
     }
+}
+
+/// Google's transient server errors, which its API guidance says to retry
+/// with backoff. 501 Not Implemented is not transient.
+fn is_transient_5xx(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504)
 }
 
 /// A cached token is reused strictly before its refresh point.
@@ -343,7 +351,9 @@ impl ManageClient {
     }
 
     /// One Data API call. A 401 drops the cached token and retries ONCE with
-    /// a fresh one (a revoked or rotated access token).
+    /// a fresh one (a revoked or rotated access token). A transient Google
+    /// 5xx is retried up to [`MAX_5XX_RETRIES`] times with a doubling backoff
+    /// (#435: one 503 on `liveBroadcasts.insert` ended a whole rig run).
     async fn call(
         &self,
         method: Method,
@@ -352,12 +362,26 @@ impl ManageClient {
         body: Option<&Value>,
         cost: Cost,
     ) -> Result<Value> {
-        let mut sent = self.send_once(&method, path, query, body, cost).await?;
-        if sent.0 == 401 {
-            *self.cached.lock().await = None;
-            sent = self.send_once(&method, path, query, body, cost).await?;
-        }
-        let (status, text) = sent;
+        let mut retries = 0u32;
+        let (status, text) = loop {
+            let mut sent = self.send_once(&method, path, query, body, cost).await?;
+            if sent.0 == 401 {
+                *self.cached.lock().await = None;
+                sent = self.send_once(&method, path, query, body, cost).await?;
+            }
+            if !is_transient_5xx(sent.0) || retries >= MAX_5XX_RETRIES {
+                break sent;
+            }
+            let delay = self.retry_base * 2u32.pow(retries);
+            retries += 1;
+            tracing::warn!(
+                "youtube manage {method} {path}: HTTP {} ({}), retry {retries}/{MAX_5XX_RETRIES} in {} ms",
+                sent.0,
+                api_error_message(&sent.1),
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+        };
         if !(200..300).contains(&status) {
             return Err(YouTubeError::Api {
                 status,
