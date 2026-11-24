@@ -77,6 +77,9 @@ const MAX_PAGES: usize = 10;
 const DEFAULT_RETRY_BASE: Duration = Duration::from_secs(1);
 /// Retries after the first 5xx: 1 + 2 + 4 s of backoff at most.
 const MAX_5XX_RETRIES: u32 = 3;
+/// No retry starts once this much time went by since the first attempt, so
+/// slow 5xx answers cannot stack up behind the driver's own retries.
+const RETRY_BUDGET: Duration = Duration::from_secs(20);
 
 /// The manage-scope grant plus the client credentials that refresh it.
 #[derive(Clone)]
@@ -216,6 +219,24 @@ fn is_transient_5xx(status: u16) -> bool {
     matches!(status, 500 | 502 | 503 | 504)
 }
 
+/// The backoff before 5xx retry number `retries + 1`, or `None` when the
+/// retries or the time budget are used up.
+fn next_retry_delay(base: Duration, retries: u32, elapsed: Duration) -> Option<Duration> {
+    if retries >= MAX_5XX_RETRIES {
+        return None;
+    }
+    let delay = base * 2u32.pow(retries);
+    (elapsed + delay <= RETRY_BUDGET).then_some(delay)
+}
+
+/// Calls that are safe to send again after a 5xx: reads, and `bind` (binding
+/// the same stream again changes nothing). An insert is retried only behind a
+/// lookup (`insert_broadcast`); a transition never, because the driver
+/// re-reads the life cycle and retries it itself.
+fn retries_5xx(method: &Method, path: &str) -> bool {
+    *method == Method::GET || path == "liveBroadcasts/bind"
+}
+
 /// A cached token is reused strictly before its refresh point.
 fn token_is_fresh(now: Instant, refresh_after: Instant) -> bool {
     now < refresh_after
@@ -352,8 +373,8 @@ impl ManageClient {
 
     /// One Data API call. A 401 drops the cached token and retries ONCE with
     /// a fresh one (a revoked or rotated access token). A transient Google
-    /// 5xx is retried up to [`MAX_5XX_RETRIES`] times with a doubling backoff
-    /// (#435: one 503 on `liveBroadcasts.insert` ended a whole rig run).
+    /// 5xx on an idempotent call ([`retries_5xx`]) is retried with a doubling
+    /// backoff inside [`RETRY_BUDGET`] (#435: one 503 ended a whole rig run).
     async fn call(
         &self,
         method: Method,
@@ -362,6 +383,7 @@ impl ManageClient {
         body: Option<&Value>,
         cost: Cost,
     ) -> Result<Value> {
+        let started = Instant::now();
         let mut retries = 0u32;
         let (status, text) = loop {
             let mut sent = self.send_once(&method, path, query, body, cost).await?;
@@ -369,10 +391,12 @@ impl ManageClient {
                 *self.cached.lock().await = None;
                 sent = self.send_once(&method, path, query, body, cost).await?;
             }
-            if !is_transient_5xx(sent.0) || retries >= MAX_5XX_RETRIES {
+            if !is_transient_5xx(sent.0) || !retries_5xx(&method, path) {
                 break sent;
             }
-            let delay = self.retry_base * 2u32.pow(retries);
+            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
+                break sent;
+            };
             retries += 1;
             tracing::warn!(
                 "youtube manage {method} {path}: HTTP {} ({}), retry {retries}/{MAX_5XX_RETRIES} in {} ms",
@@ -455,20 +479,89 @@ impl ManageClient {
                 "monitorStream": { "enableMonitorStream": false }
             }
         });
-        let v = self
-            .call(
-                Method::POST,
-                "liveBroadcasts",
-                &[("part", "id,snippet,status,contentDetails")],
-                Some(&body),
-                admit(units::INSERT),
-            )
-            .await?;
+        let started = Instant::now();
+        let mut retries = 0u32;
+        let v = loop {
+            let err = match self
+                .call(
+                    Method::POST,
+                    "liveBroadcasts",
+                    &[("part", "id,snippet,status,contentDetails")],
+                    Some(&body),
+                    admit(units::INSERT),
+                )
+                .await
+            {
+                Ok(v) => break v,
+                Err(e) => e,
+            };
+            let YouTubeError::Api { status, .. } = &err else {
+                return Err(err);
+            };
+            if !is_transient_5xx(*status) {
+                return Err(err);
+            }
+            // A 5xx may still have created it: look before inserting again,
+            // or the session would leave an orphan broadcast behind.
+            match self.find_upcoming_broadcast(title, scheduled_start).await {
+                Ok(Some(id)) => {
+                    tracing::warn!(
+                        "youtube manage liveBroadcasts.insert: HTTP {status}, but broadcast {id} exists; using it"
+                    );
+                    return Ok(id);
+                }
+                Ok(None) => {}
+                Err(_) => return Err(err),
+            }
+            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
+                return Err(err);
+            };
+            retries += 1;
+            tracing::warn!(
+                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), not created, retry {retries}/{MAX_5XX_RETRIES} in {} ms",
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+        };
         v["id"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .ok_or_else(|| YouTubeError::Other("liveBroadcasts.insert returned no id".to_string()))
+    }
+
+    /// The id of the channel's upcoming broadcast with exactly this title and
+    /// scheduled start (compared as instants: Google may reformat it).
+    async fn find_upcoming_broadcast(
+        &self,
+        title: &str,
+        scheduled_start: &str,
+    ) -> Result<Option<String>> {
+        let want = chrono::DateTime::parse_from_rfc3339(scheduled_start).ok();
+        let v = self
+            .call(
+                Method::GET,
+                "liveBroadcasts",
+                &[
+                    ("part", "id,snippet"),
+                    ("broadcastStatus", "upcoming"),
+                    ("maxResults", "50"),
+                ],
+                None,
+                admit(units::LIST),
+            )
+            .await?;
+        let found = v["items"].as_array().into_iter().flatten().find(|item| {
+            let snippet = &item["snippet"];
+            let at = snippet["scheduledStartTime"]
+                .as_str()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+            snippet["title"].as_str() == Some(title) && want.is_some() && at == want
+        });
+        Ok(found
+            .and_then(|item| item["id"].as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string))
     }
 
     /// Bind the broadcast to a stream.

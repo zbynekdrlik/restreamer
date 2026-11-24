@@ -200,10 +200,10 @@ impl YtState {
     }
 }
 
-/// A scripted, persistent API error. A 4xx, because the client itself now
-/// retries a transient 5xx (#435) and would consume extra script steps.
+/// A scripted, persistent API error: a 500, so the client's own 5xx retry
+/// (#435) runs too and the driver still sees the final error.
 fn api_error(reason: &str) -> ResponseTemplate {
-    ResponseTemplate::new(400).set_body_json(json!({
+    ResponseTemplate::new(500).set_body_json(json!({
         "error": {"message": "scripted", "errors": [{"reason": reason}]}
     }))
 }
@@ -342,13 +342,19 @@ pub(crate) fn oauth_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
     p
 }
 
+/// The client's 5xx backoff in tests (production: 1 s).
+const FAST_RETRY: Duration = Duration::from_millis(1);
+
 pub(crate) fn yt_client(server: &MockServer, dir: &tempfile::TempDir) -> Arc<ManageClient> {
     let creds = ManageCredentials::from_oauth_file(&oauth_file(dir), "cid", "cs-fake").unwrap();
-    Arc::new(ManageClient::with_endpoints(
-        creds,
-        &format!("{}/yt", server.uri()),
-        &format!("{}/token", server.uri()),
-    ))
+    Arc::new(
+        ManageClient::with_endpoints(
+            creds,
+            &format!("{}/yt", server.uri()),
+            &format!("{}/token", server.uri()),
+        )
+        .with_retry_base(FAST_RETRY),
+    )
 }
 
 pub(crate) fn timings() -> AvGateTimings {
@@ -441,7 +447,7 @@ impl Harness {
         Arc::new(move || {
             let creds = ManageCredentials::from_oauth_file(&oauth, "cid", "cs-fake")
                 .map_err(|e| e.to_string())?;
-            Ok(ManageClient::with_endpoints(creds, &api, &token))
+            Ok(ManageClient::with_endpoints(creds, &api, &token).with_retry_base(FAST_RETRY))
         })
     }
 

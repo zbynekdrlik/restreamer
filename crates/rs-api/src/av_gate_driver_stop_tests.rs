@@ -186,7 +186,7 @@ async fn a_broadcast_that_will_not_complete_is_retried_then_reported() {
     let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
     assert!(
         reason(&row)
-            .contains("broadcast bc-1 not completed: API error: 400 - invalidTransition: scripted"),
+            .contains("broadcast bc-1 not completed: API error: 500 - invalidTransition: scripted"),
         "{row:?}"
     );
     assert_eq!(
@@ -216,7 +216,7 @@ async fn an_unreadable_life_cycle_is_reported() {
     h.yt_state.failing("life");
     let row = stop_and_wait(&h, "s1", SessionState::Failed).await;
     assert!(
-        reason(&row).contains("not completed: API error: 400"),
+        reason(&row).contains("not completed: API error: 500"),
         "{row:?}"
     );
 }
