@@ -181,10 +181,13 @@ async fn a_hung_backup_never_slows_or_fails_the_primary() {
     .await
     .expect("the primary must not wait for a hung backup");
     assert_eq!(pushes(&primary_log).len(), 10);
+    // #437: a full queue drops its STALE chunks and keeps the new one. The
+    // hung backup never takes a chunk here, so chunks 0-3 fill the queue,
+    // chunk 4 drops them (4), 5-7 fill it again and chunk 8 drops 4-7 (8).
     assert_eq!(
         state.snapshot().dropped_chunks,
-        (10 - BACKUP_QUEUE_CHUNKS) as u64,
-        "a full backup queue drops whole NEW chunks and counts them"
+        8,
+        "a full backup queue drops its stale whole chunks and counts them"
     );
 
     // The hung backup push times out on its own and is reported as a

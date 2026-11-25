@@ -105,3 +105,79 @@ async fn the_backup_starts_a_new_mapping_at_its_own_gap() {
         vec![Seen::P(1), Seen::P(2), Seen::M, Seen::P(4)]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_full_backup_queue_drops_the_stale_chunks_and_catches_up() {
+    // The backup is held on chunk 1 while the primary goes on. Before #437
+    // the full queue kept the stale chunks 2-5 and dropped the NEWEST one
+    // (6), so the backup stayed full and behind for good.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let backup = Mock {
+        gate: Some(Arc::clone(&gate)),
+        ..Mock::default()
+    };
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(Mock::default(), backup, None);
+    let state = tee.backup.as_ref().expect("backup").state();
+
+    push_labelled(&mut tee, 1).await;
+    settle(100, || pushes(&backup_log).len() == 1).await;
+    assert_eq!(pushes(&backup_log).len(), 1, "the backup holds chunk 1");
+    for id in 2..=(2 + BACKUP_QUEUE_CHUNKS as u8) {
+        push_labelled(&mut tee, id).await;
+    }
+    let newest = 2 + BACKUP_QUEUE_CHUNKS as u8;
+    assert_eq!(
+        state.snapshot().dropped_chunks,
+        BACKUP_QUEUE_CHUNKS as u64,
+        "the stale queued chunks are dropped and counted"
+    );
+
+    gate.add_permits(10);
+    settle(100, || pushes(&backup_log).len() == 2).await;
+    assert_eq!(
+        seen(&backup_log),
+        vec![Seen::P(1), Seen::M, Seen::P(newest)],
+        "the backup jumps to the newest chunk once, as a clean cut"
+    );
+    let s = state.snapshot();
+    assert_eq!(s.last_chunk_id, Some(i64::from(newest)));
+    assert_eq!(s.chunks_pushed, 2);
+
+    // Caught up: the next chunk queues and is pushed without a drop.
+    push_labelled(&mut tee, newest + 1).await;
+    settle(100, || pushes(&backup_log).len() == 3).await;
+    assert_eq!(pushes(&backup_log).len(), 3);
+    assert_eq!(state.snapshot().dropped_chunks, BACKUP_QUEUE_CHUNKS as u64);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queue_with_room_drops_nothing() {
+    // One below the bound: everything queued reaches the backup in order.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let backup = Mock {
+        gate: Some(Arc::clone(&gate)),
+        ..Mock::default()
+    };
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(Mock::default(), backup, None);
+    let state = tee.backup.as_ref().expect("backup").state();
+
+    push_labelled(&mut tee, 1).await;
+    settle(100, || pushes(&backup_log).len() == 1).await;
+    for id in 2..=(1 + BACKUP_QUEUE_CHUNKS as u8) {
+        push_labelled(&mut tee, id).await;
+    }
+    assert_eq!(state.snapshot().dropped_chunks, 0);
+    gate.add_permits(10);
+    let total = 1 + BACKUP_QUEUE_CHUNKS;
+    settle(100, || pushes(&backup_log).len() == total).await;
+    assert_eq!(
+        pushes(&backup_log),
+        (1..=total as u8).map(chunk).collect::<Vec<_>>()
+    );
+    assert!(
+        !seen(&backup_log).contains(&Seen::M),
+        "no gap, no new mapping"
+    );
+}
