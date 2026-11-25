@@ -952,7 +952,7 @@ async fn a_persistent_5xx_gives_up_after_four_attempts() {
 }
 
 #[tokio::test]
-async fn a_4xx_other_than_401_is_not_retried() {
+async fn a_4xx_other_than_401_or_a_501_is_not_retried() {
     for status in [400u16, 403, 404, 501] {
         let s = server_with_token(3600, 1).await;
         Mock::given(method("GET"))
@@ -968,3 +968,6 @@ async fn a_4xx_other_than_401_is_not_retried() {
         s.verify().await;
     }
 }
+
+#[path = "manage_insert_lookup_tests.rs"]
+mod insert_lookup;
