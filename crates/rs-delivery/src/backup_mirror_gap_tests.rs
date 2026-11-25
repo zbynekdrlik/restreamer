@@ -193,22 +193,59 @@ fn mirror_chunk(id: i64) -> MirrorChunk {
 async fn the_queue_drops_its_stale_chunks_only_when_full_and_everything_once_closed() {
     let q = MirrorQueue::new();
     for id in 0..BACKUP_QUEUE_CHUNKS as i64 {
-        assert_eq!(q.offer(mirror_chunk(id)), 0, "room for chunk {id}");
+        assert_eq!(
+            q.offer(mirror_chunk(id)),
+            Offered::Queued,
+            "room for chunk {id}"
+        );
     }
     assert_eq!(
         q.offer(mirror_chunk(9)),
-        BACKUP_QUEUE_CHUNKS,
+        Offered::DroppedStale(BACKUP_QUEUE_CHUNKS),
         "a full queue drops every stale chunk"
     );
     assert_eq!(q.recv().await.and_then(|c| c.chunk_id), Some(9));
     q.close();
     assert_eq!(
         q.offer(mirror_chunk(10)),
-        1,
+        Offered::Closed,
         "a closed queue drops the new chunk"
     );
     assert!(
         q.recv().await.is_none(),
         "a closed queue ends the mirror task"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_backup_that_gave_up_counts_every_chunk_it_misses() {
+    // A terminal backup error (no retry) ends the mirror task and closes the
+    // queue; each later chunk is one dropped chunk, never "stale".
+    let backup = Mock {
+        results: VecDeque::from([Err(PushError::LocalCancel)]),
+        ..Mock::default()
+    };
+    let backup_log = Arc::clone(&backup.log);
+    let mut tee = tee_with(Mock::default(), backup, None);
+    let state = tee.backup.as_ref().expect("backup").state();
+    push_labelled(&mut tee, 1).await;
+    settle(100, || backup_log.lock().unwrap().contains(&Event::Close)).await;
+    settle(100, || {
+        tee.backup
+            .as_ref()
+            .expect("backup")
+            .queue
+            .closed
+            .load(Ordering::Acquire)
+    })
+    .await;
+    for id in 2..=4 {
+        push_labelled(&mut tee, id).await;
+    }
+    assert_eq!(state.snapshot().dropped_chunks, 3);
+    assert_eq!(
+        pushes(&backup_log).len(),
+        1,
+        "nothing reaches a stopped backup"
     );
 }

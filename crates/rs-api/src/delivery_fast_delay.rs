@@ -67,11 +67,15 @@ pub async fn set_fast_delay(
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.without_url().to_string()))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err((code, text));
+    let status = resp.status().as_u16();
+    let text = resp.text().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("VPS answered {status} but its body was unreadable: {e}"),
+        )
+    })?;
+    if !(200..300).contains(&status) {
+        return Err((host_status_for_vps(status), format!("VPS {status}: {text}")));
     }
     serde_json::from_str(&text).map_err(|e| {
         (
@@ -79,6 +83,19 @@ pub async fn set_fast_delay(
             format!("VPS answered 200 with an unreadable body: {e}"),
         )
     })
+}
+
+/// The host answer for a VPS refusal: the operator-meaningful refusals
+/// (404 `not_found`, 409 `not_fast`, 400/422 a bad request) pass through;
+/// anything else (a VPS bearer mismatch 401/403, a 5xx) is the VPS failing,
+/// a 502, so the dashboard never reads it as "you are not authorized here".
+pub(crate) fn host_status_for_vps(vps_status: u16) -> StatusCode {
+    match vps_status {
+        400 | 404 | 409 | 422 => {
+            StatusCode::from_u16(vps_status).unwrap_or(StatusCode::BAD_GATEWAY)
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    }
 }
 
 pub async fn delivery_set_fast_delay(

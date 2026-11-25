@@ -46,6 +46,19 @@ pub fn parse_target(input: &str) -> Option<u64> {
         .filter(|s| (5..=120).contains(s))
 }
 
+/// The operator's confirmation. A target above the current lag never adds
+/// buffer by itself (the push is always real time, the producer never waits):
+/// it stops the skips ahead, and the lag grows to it only through an outage.
+/// A target below the lag skips ahead to it on the next probe (~1 min).
+pub fn set_result_text(from_secs: u64, to_secs: u64, lag_secs: f64) -> String {
+    let what = if (to_secs as f64) > lag_secs {
+        "nad oneskorením: nič sa nepreskočí, oneskorenie narastie až pri výpadku"
+    } else {
+        "pod oneskorením: do minúty preskočí bližšie k živému"
+    };
+    format!("nastavené: {from_secs} s → {to_secs} s ({what})")
+}
+
 #[component]
 pub fn EndpointStreamState(ep_data: Memo<DeliveryEndpointState>) -> impl IntoView {
     view! {
@@ -83,17 +96,18 @@ pub fn FastDelayControl(alias: String, ep_data: Memo<DeliveryEndpointState>) -> 
             result.set(Some((false, "zadaj 5 až 120 s".to_string())));
             return;
         };
-        let event_id = store.pipeline_state.get_untracked().event_id.unwrap_or(0);
+        let Some(event_id) = store.pipeline_state.get_untracked().event_id else {
+            result.set(Some((false, "žiadna aktívna udalosť".to_string())));
+            return;
+        };
+        let lag_secs = ep_data.get_untracked().chunk_delay_secs;
         let alias = alias.get_value();
         busy.set(true);
         spawn_local(async move {
             let outcome = api::delivery_set_fast_delay(event_id, &alias, target).await;
             let _ = busy.try_set(false);
             let _ = result.try_set(Some(match outcome {
-                Ok(set) => (
-                    true,
-                    format!("nastavené: {} s → {} s", set.from_secs, set.to_secs),
-                ),
+                Ok(set) => (true, set_result_text(set.from_secs, set.to_secs, lag_secs)),
                 Err(e) => (false, format!("nenastavené: {e}")),
             }));
         });
@@ -174,6 +188,23 @@ mod tests {
         assert_eq!(
             backup_label(&backup(false, Some(100), 0), 100).0,
             "záloha: zaostáva"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_says_what_the_new_target_does() {
+        assert_eq!(
+            set_result_text(9, 30, 28.0),
+            "nastavené: 9 s → 30 s (nad oneskorením: nič sa nepreskočí, \
+             oneskorenie narastie až pri výpadku)"
+        );
+        assert_eq!(
+            set_result_text(30, 9, 28.0),
+            "nastavené: 30 s → 9 s (pod oneskorením: do minúty preskočí bližšie k živému)"
+        );
+        assert!(
+            set_result_text(9, 28, 28.0).contains("pod oneskorením"),
+            "equal is not above"
         );
     }
 

@@ -380,7 +380,8 @@ pub struct FacebookHealth {
 pub use crate::endpoint_lifecycle::{EndpointLifecycle, LifecycleInput};
 
 /// #437: what the dashboard shows about an endpoint's YouTube backup ingest
-/// (mapped from the VPS `/api/status` `backup_ingest`).
+/// (mapped from the VPS `/api/status` `backup_ingest`). The dashboard alone
+/// decides "OK / zaostáva" from it (`leptos-ui` `store::BackupIngest::is_behind`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupIngestMetrics {
     pub connected: bool,
@@ -393,24 +394,6 @@ pub struct BackupIngestMetrics {
     /// The S3 chunk id of the backup's last successful push.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_chunk_id: Option<i64>,
-}
-
-/// #437: chunks the backup may trail the primary's position before the
-/// dashboard shows it as behind ("zaostáva"). The live consumer keeps the
-/// backup one chunk AHEAD, so 2 behind is already a real lag.
-pub const BACKUP_BEHIND_CHUNKS: i64 = 2;
-
-impl BackupIngestMetrics {
-    /// The backup is behind: not connected, nothing pushed yet, or its last
-    /// chunk trails the primary's `current_chunk_id` by more than
-    /// [`BACKUP_BEHIND_CHUNKS`].
-    pub fn is_behind(&self, current_chunk_id: i64) -> bool {
-        match self.last_chunk_id {
-            _ if !self.connected => true,
-            None => true,
-            Some(id) => current_chunk_id - id > BACKUP_BEHIND_CHUNKS,
-        }
-    }
 }
 
 /// Per-endpoint delivery metrics broadcast via WebSocket.

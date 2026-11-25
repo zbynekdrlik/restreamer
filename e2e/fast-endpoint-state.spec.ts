@@ -88,16 +88,21 @@ test("the operator sets a fast endpoint's read-delay target live", async ({
   let sent = await (await request.get(`${MOCK}/api/v1/_test/fast-delay-requests`)).json();
   expect(sent).toEqual([]);
 
-  // 30 s: above the 28 s lag, so the 62 s skip loop of 25.11. stops.
+  // 30 s: above the 28 s lag. It adds no buffer by itself (the push is
+  // always real time); it means nothing is skipped ahead any more, and the
+  // dashboard says so.
   await fast.getByTestId("fast-delay-input").fill("30");
   await fast.getByTestId("fast-delay-set").click();
   await expect(fast.getByTestId("fast-delay-result")).toHaveText(
-    "nastavené: 9 s → 30 s",
+    "nastavené: 9 s → 30 s (nad oneskorením: nič sa nepreskočí, " +
+      "oneskorenie narastie až pri výpadku)",
   );
   sent = await (await request.get(`${MOCK}/api/v1/_test/fast-delay-requests`)).json();
   expect(sent).toEqual([{ event_id: 1, alias: "KS-PP-TEST", target_secs: 30 }]);
 
-  // The backend holds the new target: a reload shows it on the node.
+  // The dashboard re-reads the target from the delivery status: a reload
+  // shows the new one on the node (the host -> VPS chain itself is covered
+  // by the rs-api / rs-delivery tests).
   await page.reload();
   const reloaded = page.locator(".endpoint-node", { hasText: "KS-PP-TEST" });
   await expect(reloaded.getByTestId("fast-delay-state")).toHaveText(

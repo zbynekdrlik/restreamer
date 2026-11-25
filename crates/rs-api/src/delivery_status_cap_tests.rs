@@ -90,4 +90,9 @@ fn the_vps_stream_health_states_are_parsed() {
         parse_stream_health(&serde_json::json!({ "backup_ingest": null })).1,
         None
     );
+    assert_eq!(
+        parse_stream_health(&serde_json::json!({ "backup_ingest": { "bogus": 1 } })).1,
+        None,
+        "an unreadable backup_ingest is none (and logged)"
+    );
 }

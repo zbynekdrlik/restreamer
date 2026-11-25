@@ -1,25 +1,5 @@
 use super::*;
 
-/// #437: the dashboard's "záloha zaostáva" decision.
-#[test]
-fn a_backup_is_behind_when_disconnected_empty_or_trailing() {
-    let backup = |connected, last_chunk_id| BackupIngestMetrics {
-        connected,
-        chunks_pushed: 10,
-        dropped_chunks: 0,
-        last_chunk_id,
-    };
-    assert!(!backup(true, Some(101)).is_behind(100), "one ahead: OK");
-    assert!(
-        !backup(true, Some(98)).is_behind(100),
-        "2 behind is the bound"
-    );
-    assert!(backup(true, Some(97)).is_behind(100), "3 behind");
-    assert!(backup(false, Some(101)).is_behind(100), "disconnected");
-    assert!(backup(true, None).is_behind(100), "nothing pushed yet");
-    assert_eq!(BACKUP_BEHIND_CHUNKS, 2);
-}
-
 #[test]
 fn ws_event_serde_roundtrip() {
     let events = vec![

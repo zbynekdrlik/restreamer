@@ -175,6 +175,30 @@ impl FastDelayController {
         }
     }
 
+    /// #437: publish the target on the shared `published` slot (status +
+    /// respawn seed), adopting a pending operator request FIRST, so the
+    /// producer never overwrites a target the operator just set with its old
+    /// one. A request that lands between the adopt and the store is caught by
+    /// a second round (bounded). Returns the adoption edge, if any.
+    pub fn publish_target(
+        &mut self,
+        requested: &std::sync::atomic::AtomicU64,
+        published: &std::sync::atomic::AtomicU64,
+        now: Instant,
+    ) -> Option<(u64, u64)> {
+        let mut edge = None;
+        for _ in 0..2 {
+            if let Some(adopted) = self.adopt_operator_request(requested, now) {
+                edge = Some(adopted);
+            }
+            published.store(self.target_secs, std::sync::atomic::Ordering::Relaxed);
+            if requested.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                break;
+            }
+        }
+        edge
+    }
+
     /// Current target expressed in chunks, for the live-edge lag-probe.
     /// Always >= 1 so a fast endpoint never re-pins to the absolute edge.
     pub fn delay_chunks(&self, typical_chunk_dur_ms: u64) -> i64 {
@@ -253,6 +277,25 @@ mod tests {
         c.set_target(30, now);
         assert_eq!(c.on_starvation(40, now), Some((30, 45)));
         assert_eq!(c.on_starvation(10, now), None);
+    }
+
+    #[test]
+    fn publishing_never_overwrites_a_pending_operator_target() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let now = Instant::now();
+        let mut c = ctrl(now);
+        let requested = AtomicU64::new(0);
+        let published = AtomicU64::new(0);
+        assert_eq!(c.publish_target(&requested, &published, now), None);
+        assert_eq!(published.load(Relaxed), 5, "the controller's own target");
+        // The operator set 30 (the handler already published it) while the
+        // producer still holds 5: its publish must not write 5 back.
+        requested.store(30, Relaxed);
+        published.store(30, Relaxed);
+        assert_eq!(c.publish_target(&requested, &published, now), Some((5, 30)));
+        assert_eq!(published.load(Relaxed), 30);
+        assert_eq!(requested.load(Relaxed), 0);
+        assert_eq!(c.target_secs(), 30);
     }
 
     #[test]

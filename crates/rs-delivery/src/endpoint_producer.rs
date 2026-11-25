@@ -28,6 +28,24 @@ use crate::producer_lag::maybe_jump as maybe_jump_ahead;
 /// counter and restores `producer_active=true`).
 pub(crate) const MAX_CONSECUTIVE_FETCH_ERRORS: u32 = 3;
 
+/// #437: persist the fast controller's target on the shared buffer state
+/// (status + respawn seed) without overwriting an operator target set since
+/// this producer last adopted one.
+fn publish_fast_target(ctrl: &mut FastDelayController, buffer_state: &BufferState, alias: &str) {
+    if let Some((from, to)) = ctrl.publish_target(
+        &buffer_state.fast_delay_requested_secs,
+        &buffer_state.fast_delay_target_secs,
+        std::time::Instant::now(),
+    ) {
+        tracing::info!(
+            alias = %alias,
+            from_secs = from,
+            to_secs = to,
+            "Producer: adopted the operator's fast read-delay target (#437)"
+        );
+    }
+}
+
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn producer_task<F: ChunkFetcher>(
@@ -213,9 +231,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                         // #294 respawn survival: persist the (ratcheted)
                         // target to the shared BufferState so a producer
                         // respawn re-seeds at this level, not the floor.
-                        buffer_state
-                            .fast_delay_target_secs
-                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
+                        publish_fast_target(ctrl, &buffer_state, &alias);
                         ctrl.delay_chunks(typical_chunk_dur_ms)
                     }
                     None if delivery_delay_ms == 0 => 0,
@@ -354,9 +370,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                         // #294 respawn survival: persist the ratcheted target
                         // from the probe-cycle grow path too (mirrors the
                         // keepalive-gap path above).
-                        buffer_state
-                            .fast_delay_target_secs
-                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
+                        publish_fast_target(ctrl, &buffer_state, &alias);
                     }
                 } else {
                     let mut s = stats.lock().await;

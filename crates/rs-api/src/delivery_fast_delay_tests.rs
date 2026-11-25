@@ -99,6 +99,31 @@ async fn no_running_delivery_is_refused_without_calling_a_vps() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[test]
+fn only_the_operator_meaningful_vps_refusals_pass_through() {
+    for code in [400_u16, 404, 409, 422] {
+        assert_eq!(host_status_for_vps(code).as_u16(), code);
+    }
+    for code in [401_u16, 403, 405, 429, 500, 502, 503] {
+        assert_eq!(host_status_for_vps(code), StatusCode::BAD_GATEWAY, "{code}");
+    }
+}
+
+#[tokio::test]
+async fn a_vps_bearer_mismatch_is_a_bad_gateway_never_a_host_401() {
+    let vps = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&vps)
+        .await;
+    let (pool, event_id) = pool_with_instance("delivering").await;
+    let (status, msg) = set_fast_delay(&pool, &request(event_id), vps.address().port())
+        .await
+        .expect_err("refused");
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(msg.contains("VPS 401"), "{msg}");
+}
+
 #[tokio::test]
 async fn an_unreadable_vps_answer_is_a_bad_gateway() {
     let vps = MockServer::start().await;

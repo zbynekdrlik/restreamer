@@ -197,8 +197,8 @@ pub struct BackupIngest {
 }
 
 /// #437: chunks the backup may trail the primary before it shows as behind
-/// (mirrors `rs_core::models::BACKUP_BEHIND_CHUNKS`; the consumer keeps the
-/// backup one chunk ahead).
+/// (the consumer keeps the backup one chunk AHEAD, so 2 behind is a real lag).
+/// The ONE place this rule lives.
 pub const BACKUP_BEHIND_CHUNKS: i64 = 2;
 
 impl BackupIngest {

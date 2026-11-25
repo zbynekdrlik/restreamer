@@ -97,9 +97,8 @@ a ~2 s content hole. Three layers fix it; keep all three.
   without a backup). Since #437 the host maps it
   (`delivery_status::parse_stream_health`) into `DeliveryEndpointMetrics.
   backup_ingest`, and the endpoint node shows `záloha: OK / zaostáva`
-  (`BackupIngestMetrics::is_behind`: disconnected, nothing pushed, or > 2
-  chunks behind the primary; the leptos `store::BackupIngest` mirrors the
-  rule). The node also shows `preskočené: N` (VPS `skips_ahead`, the
+  (`leptos-ui` `store::BackupIngest::is_behind`, the ONE place the rule lives:
+  disconnected, nothing pushed, or > 2 chunks behind the primary). The node also shows `preskočené: N` (VPS `skips_ahead`, the
   producer's live-edge skips) and, on a fast endpoint, the read-delay target
   control (`POST /api/v1/delivery/endpoints/fast-delay`, audited on the VPS as
   `fast_delay_set`). Playwright: `e2e/fast-endpoint-state.spec.ts`.

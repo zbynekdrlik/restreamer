@@ -349,6 +349,17 @@ struct MirrorChunk {
 /// mirror's chunk-id gap) and follows again. Before #437 a full queue dropped
 /// the NEW chunk and kept the stale ones, so a backup that fell behind stayed
 /// full and skipped a chunk every few chunks for good (PP live 25.11.2026).
+/// What `MirrorQueue::offer` did with a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Offered {
+    Queued,
+    /// The queue was full: its `n` stale chunks were dropped, the new one is
+    /// queued (the backup is behind and catches up).
+    DroppedStale(usize),
+    /// The mirror task ended (the backup gave up): the chunk is dropped.
+    Closed,
+}
+
 struct MirrorQueue {
     chunks: std::sync::Mutex<VecDeque<MirrorChunk>>,
     ready: Notify,
@@ -365,13 +376,12 @@ impl MirrorQueue {
         }
     }
 
-    /// Queue `chunk`, never waiting. Returns how many chunks were dropped:
-    /// the stale queue when it was full, or `chunk` itself once closed.
-    fn offer(&self, chunk: MirrorChunk) -> usize {
+    /// Queue `chunk`, never waiting.
+    fn offer(&self, chunk: MirrorChunk) -> Offered {
         if self.closed.load(Ordering::Acquire) {
-            return 1;
+            return Offered::Closed;
         }
-        let dropped = {
+        let stale = {
             let mut chunks = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
             let stale = if chunks.len() >= BACKUP_QUEUE_CHUNKS {
                 std::mem::take(&mut *chunks).len()
@@ -382,7 +392,10 @@ impl MirrorQueue {
             stale
         };
         self.ready.notify_one();
-        dropped
+        match stale {
+            0 => Offered::Queued,
+            n => Offered::DroppedStale(n),
+        }
     }
 
     /// The next queued chunk, waiting for one; `None` once closed.
@@ -446,15 +459,20 @@ impl BackupMirror {
             chunk_id,
             data: Arc::from(data),
         };
-        let dropped = self.queue.offer(chunk);
-        if dropped > 0 {
-            self.state.note_dropped(dropped);
-            tracing::warn!(
-                dropped,
-                chunk_id,
-                "backup ingest behind by a full queue: dropped the stale chunks, \
-                 the backup jumps to the current one (#437)"
-            );
+        match self.queue.offer(chunk) {
+            Offered::Queued => {}
+            Offered::DroppedStale(dropped) => {
+                self.state.note_dropped(dropped);
+                tracing::warn!(
+                    dropped,
+                    chunk_id,
+                    "backup ingest behind by a full queue: dropped the stale chunks, \
+                     the backup jumps to the current one (#437)"
+                );
+            }
+            // The backup stopped for good (its death is already audited):
+            // count every chunk it misses, but never log one per chunk.
+            Offered::Closed => self.state.note_dropped(1),
         }
     }
 

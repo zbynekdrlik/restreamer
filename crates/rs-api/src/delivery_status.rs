@@ -232,6 +232,30 @@ pub(crate) fn cap_endpoint_delay_secs(raw: f64, is_fast: bool, target_delay_secs
     }
 }
 
+/// #437: the VPS `/api/status` endpoint entry's exact stream states: the
+/// producer's live-edge skips ahead (`skips_ahead.count`, 0 on an older VPS)
+/// and the YouTube backup ingest (`None` without one). An unreadable
+/// `backup_ingest` is logged and shown as none, never silently.
+pub(crate) fn parse_stream_health(
+    entry: &serde_json::Value,
+) -> (u64, Option<rs_core::models::BackupIngestMetrics>) {
+    let skips_ahead = entry["skips_ahead"]["count"].as_u64().unwrap_or(0);
+    let backup_ingest = match entry.get("backup_ingest") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                warn!(
+                    alias = entry["alias"].as_str().unwrap_or(""),
+                    "unreadable VPS backup_ingest status (#437): {e}"
+                );
+                None
+            }
+        },
+    };
+    (skips_ahead, backup_ingest)
+}
+
 impl DeliveryOrchestrator {
     /// Get delivery status for an event.
     ///
@@ -725,20 +749,6 @@ pub async fn attach_yt_health(
 /// Test-only: clear the per-endpoint YT health cache. Different tests use
 /// pools that allocate endpoint id=1 each, so the cache must be reset to
 /// avoid one test seeing another's cached snapshot.
-/// #437: the VPS `/api/status` endpoint entry's exact stream states: the
-/// producer's live-edge skips ahead (`skips_ahead.count`, 0 on an older VPS)
-/// and the YouTube backup ingest (`None` without one, or unreadable).
-pub(crate) fn parse_stream_health(
-    entry: &serde_json::Value,
-) -> (u64, Option<rs_core::models::BackupIngestMetrics>) {
-    let skips_ahead = entry["skips_ahead"]["count"].as_u64().unwrap_or(0);
-    let backup_ingest = entry
-        .get("backup_ingest")
-        .filter(|v| !v.is_null())
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-    (skips_ahead, backup_ingest)
-}
-
 #[cfg(test)]
 pub fn clear_yt_health_cache_for_test() {
     yt_health_cache().clear();
