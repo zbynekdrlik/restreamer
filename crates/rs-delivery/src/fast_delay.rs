@@ -176,26 +176,18 @@ impl FastDelayController {
     }
 
     /// #437: publish the target on the shared `published` slot (status +
-    /// respawn seed), adopting a pending operator request FIRST, so the
-    /// producer never overwrites a target the operator just set with its old
-    /// one. A request that lands between the adopt and the store is caught by
-    /// a second round (bounded). Returns the adoption edge, if any.
+    /// respawn seed), adopting a pending operator request first. A request
+    /// that lands after the adopt stays pending; the status reads a pending
+    /// request before `published` (`EndpointHandle::fast_delay_target_secs`),
+    /// so this store can never hide it. Returns the adoption edge, if any.
     pub fn publish_target(
         &mut self,
         requested: &std::sync::atomic::AtomicU64,
         published: &std::sync::atomic::AtomicU64,
         now: Instant,
     ) -> Option<(u64, u64)> {
-        let mut edge = None;
-        for _ in 0..2 {
-            if let Some(adopted) = self.adopt_operator_request(requested, now) {
-                edge = Some(adopted);
-            }
-            published.store(self.target_secs, std::sync::atomic::Ordering::Relaxed);
-            if requested.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                break;
-            }
-        }
+        let edge = self.adopt_operator_request(requested, now);
+        published.store(self.target_secs, std::sync::atomic::Ordering::Relaxed);
         edge
     }
 
@@ -288,10 +280,9 @@ mod tests {
         let published = AtomicU64::new(0);
         assert_eq!(c.publish_target(&requested, &published, now), None);
         assert_eq!(published.load(Relaxed), 5, "the controller's own target");
-        // The operator set 30 (the handler already published it) while the
-        // producer still holds 5: its publish must not write 5 back.
+        // The operator set 30 while the producer still holds 5: its publish
+        // adopts 30 and must not write 5 back.
         requested.store(30, Relaxed);
-        published.store(30, Relaxed);
         assert_eq!(c.publish_target(&requested, &published, now), Some((5, 30)));
         assert_eq!(published.load(Relaxed), 30);
         assert_eq!(requested.load(Relaxed), 0);
