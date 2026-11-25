@@ -438,6 +438,10 @@ impl RtmpPusher {
         self.skew.reset_tracks();
     }
 
+    /// #437: the consumer calls this before a chunk whose id is not the
+    /// previous chunk's id + 1 (RED stub: not implemented yet).
+    pub fn begin_new_mapping(&mut self) {}
+
     /// De-duplicate codec sequence headers across an RTMP session: `true`
     /// when this one must be skipped (#103: re-sending made the receiver
     /// reset its decoder).

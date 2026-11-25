@@ -61,6 +61,10 @@ pub(crate) trait Pushable {
     /// mirror (the YouTube backup) can log which chunk it pushed. A plain
     /// pusher logs nothing itself and ignores it.
     fn label_chunk(&mut self, _chunk_id: i64) {}
+    /// #437: the next payload does not continue the previous one (a chunk-id
+    /// gap): start a new wire mapping so the content jump is a clean cut,
+    /// never a wire-ts jump that pacing sleeps out. A mock ignores it.
+    fn begin_new_mapping(&mut self) {}
 }
 
 impl Pushable for RtmpPusher {
