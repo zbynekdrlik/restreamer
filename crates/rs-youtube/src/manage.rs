@@ -73,6 +73,13 @@ const fn forced(units: u32) -> Cost {
 const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// Pagination cap for the stream lookup (same bound as `streams.rs`, #200).
 const MAX_PAGES: usize = 10;
+/// First backoff before retrying a Google 5xx (#435).
+const DEFAULT_RETRY_BASE: Duration = Duration::from_secs(1);
+/// Retries after the first 5xx: 1 + 2 + 4 s of backoff at most.
+const MAX_5XX_RETRIES: u32 = 3;
+/// No retry starts once this much time went by since the first attempt, so
+/// slow 5xx answers cannot stack up behind the driver's own retries.
+const RETRY_BUDGET: Duration = Duration::from_secs(20);
 
 /// The manage-scope grant plus the client credentials that refresh it.
 #[derive(Clone)]
@@ -189,6 +196,8 @@ pub struct ManageClient {
     units: AtomicU32,
     /// The project-wide bucket shared with the health polling, if attached.
     quota: Option<&'static QuotaTracker>,
+    /// First backoff before a 5xx retry; it doubles per attempt (#435).
+    retry_base: Duration,
 }
 
 /// Google's `{"error": {"message", "errors": [{"reason"}]}}` as
@@ -202,6 +211,37 @@ fn api_error_message(body: &str) -> String {
         (true, false) => message.to_string(),
         (true, true) => "unparsable error body".to_string(),
     }
+}
+
+/// Google's transient server errors, which its API guidance says to retry
+/// with backoff. 501 Not Implemented is not transient.
+fn is_transient_5xx(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504)
+}
+
+/// The backoff before 5xx retry number `retries + 1`, or `None` when the
+/// retries or the time budget are used up.
+fn next_retry_delay(base: Duration, retries: u32, elapsed: Duration) -> Option<Duration> {
+    if retries >= MAX_5XX_RETRIES {
+        return None;
+    }
+    let delay = base * 2u32.pow(retries);
+    (elapsed + delay <= RETRY_BUDGET).then_some(delay)
+}
+
+/// Calls that are safe to send again after a 5xx: reads, and `bind` (binding
+/// the same stream again changes nothing). An insert is retried only behind a
+/// lookup (`insert_broadcast`); a transition never, because the driver
+/// re-reads the life cycle and retries it itself.
+fn retries_5xx(method: &Method, path: &str) -> bool {
+    *method == Method::GET || path == "liveBroadcasts/bind"
+}
+
+/// An RFC 3339 instant as whole Unix seconds (Google may drop sub-seconds).
+fn start_second(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|t| t.timestamp())
 }
 
 /// A cached token is reused strictly before its refresh point.
@@ -236,6 +276,7 @@ impl ManageClient {
             cached: Mutex::new(None),
             units: AtomicU32::new(0),
             quota: None,
+            retry_base: DEFAULT_RETRY_BASE,
         }
     }
 
@@ -243,6 +284,12 @@ impl ManageClient {
     /// pay is refused before it is sent.
     pub fn with_quota_tracker(mut self, tracker: &'static QuotaTracker) -> Self {
         self.quota = Some(tracker);
+        self
+    }
+
+    /// Use `base` as the first 5xx backoff instead of one second (tests).
+    pub fn with_retry_base(mut self, base: Duration) -> Self {
+        self.retry_base = base;
         self
     }
 
@@ -332,7 +379,9 @@ impl ManageClient {
     }
 
     /// One Data API call. A 401 drops the cached token and retries ONCE with
-    /// a fresh one (a revoked or rotated access token).
+    /// a fresh one (a revoked or rotated access token). A transient Google
+    /// 5xx on an idempotent call ([`retries_5xx`]) is retried with a doubling
+    /// backoff inside [`RETRY_BUDGET`] (#435: one 503 ended a whole rig run).
     async fn call(
         &self,
         method: Method,
@@ -341,10 +390,30 @@ impl ManageClient {
         body: Option<&Value>,
         cost: Cost,
     ) -> Result<Value> {
-        let mut sent = self.send_once(&method, path, query, body, cost).await?;
-        if sent.0 == 401 {
-            *self.cached.lock().await = None;
-            sent = self.send_once(&method, path, query, body, cost).await?;
+        let started = Instant::now();
+        let mut sent = self
+            .send_refreshing(&method, path, query, body, cost)
+            .await?;
+        // The range bounds the attempts by itself, so no backoff answer can
+        // turn this into an endless loop.
+        for retry in 1..=MAX_5XX_RETRIES {
+            if !is_transient_5xx(sent.0) || !retries_5xx(&method, path) {
+                break;
+            }
+            let Some(delay) = next_retry_delay(self.retry_base, retry - 1, started.elapsed())
+            else {
+                break;
+            };
+            tracing::warn!(
+                "youtube manage {method} {path}: HTTP {} ({}), retry {retry}/{MAX_5XX_RETRIES} in {} ms",
+                sent.0,
+                api_error_message(&sent.1),
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+            sent = self
+                .send_refreshing(&method, path, query, body, cost)
+                .await?;
         }
         let (status, text) = sent;
         if !(200..300).contains(&status) {
@@ -354,6 +423,24 @@ impl ManageClient {
             });
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// One send; a 401 drops the cached token and sends ONCE more with a
+    /// fresh one (a revoked or rotated access token).
+    async fn send_refreshing(
+        &self,
+        method: &Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+        cost: Cost,
+    ) -> Result<(u16, String)> {
+        let sent = self.send_once(method, path, query, body, cost).await?;
+        if sent.0 != 401 {
+            return Ok(sent);
+        }
+        *self.cached.lock().await = None;
+        self.send_once(method, path, query, body, cost).await
     }
 
     /// The stream titled exactly `title` among the channel's own streams.
@@ -420,20 +507,123 @@ impl ManageClient {
                 "monitorStream": { "enableMonitorStream": false }
             }
         });
-        let v = self
-            .call(
+        let started = Instant::now();
+        let insert = || {
+            self.call(
                 Method::POST,
                 "liveBroadcasts",
                 &[("part", "id,snippet,status,contentDetails")],
                 Some(&body),
                 admit(units::INSERT),
             )
-            .await?;
+        };
+        let mut answer = insert().await;
+        // Bounded by the range, like `call`.
+        for retry in 1..=MAX_5XX_RETRIES {
+            let err = match answer {
+                Ok(_) => break,
+                Err(e) => e,
+            };
+            let YouTubeError::Api { status, .. } = &err else {
+                return Err(err);
+            };
+            if !is_transient_5xx(*status) {
+                return Err(err);
+            }
+            let Some(delay) = next_retry_delay(self.retry_base, retry - 1, started.elapsed())
+            else {
+                return Err(err);
+            };
+            tracing::warn!(
+                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), checking in {} ms whether it was created anyway ({retry}/{MAX_5XX_RETRIES})",
+                delay.as_millis()
+            );
+            // Wait FIRST: a 5xx insert can still commit shortly after the
+            // answer. Then look before inserting again, or the session would
+            // leave an orphan broadcast behind.
+            tokio::time::sleep(delay).await;
+            match self.find_upcoming_broadcast(title, scheduled_start).await {
+                Ok(Some(id)) => {
+                    tracing::warn!(
+                        "youtube manage liveBroadcasts.insert: HTTP {status}, but broadcast {id} exists; using it"
+                    );
+                    return Ok(id);
+                }
+                Ok(None) => {}
+                Err(lookup) => {
+                    tracing::warn!(
+                        "youtube manage liveBroadcasts.insert: HTTP {status}, and the lookup could not tell whether it was created ({lookup}); not inserting again"
+                    );
+                    return Err(err);
+                }
+            }
+            answer = insert().await;
+        }
+        let v = answer?;
         v["id"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .ok_or_else(|| YouTubeError::Other("liveBroadcasts.insert returned no id".to_string()))
+    }
+
+    /// The id of the channel's upcoming broadcast with exactly this title and
+    /// scheduled start. The start is compared to the second: Google may drop
+    /// the milliseconds the driver sends. Pages are followed up to
+    /// [`MAX_PAGES`]. `Ok(None)` only when every page was read without a
+    /// match: an unparsable start or the page cap is an error, because a
+    /// "not found" there would make the caller insert a second broadcast.
+    async fn find_upcoming_broadcast(
+        &self,
+        title: &str,
+        scheduled_start: &str,
+    ) -> Result<Option<String>> {
+        let Some(want) = start_second(scheduled_start) else {
+            return Err(YouTubeError::Other(format!(
+                "broadcast lookup: unparsable scheduled start {scheduled_start:?}"
+            )));
+        };
+        let mut page_token = String::new();
+        for _ in 0..MAX_PAGES {
+            let mut query = vec![
+                ("part", "id,snippet"),
+                ("broadcastStatus", "upcoming"),
+                ("maxResults", "50"),
+            ];
+            if !page_token.is_empty() {
+                query.push(("pageToken", page_token.as_str()));
+            }
+            let page = self
+                .call(
+                    Method::GET,
+                    "liveBroadcasts",
+                    &query,
+                    None,
+                    admit(units::LIST),
+                )
+                .await?;
+            let found = page["items"].as_array().into_iter().flatten().find(|item| {
+                let snippet = &item["snippet"];
+                snippet["title"].as_str() == Some(title)
+                    && snippet["scheduledStartTime"]
+                        .as_str()
+                        .and_then(start_second)
+                        == Some(want)
+            });
+            if let Some(id) = found
+                .and_then(|item| item["id"].as_str())
+                .filter(|id| !id.is_empty())
+            {
+                return Ok(Some(id.to_string()));
+            }
+            match page["nextPageToken"].as_str() {
+                Some(t) if !t.is_empty() => page_token = t.to_string(),
+                _ => return Ok(None),
+            }
+        }
+        Err(YouTubeError::Other(format!(
+            "broadcast lookup: no match within {MAX_PAGES} pages and more remain"
+        )))
     }
 
     /// Bind the broadcast to a stream.
