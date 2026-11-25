@@ -46,7 +46,7 @@ use crate::chunk_push_log::{Ingest, chunk_push_line};
 use crate::endpoint_rtmp_url::{build_backup_rtmp_url, build_rtmp_url};
 use crate::endpoint_stats::Stats;
 use crate::endpoint_task::PrefetchedChunk;
-use crate::pushable::Pushable;
+use crate::pushable::{ChunkContinuity, Pushable};
 
 /// Whole chunks (~2 s each) the backup may lag behind before the tee drops
 /// new ones: ~8 s, enough to ride out the backup's own fast reconnect.
@@ -274,7 +274,13 @@ async fn run_mirror<P: Pushable>(
     audit_ring: Option<Arc<AuditRing>>,
 ) {
     let mut backoff = MirrorBackoff::default();
+    // #437: the backup skips chunks of its own (a full queue, a lost push),
+    // so it tracks its own continuity: a gap is a new mapping, never a pause.
+    let mut continuity = ChunkContinuity::default();
     while let Some(MirrorChunk { chunk_id, data }) = rx.recv().await {
+        if continuity.is_gap(chunk_id) {
+            pusher.begin_new_mapping();
+        }
         let start_unix_ms = crate::endpoint_stats::unix_ms_now();
         let result = tokio::time::timeout(BACKUP_WRITE_TIMEOUT, pusher.push_flv_bytes(&data)).await;
         // Drain the backup pusher's A/V invariant edges (it queues them until
@@ -417,6 +423,9 @@ pub(crate) struct TeePusher<P> {
     /// #424: the chunk id of the next `push_flv_bytes` payload
     /// (`Pushable::label_chunk`), taken by that push.
     next_chunk_id: Option<i64>,
+    /// #437: the primary's live chunk continuity: a chunk-id gap starts a new
+    /// wire mapping on the primary before that chunk.
+    continuity: ChunkContinuity,
 }
 
 impl<P> TeePusher<P> {
@@ -426,6 +435,7 @@ impl<P> TeePusher<P> {
             backup,
             pre_offered: 0,
             next_chunk_id: None,
+            continuity: ChunkContinuity::default(),
         }
     }
 
@@ -508,6 +518,9 @@ impl<P: Pushable + Send> Pushable for TeePusher<P> {
             } else {
                 backup.offer(chunk_id, data);
             }
+        }
+        if self.continuity.is_gap(chunk_id) {
+            self.primary.begin_new_mapping();
         }
         self.primary.push_flv_bytes(data).await
     }

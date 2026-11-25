@@ -117,7 +117,12 @@ baseline-relative, so none of them saw it.
 - **Pusher (`pusher.rs` / `state.rs`):** ONE `origin_ts` + ONE `base_ms` for
   both tracks (`PusherState::wire_ts`, used in `map_media_tag`). The origin is
   per MAPPING, never per chunk; a per-chunk rebase is the #103 click.
-  - A new mapping (connect / re-anchor) sets base = max(last outputs) + 1.
+  - A new mapping (connect / re-anchor / a chunk-id gap, #437) sets base =
+    max(last outputs) + 1. The consumer (`TeePusher`, and the backup mirror
+    for its own pusher) calls `RtmpPusher::begin_new_mapping` before a live
+    chunk whose id is not the previous live id + 1 (`ChunkContinuity`): a
+    skipped 2 s chunk is a +2 s source step below the 30 s re-anchor bound,
+    so without it `pace_tag` slept 2 s and YouTube froze (PP 25.11.2026).
     Outputs advance PER TAG (#124), so a mid-chunk re-anchor never goes
     backward.
   - It re-pins the origin with `robust_pin`: the min remaining media ts

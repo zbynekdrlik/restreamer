@@ -99,4 +99,54 @@ impl Pushable for RtmpPusher {
     fn last_wire_span(&self) -> Option<rs_rtmp_push::WireSpan> {
         RtmpPusher::last_wire_span(self)
     }
+
+    fn begin_new_mapping(&mut self) {
+        RtmpPusher::begin_new_mapping(self)
+    }
+}
+
+/// #437: does the next payload continue the previous LIVE chunk?
+///
+/// Fed the S3 chunk id of every payload (`None` for a rescue / warmup clip
+/// segment or a keepalive freeze, which never counts as a gap and leaves the
+/// last live id alone). A live chunk whose id is not the previous live id + 1
+/// is a gap: the pusher must start a new wire mapping before it.
+#[derive(Debug, Default)]
+pub(crate) struct ChunkContinuity {
+    last_live_id: Option<i64>,
+}
+
+impl ChunkContinuity {
+    /// Record `chunk_id` as the next payload; `true` when it is a gap.
+    pub(crate) fn is_gap(&mut self, chunk_id: Option<i64>) -> bool {
+        let Some(id) = chunk_id else {
+            return false;
+        };
+        let gap = self
+            .last_live_id
+            .is_some_and(|last| id != last.saturating_add(1));
+        self.last_live_id = Some(id);
+        gap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChunkContinuity;
+
+    #[test]
+    fn only_a_live_id_that_does_not_follow_the_last_one_is_a_gap() {
+        let mut c = ChunkContinuity::default();
+        assert!(
+            !c.is_gap(Some(10)),
+            "the first live chunk has nothing to follow"
+        );
+        assert!(!c.is_gap(Some(11)));
+        assert!(!c.is_gap(None), "a clip segment is never a gap");
+        assert!(!c.is_gap(Some(12)), "a clip segment keeps the last live id");
+        assert!(c.is_gap(Some(14)), "12 -> 14 skips a chunk");
+        assert!(c.is_gap(Some(14)), "a repeated id is no continuation");
+        assert!(c.is_gap(Some(3)), "a backward id is a gap");
+        assert!(!c.is_gap(Some(4)));
+    }
 }
