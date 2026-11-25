@@ -51,3 +51,13 @@ our dark background, while the text keeps our light colour: white on white (stre
 `appearance: none` + our own arrow on `select:not([multiple])`, and dark `option`
 colours. A select rule must use `background-color`, not the `background` shorthand,
 or it wipes the arrow image. Guarded by `e2e/dark-form-controls.spec.ts`.
+
+## A control inside `{move || cond(ep_data.get()).then(...)}` is REBUILT on every update
+
+`ep_data` (the endpoint node's `Memo` of the delivery state) changes on every WS /
+poll update. A closure that reads it and returns a component re-runs each time and
+mounts a NEW component: its local signals (a typed `<input>` value, a result line)
+reset mid-typing. Playwright caught it on #437 (`FastDelayControl`: the typed "30"
+was gone at the click, the submit read an empty input). Derive the visibility as a
+`Memo` of the boolean (`Memo::new(move |_| ep_data.get().is_fast && running.get())`)
+and read that in the closure: a Memo notifies only when the boolean changes.
