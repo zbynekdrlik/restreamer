@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use tracing_subscriber::prelude::*;
 
 mod api;
+mod api_fast_delay;
 mod api_source;
 mod audit_ring;
 pub mod backup_mirror;

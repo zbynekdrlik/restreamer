@@ -120,6 +120,31 @@ impl EndpointHandle {
         }
     }
 
+    /// #437: the operator sets this fast endpoint's read-delay target live.
+    /// Clamped to `[FAST_DELAY_FLOOR_SECS, FAST_DELAY_CEILING_SECS]`, shown
+    /// at once on `/api/status` (and seeded into a producer respawn), and
+    /// adopted by the running producer on its next fetch. Returns `(from,
+    /// to)` for the audit row, or `None` for a non-fast endpoint (it has no
+    /// read-delay target).
+    pub fn request_fast_delay(&self, secs: u64) -> Option<(u64, u64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.cfg.is_fast {
+            return None;
+        }
+        let to = secs.clamp(
+            crate::fast_delay::FAST_DELAY_FLOOR_SECS,
+            crate::fast_delay::FAST_DELAY_CEILING_SECS,
+        );
+        let from = self
+            .fast_delay_target_secs()
+            .unwrap_or(crate::fast_delay::FAST_DELAY_FLOOR_SECS);
+        self.buffer_state
+            .fast_delay_requested_secs
+            .store(to, Relaxed);
+        self.buffer_state.fast_delay_target_secs.store(to, Relaxed);
+        Some((from, to))
+    }
+
     pub fn start_chunk_id(&self) -> i64 {
         self.start_chunk_id
     }
@@ -205,6 +230,46 @@ mod tests {
         assert!(
             !h.producer_active(),
             "accessor must reflect the shared rescue-gate flag (#284)"
+        );
+    }
+
+    fn fast_stub() -> EndpointHandle {
+        let mut cfg = EndpointHandle::stub_for_test(1).cfg;
+        cfg.is_fast = true;
+        EndpointHandle::stub_with_config_for_test(cfg, 1)
+    }
+
+    /// #437: the operator's live target is clamped, published at once and
+    /// queued for the producer; a non-fast endpoint has none.
+    #[tokio::test]
+    async fn the_operator_target_is_clamped_published_and_queued() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = fast_stub();
+        assert_eq!(
+            h.request_fast_delay(30),
+            Some((5, 30)),
+            "unset reads as the floor"
+        );
+        assert_eq!(h.fast_delay_target_secs(), Some(30));
+        assert_eq!(h.buffer_state.fast_delay_requested_secs.load(Relaxed), 30);
+        assert_eq!(
+            h.request_fast_delay(1),
+            Some((30, 5)),
+            "clamped to the floor"
+        );
+        assert_eq!(
+            h.request_fast_delay(500),
+            Some((5, 120)),
+            "clamped to the ceiling"
+        );
+        assert_eq!(h.buffer_state.fast_delay_requested_secs.load(Relaxed), 120);
+
+        let normal = EndpointHandle::stub_for_test(1);
+        assert_eq!(normal.request_fast_delay(30), None);
+        assert_eq!(normal.fast_delay_target_secs(), None, "untouched");
+        assert_eq!(
+            normal.buffer_state.fast_delay_requested_secs.load(Relaxed),
+            0
         );
     }
 }

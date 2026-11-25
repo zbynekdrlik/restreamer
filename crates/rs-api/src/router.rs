@@ -185,6 +185,10 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             "/delivery/endpoints/remove",
             post(delivery_handlers::delivery_remove_endpoint),
         )
+        .route(
+            "/delivery/endpoints/fast-delay",
+            post(crate::delivery_fast_delay::delivery_set_fast_delay),
+        )
         .route("/delivery/metrics", get(crate::metrics_handlers::list))
         // OBS WebSocket
         .route("/obs/status", get(handlers::obs_status))

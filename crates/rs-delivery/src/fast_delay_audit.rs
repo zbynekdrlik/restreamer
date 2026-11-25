@@ -62,6 +62,30 @@ pub fn emit_delay_shrank(
     );
 }
 
+/// #437: the operator set the target live (`requested_secs` before the
+/// clamp, `to_secs` after it).
+pub fn emit_delay_set(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    from_secs: u64,
+    to_secs: u64,
+    requested_secs: u64,
+) {
+    push(
+        audit_ring,
+        Severity::Info,
+        Action::FastDelaySet,
+        alias,
+        serde_json::json!({
+            "alias": alias,
+            "from_secs": from_secs,
+            "to_secs": to_secs,
+            "requested_secs": requested_secs,
+            "by": "operator",
+        }),
+    );
+}
+
 pub fn emit_keepalive_started(audit_ring: &Option<Arc<AuditRing>>, alias: &str, mode: &str) {
     push(
         audit_ring,

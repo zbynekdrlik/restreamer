@@ -144,6 +144,37 @@ impl FastDelayController {
         None
     }
 
+    /// #437: the OPERATOR sets the target live (VPS `POST
+    /// /api/endpoints/fast_delay`), clamped to `[floor, ceiling]`. Unlike
+    /// `on_starvation` this may LOWER it: it is the operator's explicit call
+    /// to bring an endpoint back to a known state during an event (the
+    /// ratchet-up keeps working from the new level). Returns `Some((from,
+    /// to))` when the target changed.
+    pub fn set_target(&mut self, secs: u64, now: Instant) -> Option<(u64, u64)> {
+        let next = secs.clamp(self.floor, self.ceiling);
+        if next == self.target_secs {
+            return None;
+        }
+        let from = self.target_secs;
+        self.target_secs = next;
+        self.last_change = now;
+        Some((from, next))
+    }
+
+    /// #437: adopt a pending operator target from `request` (the shared
+    /// `BufferState::fast_delay_requested_secs`, swapped to 0). Returns
+    /// `Some((from, to))` when it changed the target.
+    pub fn adopt_operator_request(
+        &mut self,
+        request: &std::sync::atomic::AtomicU64,
+        now: Instant,
+    ) -> Option<(u64, u64)> {
+        match request.swap(0, std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            secs => self.set_target(secs, now),
+        }
+    }
+
     /// Current target expressed in chunks, for the live-edge lag-probe.
     /// Always >= 1 so a fast endpoint never re-pins to the absolute edge.
     pub fn delay_chunks(&self, typical_chunk_dur_ms: u64) -> i64 {
@@ -192,6 +223,50 @@ mod tests {
         let mut c = FastDelayController::new_seeded(34, now);
         assert_eq!(c.on_starvation(10, now), None);
         assert_eq!(c.target_secs(), 34);
+    }
+
+    #[test]
+    fn the_operator_sets_the_target_clamped_and_may_lower_it() {
+        // #437: the operator's live control. floor 5, ceiling 120.
+        let now = Instant::now();
+        let mut c = ctrl(now);
+        assert_eq!(c.set_target(30, now), Some((5, 30)));
+        assert_eq!(c.target_secs(), 30);
+        assert_eq!(c.set_target(30, now), None, "no change, no edge");
+        assert_eq!(
+            c.set_target(9, now),
+            Some((30, 9)),
+            "the operator may lower it"
+        );
+        assert_eq!(
+            c.set_target(1, now),
+            Some((9, 5)),
+            "clamped up to the floor"
+        );
+        assert_eq!(
+            c.set_target(999, now),
+            Some((5, 120)),
+            "clamped to the ceiling"
+        );
+        // The ratchet keeps working from the operator's level.
+        let mut c = ctrl(now);
+        c.set_target(30, now);
+        assert_eq!(c.on_starvation(40, now), Some((30, 45)));
+        assert_eq!(c.on_starvation(10, now), None);
+    }
+
+    #[test]
+    fn a_pending_operator_request_is_adopted_once() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = Instant::now();
+        let mut c = ctrl(now);
+        let req = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(c.adopt_operator_request(&req, now), None, "nothing pending");
+        req.store(30, Relaxed);
+        assert_eq!(c.adopt_operator_request(&req, now), Some((5, 30)));
+        assert_eq!(req.load(Relaxed), 0, "consumed");
+        assert_eq!(c.adopt_operator_request(&req, now), None, "adopted once");
+        assert_eq!(c.target_secs(), 30);
     }
 
     #[test]

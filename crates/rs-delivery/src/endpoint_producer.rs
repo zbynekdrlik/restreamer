@@ -165,6 +165,20 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 // stays strictly 1× — this only moves the READ pointer.
                 let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
                     Some(ctrl) => {
+                        // #437: the operator's live target (VPS
+                        // `/api/endpoints/fast_delay`, audited there) first,
+                        // so this fetch's probe already uses it.
+                        if let Some((from, to)) = ctrl.adopt_operator_request(
+                            &buffer_state.fast_delay_requested_secs,
+                            std::time::Instant::now(),
+                        ) {
+                            tracing::info!(
+                                alias = %alias,
+                                from_secs = from,
+                                to_secs = to,
+                                "Producer: adopted the operator's fast read-delay target (#437)"
+                            );
+                        }
                         // Consumer-measured starvation gap (keepalive) — the
                         // trickle-regime grow signal. The probe-cycle grow
                         // below only fires after ~80s of uninterrupted misses;

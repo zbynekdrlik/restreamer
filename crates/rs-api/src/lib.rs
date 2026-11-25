@@ -17,6 +17,7 @@ pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
 pub mod delivery_binary;
 pub mod delivery_endpoints;
+pub mod delivery_fast_delay;
 pub mod delivery_fb_health;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;

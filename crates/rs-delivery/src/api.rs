@@ -30,6 +30,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/endpoints/update_start", post(update_start_handler))
         .route("/api/logs", get(get_logs))
         .route("/api/source", post(crate::api_source::announce_source_end))
+        .route(
+            "/api/endpoints/fast_delay",
+            post(crate::api_fast_delay::set_fast_delay),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     public.merge(protected).with_state(state)
@@ -948,6 +952,7 @@ mod tests {
             ("POST", "/api/endpoints/update_start"),
             ("GET", "/api/logs"),
             ("POST", "/api/source"),
+            ("POST", "/api/endpoints/fast_delay"),
         ];
         let mut reachable = Vec::new();
         for (method, path) in protected {
