@@ -528,7 +528,12 @@ impl ManageClient {
                     return Ok(id);
                 }
                 Ok(None) => {}
-                Err(_) => return Err(err),
+                Err(lookup) => {
+                    tracing::warn!(
+                        "youtube manage liveBroadcasts.insert: HTTP {status}, and the lookup could not tell whether it was created ({lookup}); not inserting again"
+                    );
+                    return Err(err);
+                }
             }
         };
         v["id"]
@@ -541,14 +546,18 @@ impl ManageClient {
     /// The id of the channel's upcoming broadcast with exactly this title and
     /// scheduled start. The start is compared to the second: Google may drop
     /// the milliseconds the driver sends. Pages are followed up to
-    /// [`MAX_PAGES`].
+    /// [`MAX_PAGES`]. `Ok(None)` only when every page was read without a
+    /// match: an unparsable start or the page cap is an error, because a
+    /// "not found" there would make the caller insert a second broadcast.
     async fn find_upcoming_broadcast(
         &self,
         title: &str,
         scheduled_start: &str,
     ) -> Result<Option<String>> {
         let Some(want) = start_second(scheduled_start) else {
-            return Ok(None);
+            return Err(YouTubeError::Other(format!(
+                "broadcast lookup: unparsable scheduled start {scheduled_start:?}"
+            )));
         };
         let mut page_token = String::new();
         for _ in 0..MAX_PAGES {
@@ -588,7 +597,9 @@ impl ManageClient {
                 _ => return Ok(None),
             }
         }
-        Ok(None)
+        Err(YouTubeError::Other(format!(
+            "broadcast lookup: no match within {MAX_PAGES} pages and more remain"
+        )))
     }
 
     /// Bind the broadcast to a stream.
