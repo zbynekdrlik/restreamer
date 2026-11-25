@@ -169,6 +169,11 @@ pub struct DeliveryEndpointState {
     /// tripping a stale absolute 8s ceiling. `None` for non-fast endpoints or
     /// a VPS binary predating the field.
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: how often the VPS producer skipped content ahead to the live
+    /// edge (0 in a clean steady state).
+    pub skips_ahead: u64,
+    /// #437: the YouTube backup ingest mirror, `None` without one.
+    pub backup_ingest: Option<BackupIngest>,
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub delivery_mode: Option<String>,
@@ -176,6 +181,36 @@ pub struct DeliveryEndpointState {
     pub youtube_health: Option<YoutubeHealth>,
     pub facebook_health: Option<FacebookHealth>,
     pub lifecycle: EndpointLifecycle,
+}
+
+/// #437: an endpoint's YouTube backup ingest, as the host maps it from the
+/// VPS (`DeliveryEndpointMetrics.backup_ingest`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct BackupIngest {
+    pub connected: bool,
+    #[serde(default)]
+    pub chunks_pushed: u64,
+    #[serde(default)]
+    pub dropped_chunks: u64,
+    #[serde(default)]
+    pub last_chunk_id: Option<i64>,
+}
+
+/// #437: chunks the backup may trail the primary before it shows as behind
+/// (mirrors `rs_core::models::BACKUP_BEHIND_CHUNKS`; the consumer keeps the
+/// backup one chunk ahead).
+pub const BACKUP_BEHIND_CHUNKS: i64 = 2;
+
+impl BackupIngest {
+    /// Behind: not connected, nothing pushed yet, or trailing the primary's
+    /// `current_chunk_id` by more than [`BACKUP_BEHIND_CHUNKS`].
+    pub fn is_behind(&self, current_chunk_id: i64) -> bool {
+        match self.last_chunk_id {
+            _ if !self.connected => true,
+            None => true,
+            Some(id) => current_chunk_id - id > BACKUP_BEHIND_CHUNKS,
+        }
+    }
 }
 
 /// OBS status from WebSocket.

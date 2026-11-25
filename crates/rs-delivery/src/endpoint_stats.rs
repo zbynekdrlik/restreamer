@@ -71,6 +71,26 @@ pub struct EndpointStats {
     /// Shared with the mirror, read by `/api/status` as `backup_ingest`.
     #[serde(skip)]
     pub backup_ingest: Option<Arc<crate::backup_mirror::BackupMirrorState>>,
+    /// #437: live-edge skips ahead of this endpoint's producer (content it
+    /// jumped over to stay near live). 0 in a clean steady state; read by
+    /// `/api/status` as `skips_ahead`.
+    #[serde(default)]
+    pub skips_ahead: SkipsAhead,
+}
+
+/// #437: how often the producer skipped ahead to the live edge, and when last.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SkipsAhead {
+    pub count: u64,
+    /// Unix epoch ms of the last skip (`None` before the first one).
+    pub last_at_unix_ms: Option<i64>,
+}
+
+impl SkipsAhead {
+    pub fn note(&mut self, now_unix_ms: i64) {
+        self.count = self.count.saturating_add(1);
+        self.last_at_unix_ms = Some(now_unix_ms);
+    }
 }
 
 /// Snapshot of a per-endpoint prefetch-queue fill. Currently unpopulated —
@@ -112,6 +132,7 @@ impl Default for EndpointStats {
             last_lifecycle_worst_stage: None,
             last_push_ok_unix_ms: None,
             backup_ingest: None,
+            skips_ahead: SkipsAhead::default(),
         }
     }
 }

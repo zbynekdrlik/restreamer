@@ -221,7 +221,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     None if delivery_delay_ms == 0 => 0,
                     None => ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1),
                 };
-                maybe_jump_ahead(
+                if maybe_jump_ahead(
                     &fetcher,
                     &mut chunk_id,
                     delivery_delay_chunks,
@@ -229,7 +229,16 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     &alias,
                     is_fast,
                 )
-                .await;
+                .await
+                {
+                    // #437: an exact, visible state: how often this endpoint
+                    // skipped content to stay near live.
+                    stats
+                        .lock()
+                        .await
+                        .skips_ahead
+                        .note(crate::endpoint_stats::unix_ms_now());
+                }
                 // #296: buffered endpoints re-measure their below-target cushion
                 // deficit on the same cadence and audit it (information only,
                 // nothing paces on it). Measured at the consumer's last pushed

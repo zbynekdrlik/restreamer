@@ -1,5 +1,25 @@
 use super::*;
 
+/// #437: the dashboard's "záloha zaostáva" decision.
+#[test]
+fn a_backup_is_behind_when_disconnected_empty_or_trailing() {
+    let backup = |connected, last_chunk_id| BackupIngestMetrics {
+        connected,
+        chunks_pushed: 10,
+        dropped_chunks: 0,
+        last_chunk_id,
+    };
+    assert!(!backup(true, Some(101)).is_behind(100), "one ahead: OK");
+    assert!(
+        !backup(true, Some(98)).is_behind(100),
+        "2 behind is the bound"
+    );
+    assert!(backup(true, Some(97)).is_behind(100), "3 behind");
+    assert!(backup(false, Some(101)).is_behind(100), "disconnected");
+    assert!(backup(true, None).is_behind(100), "nothing pushed yet");
+    assert_eq!(BACKUP_BEHIND_CHUNKS, 2);
+}
+
 #[test]
 fn ws_event_serde_roundtrip() {
     let events = vec![
@@ -54,6 +74,8 @@ fn ws_event_serde_roundtrip() {
                 reconnect_count: 0,
                 av_skew_ms: 0,
                 fast_delay_target_secs: None,
+                skips_ahead: 0,
+                backup_ingest: None,
                 last_error: None,
                 is_fast: false,
                 delivery_mode: None,
@@ -249,6 +271,8 @@ fn delivery_metrics_diagnostics_roundtrip() {
         reconnect_count: 0,
         av_skew_ms: 0,
         fast_delay_target_secs: None,
+        skips_ahead: 0,
+        backup_ingest: None,
         last_error: Some("S3 timeout".to_string()),
         is_fast: true,
         delivery_mode: None,
@@ -301,6 +325,8 @@ fn ws_event_delivery_with_diagnostics_roundtrip() {
             reconnect_count: 0,
             av_skew_ms: 0,
             fast_delay_target_secs: None,
+            skips_ahead: 0,
+            backup_ingest: None,
             last_error: Some("Connection refused".to_string()),
             is_fast: false,
             delivery_mode: None,
@@ -332,6 +358,8 @@ fn delay_excludes_fast_endpoints() {
             reconnect_count: 0,
             av_skew_ms: 0,
             fast_delay_target_secs: None,
+            skips_ahead: 0,
+            backup_ingest: None,
             last_error: None,
             is_fast: true,
             delivery_mode: None,
@@ -353,6 +381,8 @@ fn delay_excludes_fast_endpoints() {
             reconnect_count: 0,
             av_skew_ms: 0,
             fast_delay_target_secs: None,
+            skips_ahead: 0,
+            backup_ingest: None,
             last_error: None,
             is_fast: false,
             delivery_mode: None,
@@ -386,6 +416,8 @@ fn delay_all_fast_falls_back_to_zero() {
         reconnect_count: 0,
         av_skew_ms: 0,
         fast_delay_target_secs: None,
+        skips_ahead: 0,
+        backup_ingest: None,
         last_error: None,
         is_fast: true,
         delivery_mode: None,

@@ -200,6 +200,10 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
         observed > 1_000,
         "fast endpoint must JUMP forward toward live (skip backlog), got {observed}"
     );
+    // #437: the skip is an exact, visible state on /api/status.
+    let skips = stats.lock().await.skips_ahead;
+    assert!(skips.count >= 1, "the jump is counted: {skips:?}");
+    assert!(skips.last_at_unix_ms.is_some());
     // The core invariant, now asserted directly rather than inferred from the
     // ladder's coarseness: the read pointer trails the live edge by AT LEAST
     // the controller's floor delay (5s / 2s chunks = 2 chunks). A larger gap is

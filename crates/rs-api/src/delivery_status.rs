@@ -144,6 +144,12 @@ pub struct EndpointDeliveryStatus {
     /// endpoint, or when the VPS rs-delivery predates this field.
     #[serde(default)]
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: the VPS producer's live-edge skips ahead (`skips_ahead.count`).
+    #[serde(default)]
+    pub skips_ahead: u64,
+    /// #437/#368: the YouTube backup ingest mirror, `None` without one.
+    #[serde(default)]
+    pub backup_ingest: Option<rs_core::models::BackupIngestMetrics>,
     /// #284/#238: ms since the endpoint's last SUCCESSFUL push (live chunk
     /// or rescue clip) as reported by the VPS. `None` when unavailable.
     #[serde(default)]
@@ -299,6 +305,8 @@ impl DeliveryOrchestrator {
                             // target, so the dashboard can colour the fast bar
                             // relative to it. None on an older VPS binary.
                             let fast_delay_target_secs = entry["fast_delay_target_secs"].as_u64();
+                            // #437: skips ahead + backup ingest state.
+                            let (skips_ahead, backup_ingest) = parse_stream_health(&entry);
                             let last_push_ok_age_ms = entry["last_push_ok_age_ms"].as_i64();
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
@@ -406,6 +414,8 @@ impl DeliveryOrchestrator {
                                 av_skew_ms,
                                 producer_active,
                                 fast_delay_target_secs,
+                                skips_ahead,
+                                backup_ingest,
                                 last_push_ok_age_ms,
                                 last_error,
                                 ffmpeg_last_stderr,
@@ -532,6 +542,8 @@ impl DeliveryOrchestrator {
                 reconnect_count: ep.reconnect_count,
                 av_skew_ms: ep.av_skew_ms,
                 fast_delay_target_secs: ep.fast_delay_target_secs,
+                skips_ahead: ep.skips_ahead,
+                backup_ingest: ep.backup_ingest,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,
@@ -713,6 +725,20 @@ pub async fn attach_yt_health(
 /// Test-only: clear the per-endpoint YT health cache. Different tests use
 /// pools that allocate endpoint id=1 each, so the cache must be reset to
 /// avoid one test seeing another's cached snapshot.
+/// #437: the VPS `/api/status` endpoint entry's exact stream states: the
+/// producer's live-edge skips ahead (`skips_ahead.count`, 0 on an older VPS)
+/// and the YouTube backup ingest (`None` without one, or unreadable).
+pub(crate) fn parse_stream_health(
+    entry: &serde_json::Value,
+) -> (u64, Option<rs_core::models::BackupIngestMetrics>) {
+    let skips_ahead = entry["skips_ahead"]["count"].as_u64().unwrap_or(0);
+    let backup_ingest = entry
+        .get("backup_ingest")
+        .filter(|v| !v.is_null())
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    (skips_ahead, backup_ingest)
+}
+
 #[cfg(test)]
 pub fn clear_yt_health_cache_for_test() {
     yt_health_cache().clear();

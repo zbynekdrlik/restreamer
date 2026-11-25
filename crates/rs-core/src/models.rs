@@ -379,6 +379,40 @@ pub struct FacebookHealth {
 // paths keep resolving.
 pub use crate::endpoint_lifecycle::{EndpointLifecycle, LifecycleInput};
 
+/// #437: what the dashboard shows about an endpoint's YouTube backup ingest
+/// (mapped from the VPS `/api/status` `backup_ingest`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupIngestMetrics {
+    pub connected: bool,
+    #[serde(default)]
+    pub chunks_pushed: u64,
+    /// Whole chunks the backup dropped because it fell behind (#437: the
+    /// stale queued ones on a full queue).
+    #[serde(default)]
+    pub dropped_chunks: u64,
+    /// The S3 chunk id of the backup's last successful push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_chunk_id: Option<i64>,
+}
+
+/// #437: chunks the backup may trail the primary's position before the
+/// dashboard shows it as behind ("zaostáva"). The live consumer keeps the
+/// backup one chunk AHEAD, so 2 behind is already a real lag.
+pub const BACKUP_BEHIND_CHUNKS: i64 = 2;
+
+impl BackupIngestMetrics {
+    /// The backup is behind: not connected, nothing pushed yet, or its last
+    /// chunk trails the primary's `current_chunk_id` by more than
+    /// [`BACKUP_BEHIND_CHUNKS`].
+    pub fn is_behind(&self, current_chunk_id: i64) -> bool {
+        match self.last_chunk_id {
+            _ if !self.connected => true,
+            None => true,
+            Some(id) => current_chunk_id - id > BACKUP_BEHIND_CHUNKS,
+        }
+    }
+}
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -409,6 +443,15 @@ pub struct DeliveryEndpointMetrics {
     /// for a non-fast endpoint or a VPS binary predating the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: how often the VPS producer skipped content ahead to the live
+    /// edge (0 in a clean steady state; a fast endpoint after an outage
+    /// counts one). 0 for an older VPS binary.
+    #[serde(default)]
+    pub skips_ahead: u64,
+    /// #437/#368: the YouTube backup ingest mirror's state, `None` without a
+    /// backup (or an older VPS binary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_ingest: Option<BackupIngestMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]
