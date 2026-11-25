@@ -391,28 +391,31 @@ impl ManageClient {
         cost: Cost,
     ) -> Result<Value> {
         let started = Instant::now();
-        let mut retries = 0u32;
-        let (status, text) = loop {
-            let mut sent = self.send_once(&method, path, query, body, cost).await?;
-            if sent.0 == 401 {
-                *self.cached.lock().await = None;
-                sent = self.send_once(&method, path, query, body, cost).await?;
-            }
+        let mut sent = self
+            .send_refreshing(&method, path, query, body, cost)
+            .await?;
+        // The range bounds the attempts by itself, so no backoff answer can
+        // turn this into an endless loop.
+        for retry in 1..=MAX_5XX_RETRIES {
             if !is_transient_5xx(sent.0) || !retries_5xx(&method, path) {
-                break sent;
+                break;
             }
-            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
-                break sent;
+            let Some(delay) = next_retry_delay(self.retry_base, retry - 1, started.elapsed())
+            else {
+                break;
             };
-            retries += 1;
             tracing::warn!(
-                "youtube manage {method} {path}: HTTP {} ({}), retry {retries}/{MAX_5XX_RETRIES} in {} ms",
+                "youtube manage {method} {path}: HTTP {} ({}), retry {retry}/{MAX_5XX_RETRIES} in {} ms",
                 sent.0,
                 api_error_message(&sent.1),
                 delay.as_millis()
             );
             tokio::time::sleep(delay).await;
-        };
+            sent = self
+                .send_refreshing(&method, path, query, body, cost)
+                .await?;
+        }
+        let (status, text) = sent;
         if !(200..300).contains(&status) {
             return Err(YouTubeError::Api {
                 status,
@@ -420,6 +423,24 @@ impl ManageClient {
             });
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// One send; a 401 drops the cached token and sends ONCE more with a
+    /// fresh one (a revoked or rotated access token).
+    async fn send_refreshing(
+        &self,
+        method: &Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+        cost: Cost,
+    ) -> Result<(u16, String)> {
+        let sent = self.send_once(method, path, query, body, cost).await?;
+        if sent.0 != 401 {
+            return Ok(sent);
+        }
+        *self.cached.lock().await = None;
+        self.send_once(method, path, query, body, cost).await
     }
 
     /// The stream titled exactly `title` among the channel's own streams.
@@ -487,19 +508,20 @@ impl ManageClient {
             }
         });
         let started = Instant::now();
-        let mut retries = 0u32;
-        let v = loop {
-            let err = match self
-                .call(
-                    Method::POST,
-                    "liveBroadcasts",
-                    &[("part", "id,snippet,status,contentDetails")],
-                    Some(&body),
-                    admit(units::INSERT),
-                )
-                .await
-            {
-                Ok(v) => break v,
+        let insert = || {
+            self.call(
+                Method::POST,
+                "liveBroadcasts",
+                &[("part", "id,snippet,status,contentDetails")],
+                Some(&body),
+                admit(units::INSERT),
+            )
+        };
+        let mut answer = insert().await;
+        // Bounded by the range, like `call`.
+        for retry in 1..=MAX_5XX_RETRIES {
+            let err = match answer {
+                Ok(_) => break,
                 Err(e) => e,
             };
             let YouTubeError::Api { status, .. } = &err else {
@@ -508,12 +530,12 @@ impl ManageClient {
             if !is_transient_5xx(*status) {
                 return Err(err);
             }
-            let Some(delay) = next_retry_delay(self.retry_base, retries, started.elapsed()) else {
+            let Some(delay) = next_retry_delay(self.retry_base, retry - 1, started.elapsed())
+            else {
                 return Err(err);
             };
-            retries += 1;
             tracing::warn!(
-                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), checking in {} ms whether it was created anyway ({retries}/{MAX_5XX_RETRIES})",
+                "youtube manage liveBroadcasts.insert: HTTP {status} ({err}), checking in {} ms whether it was created anyway ({retry}/{MAX_5XX_RETRIES})",
                 delay.as_millis()
             );
             // Wait FIRST: a 5xx insert can still commit shortly after the
@@ -535,7 +557,9 @@ impl ManageClient {
                     return Err(err);
                 }
             }
-        };
+            answer = insert().await;
+        }
+        let v = answer?;
         v["id"]
             .as_str()
             .filter(|s| !s.is_empty())

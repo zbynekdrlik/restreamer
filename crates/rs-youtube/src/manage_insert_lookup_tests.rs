@@ -42,3 +42,40 @@ async fn an_insert_lookup_out_of_pages_is_not_inserted_again() {
     }
     s.verify().await;
 }
+
+/// An empty `nextPageToken` is the last page: the lookup has read everything,
+/// found nothing, and the insert is sent again.
+#[tokio::test]
+async fn an_empty_next_page_token_ends_the_insert_lookup() {
+    let s = server_with_token(3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "bc-2"})))
+        .expect(1)
+        .with_priority(2)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/yt/liveBroadcasts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [], "nextPageToken": ""
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    assert_eq!(
+        fast_client(&s)
+            .insert_broadcast("t", "2026-11-24T13:51:05Z")
+            .await
+            .unwrap(),
+        "bc-2"
+    );
+    s.verify().await;
+}
