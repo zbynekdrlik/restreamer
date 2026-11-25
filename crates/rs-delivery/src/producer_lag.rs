@@ -183,7 +183,25 @@ pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
     // unconditionally true whenever the ladder hit at all (their first rung is
     // `2 * delay`, so `max_id >= current + 2*delay` ⇒ `target >= current +
     // delay > current`), which is why their behaviour is unchanged.
-    (target > current).then_some(target)
+    is_real_lag(target - current, is_fast).then_some(target)
+}
+
+/// #437: chunks a FAST endpoint must be past its target before the probe
+/// skips ahead (~6 s at 2 s chunks). Below it the lag is steady-state
+/// jitter: skipping one chunk there started a self-sustaining skip + 2 s
+/// pause loop every ~62 s (PP live 25.11.2026). An outage leaves a lag far
+/// above it and still jumps.
+pub(crate) const FAST_JUMP_MIN_CHUNKS: i64 = 3;
+
+/// Is a jump of `ahead` chunks (target - current) a real catch-up? Delayed
+/// endpoints: any forward jump (unchanged). Fast endpoints: only a lag of at
+/// least [`FAST_JUMP_MIN_CHUNKS`].
+fn is_real_lag(ahead: i64, is_fast: bool) -> bool {
+    if is_fast {
+        ahead >= FAST_JUMP_MIN_CHUNKS
+    } else {
+        ahead > 0
+    }
 }
 
 /// First ladder rung (chunks ahead) for the #296 refill-deficit probe.
@@ -570,6 +588,15 @@ mod tests {
                  (lag {lag}: jumped to {jumped}, live edge {live_edge}, target {delay})"
             );
         }
+    }
+
+    #[test]
+    fn a_real_lag_is_any_forward_step_for_delayed_and_three_chunks_for_fast() {
+        assert!(!is_real_lag(0, false));
+        assert!(is_real_lag(1, false), "delayed endpoints are unchanged");
+        assert!(!is_real_lag(FAST_JUMP_MIN_CHUNKS - 1, true));
+        assert!(is_real_lag(FAST_JUMP_MIN_CHUNKS, true));
+        assert_eq!(FAST_JUMP_MIN_CHUNKS, 3);
     }
 
     #[tokio::test]
