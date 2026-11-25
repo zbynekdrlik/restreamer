@@ -181,3 +181,34 @@ async fn a_queue_with_room_drops_nothing() {
         "no gap, no new mapping"
     );
 }
+
+fn mirror_chunk(id: i64) -> MirrorChunk {
+    MirrorChunk {
+        chunk_id: Some(id),
+        data: Arc::from(chunk(id as u8).as_slice()),
+    }
+}
+
+#[tokio::test]
+async fn the_queue_drops_its_stale_chunks_only_when_full_and_everything_once_closed() {
+    let q = MirrorQueue::new();
+    for id in 0..BACKUP_QUEUE_CHUNKS as i64 {
+        assert_eq!(q.offer(mirror_chunk(id)), 0, "room for chunk {id}");
+    }
+    assert_eq!(
+        q.offer(mirror_chunk(9)),
+        BACKUP_QUEUE_CHUNKS,
+        "a full queue drops every stale chunk"
+    );
+    assert_eq!(q.recv().await.and_then(|c| c.chunk_id), Some(9));
+    q.close();
+    assert_eq!(
+        q.offer(mirror_chunk(10)),
+        1,
+        "a closed queue drops the new chunk"
+    );
+    assert!(
+        q.recv().await.is_none(),
+        "a closed queue ends the mirror task"
+    );
+}

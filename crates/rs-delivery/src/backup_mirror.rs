@@ -12,9 +12,10 @@
 //!   payload to a [`BackupMirror`] without ever waiting for it.
 //! - [`BackupMirror`] owns its OWN pusher to the backup URL, its own backoff
 //!   and reconnect, in its own task, fed through a bounded queue of
-//!   [`BACKUP_QUEUE_CHUNKS`] whole chunks. A full queue drops the NEW chunk
-//!   (chunks start on keyframes, so the backup skips whole chunks, never a
-//!   partial one) and counts it. A slow, hung or dead backup can therefore
+//!   [`BACKUP_QUEUE_CHUNKS`] whole chunks. A full queue drops its STALE
+//!   chunks and queues the new one (#437: the backup catches up instead of
+//!   staying full; chunks start on keyframes, so it skips whole chunks, never
+//!   a partial one) and counts them. A slow, hung or dead backup can therefore
 //!   never delay or fail the primary.
 //! - A backup death writes its own `EndpointBackupPushDied` audit row, never
 //!   `EndpointRtmpPushDied`: the outage notifier and the CI death gates count
@@ -32,13 +33,14 @@
 //! plus one chunk: a primary stuck in a long write timeout starves the backup
 //! after that chunk.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rs_ffmpeg::ServiceType;
 use rs_rtmp_push::{PushError, PusherConfig, RtmpPusher};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use crate::audit_ring::{AuditRing, RingRowParts};
@@ -183,8 +185,9 @@ impl BackupMirrorState {
         *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
     }
 
-    fn note_dropped(&self) {
-        self.dropped_chunks.fetch_add(1, Ordering::Relaxed);
+    fn note_dropped(&self, chunks: usize) {
+        self.dropped_chunks
+            .fetch_add(chunks as u64, Ordering::Relaxed);
     }
 
     fn note_stopped(&self) {
@@ -268,7 +271,7 @@ fn backup_died_row(
 /// own reconnect and backoff. Runs until the queue closes or it is aborted.
 async fn run_mirror<P: Pushable>(
     mut pusher: P,
-    mut rx: mpsc::Receiver<MirrorChunk>,
+    queue: Arc<MirrorQueue>,
     state: Arc<BackupMirrorState>,
     alias: String,
     audit_ring: Option<Arc<AuditRing>>,
@@ -277,7 +280,7 @@ async fn run_mirror<P: Pushable>(
     // #437: the backup skips chunks of its own (a full queue, a lost push),
     // so it tracks its own continuity: a gap is a new mapping, never a pause.
     let mut continuity = ChunkContinuity::default();
-    while let Some(MirrorChunk { chunk_id, data }) = rx.recv().await {
+    while let Some(MirrorChunk { chunk_id, data }) = queue.recv().await {
         if continuity.is_gap(chunk_id) {
             pusher.begin_new_mapping();
         }
@@ -325,6 +328,7 @@ async fn run_mirror<P: Pushable>(
         }
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
+    queue.close();
     pusher.close().await;
     state.note_stopped();
 }
@@ -338,8 +342,77 @@ struct MirrorChunk {
     data: Arc<[u8]>,
 }
 
+/// #437: the bounded queue of whole chunks between the tee and the mirror
+/// task. Full means the backup is `BACKUP_QUEUE_CHUNKS` chunks behind: the
+/// queued chunks are STALE, so they are dropped and the new one is queued.
+/// The backup then jumps to the current chunk once (a clean cut, through the
+/// mirror's chunk-id gap) and follows again. Before #437 a full queue dropped
+/// the NEW chunk and kept the stale ones, so a backup that fell behind stayed
+/// full and skipped a chunk every few chunks for good (PP live 25.11.2026).
+struct MirrorQueue {
+    chunks: std::sync::Mutex<VecDeque<MirrorChunk>>,
+    ready: Notify,
+    /// The mirror task ended: every later offer is dropped.
+    closed: AtomicBool,
+}
+
+impl MirrorQueue {
+    fn new() -> Self {
+        Self {
+            chunks: std::sync::Mutex::new(VecDeque::with_capacity(BACKUP_QUEUE_CHUNKS)),
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// Queue `chunk`, never waiting. Returns how many chunks were dropped:
+    /// the stale queue when it was full, or `chunk` itself once closed.
+    fn offer(&self, chunk: MirrorChunk) -> usize {
+        if self.closed.load(Ordering::Acquire) {
+            return 1;
+        }
+        let dropped = {
+            let mut chunks = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
+            let stale = if chunks.len() >= BACKUP_QUEUE_CHUNKS {
+                std::mem::take(&mut *chunks).len()
+            } else {
+                0
+            };
+            chunks.push_back(chunk);
+            stale
+        };
+        self.ready.notify_one();
+        dropped
+    }
+
+    /// The next queued chunk, waiting for one; `None` once closed.
+    async fn recv(&self) -> Option<MirrorChunk> {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            let next = self
+                .chunks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front();
+            if let Some(chunk) = next {
+                return Some(chunk);
+            }
+            // `notify_one` stores a permit when nobody waits yet, so an
+            // offer between the check above and this await is not lost.
+            self.ready.notified().await;
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.ready.notify_one();
+    }
+}
+
 pub(crate) struct BackupMirror {
-    tx: mpsc::Sender<MirrorChunk>,
+    queue: Arc<MirrorQueue>,
     state: Arc<BackupMirrorState>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -350,31 +423,38 @@ impl BackupMirror {
         alias: String,
         audit_ring: Option<Arc<AuditRing>>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(BACKUP_QUEUE_CHUNKS);
+        let queue = Arc::new(MirrorQueue::new());
         let state = Arc::new(BackupMirrorState::default());
         let task = tokio::spawn(run_mirror(
             pusher,
-            rx,
+            Arc::clone(&queue),
             Arc::clone(&state),
             alias,
             audit_ring,
         ));
         Self {
-            tx,
+            queue,
             state,
             task: Some(task),
         }
     }
 
-    /// Queue one chunk for the backup; never waits. A full queue (or a
-    /// stopped mirror) drops the chunk and counts it.
+    /// Queue one chunk for the backup; never waits. A full queue drops its
+    /// stale chunks (#437), a stopped mirror the new one; both are counted.
     pub fn offer(&self, chunk_id: Option<i64>, data: &[u8]) {
         let chunk = MirrorChunk {
             chunk_id,
             data: Arc::from(data),
         };
-        if self.tx.try_send(chunk).is_err() {
-            self.state.note_dropped();
+        let dropped = self.queue.offer(chunk);
+        if dropped > 0 {
+            self.state.note_dropped(dropped);
+            tracing::warn!(
+                dropped,
+                chunk_id,
+                "backup ingest behind by a full queue: dropped the stale chunks, \
+                 the backup jumps to the current one (#437)"
+            );
         }
     }
 
@@ -396,6 +476,7 @@ impl BackupMirror {
 
 impl Drop for BackupMirror {
     fn drop(&mut self) {
+        self.queue.close();
         if let Some(task) = self.task.take() {
             task.abort();
         }
