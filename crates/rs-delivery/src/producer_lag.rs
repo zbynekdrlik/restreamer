@@ -547,7 +547,11 @@ mod tests {
         // buffrom hore dole"), the correction must NEVER leave it closer to the
         // live edge than the ratcheted target.
         let delay = 15_i64;
-        for lag in [16_i64, 20, 22, 29] {
+        // #437: 16 and 17 (1-2 chunks past the target) were dropped here: a
+        // fast endpoint that little past its target is steady-state jitter,
+        // and skipping it is what started the 62 s skip / 2 s pause loop on
+        // PP live 25.11.2026. `fast_endpoint_skips_only_a_real_lag` pins it.
+        for lag in [18_i64, 20, 22, 29] {
             let live_edge = 100 + lag;
             let f = MockFetcher {
                 highest_existing: live_edge,
@@ -564,6 +568,32 @@ mod tests {
                 live_edge - jumped >= delay,
                 "must never land closer to the live edge than the ratcheted target \
                  (lag {lag}: jumped to {jumped}, live edge {live_edge}, target {delay})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_endpoint_skips_only_a_real_lag() {
+        // #437 (PP live 25.11.2026): every 30 fetches the probe found the
+        // fast endpoint ONE chunk past `edge - target` and skipped it; the
+        // pusher paced the skipped 2 s as wall time, which put it one chunk
+        // behind again by the next probe: a skip + 2 s pause every ~62 s,
+        // forever. A skip needs a real lag (an outage), >= 3 chunks.
+        let delay = 9_i64;
+        for (past_target, expect) in [
+            (1_i64, None),
+            (2, None),
+            (3, Some(103_i64)),
+            (40, Some(140)),
+        ] {
+            let f = MockFetcher {
+                highest_existing: 100 + delay + past_target,
+                probe_count: AtomicU32::new(0),
+            };
+            assert_eq!(
+                detect_lag_and_jump(&f, 100, delay, true).await,
+                expect,
+                "a fast endpoint {past_target} chunks past its target"
             );
         }
     }
