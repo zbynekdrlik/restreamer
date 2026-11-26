@@ -30,10 +30,14 @@ a ~2 s content hole. Three layers fix it; keep all three.
   push). A new pusher site that calls `RtmpPusher::new` directly streams
   without the backup: `every_rust_pusher_is_built_by_the_one_factory` scans
   the production sources and fails.
-- `TeePusher` offers each payload to the mirror with a non-blocking
-  `try_send` (bounded queue of `BACKUP_QUEUE_CHUNKS` whole chunks; full =
-  drop the NEW chunk, counted). A hung, slow or dead backup can never delay or
-  fail the primary. The backup has its own pusher, 30 s write timeout and the
+- `TeePusher` offers each payload to the mirror without waiting
+  (`MirrorQueue`, bounded at `BACKUP_QUEUE_CHUNKS` whole chunks). **Full =
+  drop the STALE queued chunks, queue the new one, count the drops** (#437).
+  Dropping the NEW chunk kept a backup that fell behind full for good: it
+  skipped one chunk every ~6 (PP 25.11.2026). The mirror task tracks its own
+  chunk-id continuity and starts a new pusher mapping at a gap, so a catch-up
+  is a clean cut, never a 2 s pacing pause. A hung, slow or dead backup can
+  never delay or fail the primary. The backup has its own pusher, 30 s write timeout and the
   primary's `reconnect_delay_ms` policy over its own streak.
 - **`close()` closes ONLY the primary**: it is the primary's reconnect hook
   after a push error, and the backup must stay up exactly then.
@@ -90,8 +94,14 @@ a ~2 s content hole. Three layers fix it; keep all three.
   primary).
 - State on VPS `/api/status` as `endpoints[].backup_ingest {connected,
   reconnect_count, chunks_pushed, dropped_chunks, last_error}` (omitted
-  without a backup). The host maps VPS fields one by one, so it is NOT shown
-  on the dashboard yet.
+  without a backup). Since #437 the host maps it
+  (`delivery_status::parse_stream_health`) into `DeliveryEndpointMetrics.
+  backup_ingest`, and the endpoint node shows `záloha: OK / zaostáva`
+  (`leptos-ui` `store::BackupIngest::is_behind`, the ONE place the rule lives:
+  disconnected, nothing pushed, or > 2 chunks behind the primary). The node also shows `preskočené: N` (VPS `skips_ahead`, the
+  producer's live-edge skips) and, on a fast endpoint, the read-delay target
+  control (`POST /api/v1/delivery/endpoints/fast-delay`, audited on the VPS as
+  `fast_delay_set`). Playwright: `e2e/fast-endpoint-state.spec.ts`.
 - Kill switch: host `delivery.youtube_backup_ingest` (default true) is sent
   per endpoint as `youtube_backup_ingest` (`build_vps_endpoint_entry`, init
   AND add); a VPS payload without it keeps the backup ON.

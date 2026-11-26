@@ -248,6 +248,8 @@ pub async fn start_stream(
                         reconnect_count: 0,
                         av_skew_ms: 0,
                         fast_delay_target_secs: None,
+                        skips_ahead: 0,
+                        backup_ingest: None,
                         last_error: None,
                         is_fast: ep.is_fast,
                         delivery_mode: None,

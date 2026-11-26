@@ -183,7 +183,25 @@ pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
     // unconditionally true whenever the ladder hit at all (their first rung is
     // `2 * delay`, so `max_id >= current + 2*delay` ⇒ `target >= current +
     // delay > current`), which is why their behaviour is unchanged.
-    (target > current).then_some(target)
+    is_real_lag(target - current, is_fast).then_some(target)
+}
+
+/// #437: chunks a FAST endpoint must be past its target before the probe
+/// skips ahead (~6 s at 2 s chunks). Below it the lag is steady-state
+/// jitter: skipping one chunk there started a self-sustaining skip + 2 s
+/// pause loop every ~62 s (PP live 25.11.2026). An outage leaves a lag far
+/// above it and still jumps.
+pub(crate) const FAST_JUMP_MIN_CHUNKS: i64 = 3;
+
+/// Is a jump of `ahead` chunks (target - current) a real catch-up? Delayed
+/// endpoints: any forward jump (unchanged). Fast endpoints: only a lag of at
+/// least [`FAST_JUMP_MIN_CHUNKS`].
+fn is_real_lag(ahead: i64, is_fast: bool) -> bool {
+    if is_fast {
+        ahead >= FAST_JUMP_MIN_CHUNKS
+    } else {
+        ahead > 0
+    }
 }
 
 /// First ladder rung (chunks ahead) for the #296 refill-deficit probe.
@@ -331,6 +349,7 @@ pub(crate) fn clear_refill_deficit(
 /// Convenience wrapper called once per successful fetch in producer_task.
 /// Bumps the counter; every `LAG_PROBE_INTERVAL_ITERS` invocations it
 /// runs the ladder probe and (if lag detected) updates `chunk_id`.
+/// Returns `true` when it skipped ahead (#437: counted on `/api/status`).
 ///
 /// Fast endpoints probe too (they must jump to the live edge after an outage),
 /// so there is no short-circuit here; the jump target is fully determined by
@@ -343,24 +362,26 @@ pub(crate) async fn maybe_jump<F: ChunkFetcher>(
     iters: &mut u32,
     alias: &str,
     is_fast: bool,
-) {
+) -> bool {
     *iters += 1;
     if *iters < LAG_PROBE_INTERVAL_ITERS {
-        return;
+        return false;
     }
     *iters = 0;
-    if let Some(new_id) =
+    let Some(new_id) =
         detect_lag_and_jump(fetcher, *chunk_id, delivery_delay_chunks, is_fast).await
-    {
-        tracing::warn!(
-            alias = %alias,
-            from = *chunk_id,
-            to = new_id,
-            jump = new_id - *chunk_id,
-            "Producer: live-edge lag detected, skipping ahead"
-        );
-        *chunk_id = new_id;
-    }
+    else {
+        return false;
+    };
+    tracing::warn!(
+        alias = %alias,
+        from = *chunk_id,
+        to = new_id,
+        jump = new_id - *chunk_id,
+        "Producer: live-edge lag detected, skipping ahead"
+    );
+    *chunk_id = new_id;
+    true
 }
 
 #[cfg(test)]
@@ -547,7 +568,11 @@ mod tests {
         // buffrom hore dole"), the correction must NEVER leave it closer to the
         // live edge than the ratcheted target.
         let delay = 15_i64;
-        for lag in [16_i64, 20, 22, 29] {
+        // #437: 16 and 17 (1-2 chunks past the target) were dropped here: a
+        // fast endpoint that little past its target is steady-state jitter,
+        // and skipping it is what started the 62 s skip / 2 s pause loop on
+        // PP live 25.11.2026. `fast_endpoint_skips_only_a_real_lag` pins it.
+        for lag in [18_i64, 20, 22, 29] {
             let live_edge = 100 + lag;
             let f = MockFetcher {
                 highest_existing: live_edge,
@@ -564,6 +589,41 @@ mod tests {
                 live_edge - jumped >= delay,
                 "must never land closer to the live edge than the ratcheted target \
                  (lag {lag}: jumped to {jumped}, live edge {live_edge}, target {delay})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_lag_is_any_forward_step_for_delayed_and_three_chunks_for_fast() {
+        assert!(!is_real_lag(0, false));
+        assert!(is_real_lag(1, false), "delayed endpoints are unchanged");
+        assert!(!is_real_lag(FAST_JUMP_MIN_CHUNKS - 1, true));
+        assert!(is_real_lag(FAST_JUMP_MIN_CHUNKS, true));
+        assert_eq!(FAST_JUMP_MIN_CHUNKS, 3);
+    }
+
+    #[tokio::test]
+    async fn fast_endpoint_skips_only_a_real_lag() {
+        // #437 (PP live 25.11.2026): every 30 fetches the probe found the
+        // fast endpoint ONE chunk past `edge - target` and skipped it; the
+        // pusher paced the skipped 2 s as wall time, which put it one chunk
+        // behind again by the next probe: a skip + 2 s pause every ~62 s,
+        // forever. A skip needs a real lag (an outage), >= 3 chunks.
+        let delay = 9_i64;
+        for (past_target, expect) in [
+            (1_i64, None),
+            (2, None),
+            (3, Some(103_i64)),
+            (40, Some(140)),
+        ] {
+            let f = MockFetcher {
+                highest_existing: 100 + delay + past_target,
+                probe_count: AtomicU32::new(0),
+            };
+            assert_eq!(
+                detect_lag_and_jump(&f, 100, delay, true).await,
+                expect,
+                "a fast endpoint {past_target} chunks past its target"
             );
         }
     }
@@ -686,11 +746,11 @@ mod tests {
         let mut iters = 0u32;
         // Call < LAG_PROBE_INTERVAL_ITERS times: no probe.
         for _ in 0..(LAG_PROBE_INTERVAL_ITERS - 1) {
-            maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await;
+            assert!(!maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await);
         }
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
         // Hit the threshold: ladder runs.
-        maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await;
+        let _ = maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await;
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         // Counter resets to 0 after firing.
         assert_eq!(iters, 0);
@@ -709,7 +769,10 @@ mod tests {
         let mut chunk_id = 100;
         // One call short of the interval: this call fires the probe.
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await;
+        assert!(
+            maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await,
+            "#437: a skip ahead is reported (counted on /api/status)"
+        );
         assert!(
             f.probe_count.load(Ordering::SeqCst) > 0,
             "fast endpoint must probe for the live edge"
@@ -731,7 +794,7 @@ mod tests {
         };
         let mut chunk_id = 100;
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await;
+        assert!(!maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await);
         // Probe issued (interval reached), but no forward jump.
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         assert_eq!(chunk_id, 100, "fast endpoint at live edge stays put");

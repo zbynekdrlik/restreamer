@@ -144,6 +144,12 @@ pub struct EndpointDeliveryStatus {
     /// endpoint, or when the VPS rs-delivery predates this field.
     #[serde(default)]
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: the VPS producer's live-edge skips ahead (`skips_ahead.count`).
+    #[serde(default)]
+    pub skips_ahead: u64,
+    /// #437/#368: the YouTube backup ingest mirror, `None` without one.
+    #[serde(default)]
+    pub backup_ingest: Option<rs_core::models::BackupIngestMetrics>,
     /// #284/#238: ms since the endpoint's last SUCCESSFUL push (live chunk
     /// or rescue clip) as reported by the VPS. `None` when unavailable.
     #[serde(default)]
@@ -226,6 +232,30 @@ pub(crate) fn cap_endpoint_delay_secs(raw: f64, is_fast: bool, target_delay_secs
     }
 }
 
+/// #437: the VPS `/api/status` endpoint entry's exact stream states: the
+/// producer's live-edge skips ahead (`skips_ahead.count`, 0 on an older VPS)
+/// and the YouTube backup ingest (`None` without one). An unreadable
+/// `backup_ingest` is logged and shown as none, never silently.
+pub(crate) fn parse_stream_health(
+    entry: &serde_json::Value,
+) -> (u64, Option<rs_core::models::BackupIngestMetrics>) {
+    let skips_ahead = entry["skips_ahead"]["count"].as_u64().unwrap_or(0);
+    let backup_ingest = match entry.get("backup_ingest") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                warn!(
+                    alias = entry["alias"].as_str().unwrap_or(""),
+                    "unreadable VPS backup_ingest status (#437): {e}"
+                );
+                None
+            }
+        },
+    };
+    (skips_ahead, backup_ingest)
+}
+
 impl DeliveryOrchestrator {
     /// Get delivery status for an event.
     ///
@@ -299,6 +329,8 @@ impl DeliveryOrchestrator {
                             // target, so the dashboard can colour the fast bar
                             // relative to it. None on an older VPS binary.
                             let fast_delay_target_secs = entry["fast_delay_target_secs"].as_u64();
+                            // #437: skips ahead + backup ingest state.
+                            let (skips_ahead, backup_ingest) = parse_stream_health(&entry);
                             let last_push_ok_age_ms = entry["last_push_ok_age_ms"].as_i64();
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
@@ -406,6 +438,8 @@ impl DeliveryOrchestrator {
                                 av_skew_ms,
                                 producer_active,
                                 fast_delay_target_secs,
+                                skips_ahead,
+                                backup_ingest,
                                 last_push_ok_age_ms,
                                 last_error,
                                 ffmpeg_last_stderr,
@@ -532,6 +566,8 @@ impl DeliveryOrchestrator {
                 reconnect_count: ep.reconnect_count,
                 av_skew_ms: ep.av_skew_ms,
                 fast_delay_target_secs: ep.fast_delay_target_secs,
+                skips_ahead: ep.skips_ahead,
+                backup_ingest: ep.backup_ingest,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,

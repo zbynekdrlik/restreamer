@@ -282,6 +282,8 @@ fn test_metrics() -> rs_core::models::DeliveryEndpointMetrics {
         reconnect_count: 0,
         av_skew_ms: 0,
         fast_delay_target_secs: None,
+        skips_ahead: 0,
+        backup_ingest: None,
         last_error: None,
         is_fast: false,
         delivery_mode: None,

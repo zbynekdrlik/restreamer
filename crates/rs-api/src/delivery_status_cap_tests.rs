@@ -61,3 +61,38 @@ fn negative_raw_is_floored_to_zero() {
     assert_eq!(cap_endpoint_delay_secs(-5.0, false, 120), 0.0);
     assert_eq!(cap_endpoint_delay_secs(-5.0, true, 0), 0.0);
 }
+
+/// #437: the VPS entry's skips ahead and backup ingest reach the host; an
+/// older VPS (no fields) reads as 0 skips and no backup.
+#[test]
+fn the_vps_stream_health_states_are_parsed() {
+    use crate::delivery_status::parse_stream_health;
+    let entry = serde_json::json!({
+        "skips_ahead": { "count": 25, "last_at_unix_ms": 1_700_000_000_000_i64 },
+        "backup_ingest": {
+            "connected": true, "reconnect_count": 1, "chunks_pushed": 372,
+            "dropped_chunks": 75, "last_error": null, "last_chunk_id": 1806
+        }
+    });
+    let (skips, backup) = parse_stream_health(&entry);
+    assert_eq!(skips, 25);
+    assert_eq!(
+        backup,
+        Some(rs_core::models::BackupIngestMetrics {
+            connected: true,
+            chunks_pushed: 372,
+            dropped_chunks: 75,
+            last_chunk_id: Some(1806),
+        })
+    );
+    assert_eq!(parse_stream_health(&serde_json::json!({})), (0, None));
+    assert_eq!(
+        parse_stream_health(&serde_json::json!({ "backup_ingest": null })).1,
+        None
+    );
+    assert_eq!(
+        parse_stream_health(&serde_json::json!({ "backup_ingest": { "bogus": 1 } })).1,
+        None,
+        "an unreadable backup_ingest is none (and logged)"
+    );
+}

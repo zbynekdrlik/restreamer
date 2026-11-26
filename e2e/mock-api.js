@@ -61,6 +61,7 @@ let oauthSuggestByEndpoint = {}; // #199: { endpointId: {oauth_id, owners, probe
 //   - "outage-rescue"   — 1 endpoint lifecycle="rescue" (survivable outage, calm blue UX)
 //   - "outage-attention" — 1 endpoint lifecycle="attention" (auth-reject, red, no calm banner)
 //   - "source-ended"    — 1 endpoint lifecycle="ended" (#408: OBS stopped on purpose, grey, no banner)
+//   - "fast-endpoint"   — a fast YT endpoint with skips + a lagging backup, and a clean normal one (#437)
 //   - "disk-warn"       — status.disk_pressure="warn" (amber DiskPressureBanner)
 //   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
@@ -1023,6 +1024,82 @@ function buildOutageDelivery(which) {
   };
 }
 
+// #437: the PP live 25.11.2026 shape: the fast endpoint KS-PP-TEST skipped
+// ahead 25 times and its backup ingest trails the primary (dropped 75
+// stale chunks); the normal YT_PP_4K_RTMP is clean (backup one ahead).
+let fastDelayRequests = [];
+function buildFastEndpointDelivery(targetSecs) {
+  const base = {
+    alive: true,
+    bytes_processed_total: 1073741824,
+    chunks_processed: 1847,
+    stall_reason: null,
+    ffmpeg_restart_count: 0,
+    reconnect_count: 0,
+    last_error: null,
+    delivery_mode: "normal",
+    rescue_eta_secs: null,
+    lifecycle: "live",
+  };
+  return {
+    instance_name: "rs-delivery-evt16",
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 2,
+    endpoints: [
+      {
+        ...base,
+        alias: "KS-PP-TEST",
+        current_chunk_id: 1810,
+        chunk_delay_secs: 28.0,
+        is_fast: true,
+        fast_delay_target_secs: targetSecs,
+        skips_ahead: 25,
+        backup_ingest: {
+          connected: true,
+          chunks_pushed: 372,
+          dropped_chunks: 75,
+          last_chunk_id: 1804,
+        },
+      },
+      {
+        ...base,
+        alias: "YT_PP_4K_RTMP",
+        current_chunk_id: 1810,
+        chunk_delay_secs: 118.0,
+        is_fast: false,
+        skips_ahead: 0,
+        backup_ingest: {
+          connected: true,
+          chunks_pushed: 2500,
+          dropped_chunks: 0,
+          last_chunk_id: 1811,
+        },
+      },
+    ],
+  };
+}
+
+// #437: set a fast endpoint's read-delay target live. Mirrors the host
+// handler: forwards to the VPS, which clamps to 5..=120 and answers
+// {alias, from_secs, to_secs}; a non-fast / unknown alias is a 409 / 404.
+app.post("/api/v1/delivery/endpoints/fast-delay", (req, res) => {
+  const { event_id, alias, target_secs } = req.body || {};
+  fastDelayRequests.push({ event_id, alias, target_secs });
+  const ep = (cachedDelivery.endpoints || []).find((e) => e.alias === alias);
+  if (!ep) return res.status(404).send("not_found");
+  if (!ep.is_fast) return res.status(409).send("not_fast");
+  const from = ep.fast_delay_target_secs || 5;
+  const to = Math.min(120, Math.max(5, Number(target_secs)));
+  ep.fast_delay_target_secs = to;
+  res.json({ alias, from_secs: from, to_secs: to });
+});
+
+// Test-only: what the dashboard sent to the fast-delay route (#437).
+app.get("/api/v1/_test/fast-delay-requests", (_req, res) => {
+  res.json(fastDelayRequests);
+});
+
 // Build a DeliveryStatus payload with one FB endpoint carrying facebook_health
 // (#166). Health is "bad"/NO_LIVE_VIDEO — the silent-discard case: we push
 // bytes but FB has zero receiving live_video, so the badge must read RED.
@@ -1307,6 +1384,15 @@ app.post("/api/v1/_test/scenario", (req, res) => {
     );
     eventEndpoints[1] = [1];
     cachedDelivery = buildOutageDelivery(scenario);
+  } else if (scenario === "fast-endpoint") {
+    events = events.map((e) =>
+      e.id === 1
+        ? { ...e, receiving_activated: true, delivering_activated: true }
+        : e,
+    );
+    eventEndpoints[1] = [1];
+    fastDelayRequests = [];
+    cachedDelivery = buildFastEndpointDelivery(9);
   } else if (scenario === "fb-health") {
     // #166: one FB endpoint whose Graph ingest health reads RED (silent
     // discard). Keeps the event active/delivering so the endpoint tree renders.
@@ -1635,6 +1721,11 @@ wss.on("connection", (ws) => {
     deliveryData = buildOutageDelivery(scenario);
   } else if (scenario === "fb-health") {
     deliveryData = buildFbHealthDelivery();
+  } else if (scenario === "fast-endpoint") {
+    // Keep the target the operator set (a reload must show it).
+    deliveryData = cachedDelivery.endpoints && cachedDelivery.endpoints.length
+      ? cachedDelivery
+      : buildFastEndpointDelivery(9);
   } else if (scenario === "zero-endpoints") {
     deliveryData = {
       instance_name: "rs-delivery-evt1",
@@ -1719,6 +1810,7 @@ wss.on("connection", (ws) => {
     "outage-attention",
     "source-ended",
     "fb-health",
+    "fast-endpoint",
   ];
   const pipelineData = activePipelineScenarios.includes(scenario)
     ? {

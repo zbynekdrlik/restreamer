@@ -78,3 +78,26 @@ async fn an_endpoint_without_a_backup_has_no_backup_ingest_entry() {
         "no backup -> the field is omitted: {ep}"
     );
 }
+
+/// #437: the endpoint entry carries the producer's live-edge skips ahead.
+#[tokio::test]
+async fn the_endpoint_entry_carries_its_skips_ahead() {
+    let fresh = state_with("clean", EndpointHandle::stub_for_test(1)).await;
+    let json = status_json(fresh).await;
+    let ep = &json["endpoints"][0];
+    assert_eq!(ep["skips_ahead"]["count"], 0, "{ep}");
+    assert!(ep["skips_ahead"]["last_at_unix_ms"].is_null());
+
+    let handle = EndpointHandle::stub_for_test(1);
+    {
+        let stats = handle.stats_for_test();
+        let mut s = stats.lock().await;
+        s.skips_ahead.note(1_700_000_000_000);
+        s.skips_ahead.note(1_700_000_062_000);
+    }
+    let state = state_with("KS-PP-TEST", handle).await;
+    let json = status_json(state).await;
+    let ep = &json["endpoints"][0];
+    assert_eq!(ep["skips_ahead"]["count"], 2, "{ep}");
+    assert_eq!(ep["skips_ahead"]["last_at_unix_ms"], 1_700_000_062_000_i64);
+}

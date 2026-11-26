@@ -28,6 +28,24 @@ use crate::producer_lag::maybe_jump as maybe_jump_ahead;
 /// counter and restores `producer_active=true`).
 pub(crate) const MAX_CONSECUTIVE_FETCH_ERRORS: u32 = 3;
 
+/// #437: persist the fast controller's target on the shared buffer state
+/// (status + respawn seed) without overwriting an operator target set since
+/// this producer last adopted one.
+fn publish_fast_target(ctrl: &mut FastDelayController, buffer_state: &BufferState, alias: &str) {
+    if let Some((from, to)) = ctrl.publish_target(
+        &buffer_state.fast_delay_requested_secs,
+        &buffer_state.fast_delay_target_secs,
+        std::time::Instant::now(),
+    ) {
+        tracing::info!(
+            alias = %alias,
+            from_secs = from,
+            to_secs = to,
+            "Producer: adopted the operator's fast read-delay target (#437)"
+        );
+    }
+}
+
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn producer_task<F: ChunkFetcher>(
@@ -165,6 +183,20 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 // stays strictly 1× — this only moves the READ pointer.
                 let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
                     Some(ctrl) => {
+                        // #437: the operator's live target (VPS
+                        // `/api/endpoints/fast_delay`, audited there) first,
+                        // so this fetch's probe already uses it.
+                        if let Some((from, to)) = ctrl.adopt_operator_request(
+                            &buffer_state.fast_delay_requested_secs,
+                            std::time::Instant::now(),
+                        ) {
+                            tracing::info!(
+                                alias = %alias,
+                                from_secs = from,
+                                to_secs = to,
+                                "Producer: adopted the operator's fast read-delay target (#437)"
+                            );
+                        }
                         // Consumer-measured starvation gap (keepalive) — the
                         // trickle-regime grow signal. The probe-cycle grow
                         // below only fires after ~80s of uninterrupted misses;
@@ -199,15 +231,13 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                         // #294 respawn survival: persist the (ratcheted)
                         // target to the shared BufferState so a producer
                         // respawn re-seeds at this level, not the floor.
-                        buffer_state
-                            .fast_delay_target_secs
-                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
+                        publish_fast_target(ctrl, &buffer_state, &alias);
                         ctrl.delay_chunks(typical_chunk_dur_ms)
                     }
                     None if delivery_delay_ms == 0 => 0,
                     None => ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1),
                 };
-                maybe_jump_ahead(
+                if maybe_jump_ahead(
                     &fetcher,
                     &mut chunk_id,
                     delivery_delay_chunks,
@@ -215,7 +245,16 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     &alias,
                     is_fast,
                 )
-                .await;
+                .await
+                {
+                    // #437: an exact, visible state: how often this endpoint
+                    // skipped content to stay near live.
+                    stats
+                        .lock()
+                        .await
+                        .skips_ahead
+                        .note(crate::endpoint_stats::unix_ms_now());
+                }
                 // #296: buffered endpoints re-measure their below-target cushion
                 // deficit on the same cadence and audit it (information only,
                 // nothing paces on it). Measured at the consumer's last pushed
@@ -331,9 +370,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                         // #294 respawn survival: persist the ratcheted target
                         // from the probe-cycle grow path too (mirrors the
                         // keepalive-gap path above).
-                        buffer_state
-                            .fast_delay_target_secs
-                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
+                        publish_fast_target(ctrl, &buffer_state, &alias);
                     }
                 } else {
                     let mut s = stats.lock().await;

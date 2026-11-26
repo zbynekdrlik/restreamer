@@ -23,7 +23,8 @@ auto-load on their `paths:` — you do not invoke those.
 - installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
 - rs-rtmp-push in-process RTMP test servers / rejection-path harness → `.claude/rules/rtmp-test-harness.md` (auto)
 - YouTube backup ingest mirror (one pusher factory, close vs shutdown), failed-chunk re-send, fast first reconnect, RTMP ping/ack (#368) → `.claude/rules/youtube-backup-ingest.md` (auto)
-- Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
+- Leptos UI gotchas (controlled `<select>` → `prop:selected`; a control shown by a closure over a busy Memo → derive a bool Memo) → `.claude/rules/leptos-ui.md` (auto)
+- running the frontend Playwright suite locally (trunk dist, mock, `--no-save` Playwright version matching /opt/ms-playwright) → `.claude/rules/e2e-local-run.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline (stream OBS is camera-box's: never restart/reconfigure it) → `.claude/skills/obs-recovery`

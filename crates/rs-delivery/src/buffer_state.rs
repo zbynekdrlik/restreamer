@@ -36,9 +36,15 @@ pub struct BufferState {
     /// drains already climbed to, instead of resetting to the floor and
     /// re-starving (which would reintroduce the repeated stuttering #294
     /// exists to eliminate). 0 = unset → the controller starts at its floor.
-    /// Only the fast producer writes it; monotonic within a session (grows
-    /// with the target, never lowered — the ratchet-up-only invariant).
+    /// The fast producer writes it; it grows with the target (the
+    /// ratchet-up-only invariant), and is lowered only by the operator's live
+    /// control (#437, `fast_delay_requested_secs`).
     pub fast_delay_target_secs: AtomicU64,
+    /// #437: a target the OPERATOR set live (VPS `POST
+    /// /api/endpoints/fast_delay`), already clamped, not yet adopted by the
+    /// fast producer. 0 = no pending request. The producer swaps it to 0 and
+    /// applies it with `FastDelayController::set_target` on its next fetch.
+    pub fast_delay_requested_secs: AtomicU64,
     /// #296: how far (seconds) a BUFFERED (non-fast) endpoint's delivered
     /// cushion currently sits BELOW its configured target. 0 = at/above
     /// target, the steady state. Written by the producer's periodic live-edge
@@ -64,6 +70,7 @@ impl BufferState {
             highest_sent_chunk_id: AtomicI64::new(-1),
             chunks_sent_total: AtomicU64::new(0),
             fast_delay_target_secs: AtomicU64::new(0),
+            fast_delay_requested_secs: AtomicU64::new(0),
             refill_deficit_secs: AtomicU64::new(0),
             source_end: crate::source_end::SourceEnd::new(),
         }

@@ -10,6 +10,7 @@ use super::change_key_modal::ChangeKeyModal;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
+use super::endpoint_stream_state::{EndpointStreamState, FastDelayControl};
 use crate::api;
 use crate::store::{DashboardStore, EndpointLifecycle};
 use crate::utils::{cache_threshold_for_service, fast_buffer_class};
@@ -138,6 +139,7 @@ pub fn EndpointTree() -> impl IntoView {
                     let remove_alias = alias.clone();
                     let ck_alias = alias.clone();
                     let ep_alias_key = alias.clone();
+                    let fd_alias = alias.clone();
                     // Per-card toggle for the EndpointHistory sparkline.
                     let show_history = RwSignal::new(false);
                     let history_alias_signal: Signal<String> = Signal::derive({
@@ -505,6 +507,22 @@ pub fn EndpointTree() -> impl IntoView {
                                         </div>
                                     })
                                 }}
+                                // #437: exact stream states + the live fast-delay control.
+                                <EndpointStreamState ep_data=ep_data />
+                                {
+                                    // A Memo, so a delivery update that changes nothing
+                                    // here never rebuilds the control (and its input).
+                                    let show_fast_delay = Memo::new(move |_| {
+                                        ep_data.get().is_fast && is_running_memo.get()
+                                    });
+                                    let fd_alias = fd_alias.clone();
+                                    move || {
+                                        let fd_alias = fd_alias.clone();
+                                        show_fast_delay.get().then(move || {
+                                            view! { <FastDelayControl alias=fd_alias ep_data=ep_data /> }
+                                        })
+                                    }
+                                }
                                 <button
                                     class="btn-endpoint-history"
                                     title="Toggle chunk_delay history"

@@ -274,6 +274,10 @@ pub enum Action {
 
     FastDelayGrown,
     FastDelayShrank,
+    /// VPS-side (#437): the operator set a fast endpoint's read-delay target
+    /// live (`POST /api/endpoints/fast_delay`). Detail JSON:
+    /// `{alias, from_secs, to_secs, requested_secs, by: "operator"}`.
+    FastDelaySet,
     FastKeepaliveStarted,
     FastKeepaliveEnded,
 
@@ -739,6 +743,14 @@ mod tests {
         let a = Action::FastDelayGrown;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"fast_delay_grown\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_fast_delay_set_serdes() {
+        let a = Action::FastDelaySet;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"fast_delay_set\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 

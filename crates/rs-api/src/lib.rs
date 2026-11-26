@@ -17,6 +17,7 @@ pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
 pub mod delivery_binary;
 pub mod delivery_endpoints;
+pub mod delivery_fast_delay;
 pub mod delivery_fb_health;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
@@ -384,6 +385,8 @@ async fn delivery_broadcast_loop(
                             reconnect_count: 0,
                             av_skew_ms: 0,
                             fast_delay_target_secs: None,
+                            skips_ahead: 0,
+                            backup_ingest: None,
                             last_error: None,
                             is_fast: ep.is_fast,
                             delivery_mode: None,
@@ -588,6 +591,8 @@ mod max_non_fast_tests {
             reconnect_count: 0,
             av_skew_ms: 0,
             fast_delay_target_secs: None,
+            skips_ahead: 0,
+            backup_ingest: None,
             last_error: None,
             is_fast: fast,
             delivery_mode: None,

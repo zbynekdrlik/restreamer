@@ -408,6 +408,41 @@ fn a_fresh_session_starts_a_new_shared_mapping() {
     );
 }
 
+/// #437: a chunk-id gap starts a NEW shared mapping on the same session: the
+/// base moves past everything sent, the origin re-pins, the jump trackers
+/// clear, both guards start over, the session state (connection, codec
+/// config) is kept and it is not counted as a re-anchor.
+#[test]
+fn a_chunk_gap_starts_a_new_mapping_on_the_same_session() {
+    let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+    p.state.connected = true;
+    p.state.avc_seq_header_sent = true;
+    p.state.last_audio_output_ts_ms = 9_000;
+    p.state.last_video_output_ts_ms = 9_040;
+    p.state.origin_ts = Some(1_000);
+    p.state.last_audio_xiu_ts = Some(10_000);
+    p.state.last_video_xiu_ts = Some(10_040);
+    p.skew.observe_video(10_040);
+    p.skew.observe_audio(9_000);
+    assert_ne!(p.skew.raw_skew_ms(), 0);
+    p.av_guard.observe_audio(0, 900);
+
+    p.begin_new_mapping();
+
+    assert_eq!(p.state.base_ms, 9_041);
+    assert!(p.state.origin_ts.is_none());
+    assert!(p.state.last_audio_xiu_ts.is_none() && p.state.last_video_xiu_ts.is_none());
+    assert_eq!(p.skew.raw_skew_ms(), 0, "the skew tracker starts over");
+    p.av_guard.observe_video(0, 0);
+    assert_eq!(
+        p.av_guard.check(),
+        None,
+        "an old-mapping sample is never paired with a new one"
+    );
+    assert!(p.state.connected && p.state.avc_seq_header_sent);
+    assert_eq!(p.regression_reanchor_count(), 0);
+}
+
 /// Codec sequence headers go out once per RTMP session, per codec (#103).
 #[test]
 fn codec_sequence_headers_go_out_once_per_session() {
