@@ -98,6 +98,17 @@ pub fn FastDelayControl(alias: String, ep_data: Memo<DeliveryEndpointState>) -> 
     let input = RwSignal::new(String::new());
     let result: RwSignal<Option<(bool, String)>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
+    // The live delivery's event_id arrives over the WebSocket, which can land
+    // after the endpoint nodes (HTTP) are drawn; fall back to the selected
+    // event, the same source the change-key action uses. "Nastaviť" stays
+    // disabled until one is known, so a click never races the WS state.
+    let event_id = Memo::new(move |_| {
+        store
+            .pipeline_state
+            .get()
+            .event_id
+            .or_else(|| store.selected_event_id.get())
+    });
     let alias = StoredValue::new(alias);
 
     let submit = move |_| {
@@ -105,7 +116,7 @@ pub fn FastDelayControl(alias: String, ep_data: Memo<DeliveryEndpointState>) -> 
             result.set(Some((false, "zadaj 5 až 120 s".to_string())));
             return;
         };
-        let Some(event_id) = store.pipeline_state.get_untracked().event_id else {
+        let Some(event_id) = event_id.get_untracked() else {
             result.set(Some((false, "žiadna aktívna udalosť".to_string())));
             return;
         };
@@ -146,7 +157,7 @@ pub fn FastDelayControl(alias: String, ep_data: Memo<DeliveryEndpointState>) -> 
             <button
                 class="btn-change-key"
                 data-testid="fast-delay-set"
-                prop:disabled=move || busy.get()
+                prop:disabled=move || busy.get() || event_id.get().is_none()
                 on:click=submit
             >
                 "Nastaviť"
