@@ -51,20 +51,23 @@ pub async fn set_fast_delay(
         }
         Some(Some(edge)) => edge,
     };
-    crate::fast_delay_audit::emit_delay_set(
-        &Some(Arc::clone(&state.audit_ring)),
-        &req.alias,
-        from,
-        to,
-        req.target_secs,
-    );
-    tracing::info!(
-        alias = %req.alias,
-        from_secs = from,
-        to_secs = to,
-        requested_secs = req.target_secs,
-        "operator set the fast read-delay target (#437)"
-    );
+    // An unchanged target is no change: same answer, no audit row, no log.
+    if from != to {
+        crate::fast_delay_audit::emit_delay_set(
+            &Some(Arc::clone(&state.audit_ring)),
+            &req.alias,
+            from,
+            to,
+            req.target_secs,
+        );
+        tracing::info!(
+            alias = %req.alias,
+            from_secs = from,
+            to_secs = to,
+            requested_secs = req.target_secs,
+            "operator set the fast read-delay target (#437)"
+        );
+    }
     (
         StatusCode::OK,
         Json(serde_json::json!({ "alias": req.alias, "from_secs": from, "to_secs": to })),

@@ -82,6 +82,28 @@ async fn the_operator_sets_a_fast_endpoints_target_and_it_is_audited() {
 }
 
 #[tokio::test]
+async fn an_unchanged_target_answers_the_same_and_is_not_audited() {
+    let state = state_with(vec![("fast", true)]);
+    let body = serde_json::json!({ "alias": "fast", "target_secs": 30 });
+    let (status, _) = post(Arc::clone(&state), Some(TOKEN), body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, again) = post(Arc::clone(&state), Some(TOKEN), body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again,
+        serde_json::json!({ "alias": "fast", "from_secs": 30, "to_secs": 30 })
+    );
+    let (rows, _) = state.audit_ring.since(0);
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.action == Action::FastDelaySet)
+            .count(),
+        1,
+        "only the change is audited: {rows:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_target_is_clamped_to_the_ceiling() {
     let state = state_with(vec![("fast", true)]);
     let (status, body) = post(

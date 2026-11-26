@@ -46,15 +46,24 @@ pub fn parse_target(input: &str) -> Option<u64> {
         .filter(|s| (5..=120).contains(s))
 }
 
+/// #437: how far (seconds) the lag must exceed the target before the VPS
+/// producer skips ahead: `producer_lag::FAST_JUMP_MIN_CHUNKS` (3) chunks of
+/// the chunker's 2 s (`is_real_lag`). Less than that is jitter, never skipped.
+pub const FAST_JUMP_MIN_SECS: f64 = 3.0 * 2.0;
+
 /// The operator's confirmation. A target above the current lag never adds
 /// buffer by itself (the push is always real time, the producer never waits):
 /// it stops the skips ahead, and the lag grows to it only through an outage.
-/// A target below the lag skips ahead to it on the next probe (~1 min).
+/// A target at least [`FAST_JUMP_MIN_SECS`] below the lag skips ahead to it
+/// on the next probe (~1 min); closer than that nothing is skipped.
 pub fn set_result_text(from_secs: u64, to_secs: u64, lag_secs: f64) -> String {
-    let what = if (to_secs as f64) > lag_secs {
+    let to = to_secs as f64;
+    let what = if to > lag_secs {
         "nad oneskorením: nič sa nepreskočí, oneskorenie narastie až pri výpadku"
-    } else {
+    } else if lag_secs - to >= FAST_JUMP_MIN_SECS {
         "pod oneskorením: do minúty preskočí bližšie k živému"
+    } else {
+        "blízko oneskorenia: nič sa nepreskočí, oneskorenie ostane"
     };
     format!("nastavené: {from_secs} s → {to_secs} s ({what})")
 }
@@ -202,10 +211,22 @@ mod tests {
             set_result_text(30, 9, 28.0),
             "nastavené: 30 s → 9 s (pod oneskorením: do minúty preskočí bližšie k živému)"
         );
-        assert!(
-            set_result_text(9, 28, 28.0).contains("pod oneskorením"),
-            "equal is not above"
+        // 25 s against a 28 s lag: 3 s below, less than the 3-chunk skip
+        // threshold, so the producer never skips (review of #437).
+        assert_eq!(
+            set_result_text(9, 25, 28.0),
+            "nastavené: 9 s → 25 s (blízko oneskorenia: nič sa nepreskočí, oneskorenie ostane)"
         );
+        assert!(
+            set_result_text(9, 28, 28.0).contains("blízko oneskorenia"),
+            "equal is not above, and no skip"
+        );
+        assert!(
+            set_result_text(9, 22, 28.0).contains("pod oneskorením"),
+            "exactly the threshold below skips"
+        );
+        assert!(set_result_text(9, 23, 28.0).contains("blízko oneskorenia"));
+        assert_eq!(FAST_JUMP_MIN_SECS, 6.0);
     }
 
     #[test]
