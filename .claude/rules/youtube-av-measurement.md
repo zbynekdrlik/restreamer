@@ -24,10 +24,25 @@ measurement.
   (`av_gate.daily_quota_budget`, default 4000, ~400 per session) and `429 project_quota`
   when the project bucket shared with the health polling has < 400 left; `409
   {error:"cleanup_pending", sessions}` while an earlier teardown is being retried; `502
-  {session_id, state:"failed", reason}` when a start step failed (already torn down);
+  {session_id, state:"failed", reason}` when a step BEFORE the event start failed
+  (stream lookup, broadcast insert, bind, recording the event; already torn down);
   `503 not_provisioned` without a usable token or oauth file; `503 starting_up` until
   the boot reconcile ran. The start runs in its own task, so a client that drops the
   POST does not abort it: the session runs on (and is reaped); the 409 names its id.
+- **What the POST waits for (#439):** admission, the stream lookup, the broadcast insert +
+  bind, and the event recorded on the row, i.e. a few YouTube calls. It does NOT wait for
+  the event start: the dashboard `start_stream` wipes the event's S3 prefix (time grows
+  with the leftover chunks: 1161 took 27 s, past camera-box's `curl --max-time 30`) and
+  creates the VPS. The driver starts the event as its first step, with the session
+  already `starting`. A refused or failed event start therefore shows up as `failed` +
+  `reason` on the GET poll, never as a 502: the teardown has run by then (a refused
+  start clears `event_id` first, so another run's event is never stopped; a failed one
+  stops the event and waits for its servers). Clients must poll GET until `ready`.
+  The `av_gate_session_started` audit row is written only once the event start returned
+  (detail carries `event_start_ms`, the wipe + VPS-create time). A stop during the
+  event start is acted on after it returned (a working `start_stream` is never cut off
+  mid-way); the idle deadline counts from the driver start, so it also reaps a hung
+  event start (`idle timeout: the event start did not finish within N s`).
 - `GET /api/v1/av-gate/session/{id}` -> `{session_id, state, requester, title,
   broadcast_id, vod_id, reason, quota_units, cleanup_pending, timestamps{created, ready,
   stop_requested, processing, finished}}`. Poll it: `starting` -> `ready` (delivery delivering + stream

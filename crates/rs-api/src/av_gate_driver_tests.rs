@@ -29,6 +29,7 @@ pub(crate) struct FakeRig {
     pub servers: StdMutex<VecDeque<Result<usize, String>>>,
     pub panic_on_delivery: AtomicBool,
     pub panic_on_start: AtomicBool,
+    pub panic_on_resolve: AtomicBool,
     /// What `event_active` answers.
     pub active: AtomicBool,
     /// When set, `server_count` panics once (then clears itself).
@@ -56,6 +57,7 @@ impl Default for FakeRig {
             servers: StdMutex::new(VecDeque::from([Ok(0)])),
             panic_on_delivery: AtomicBool::new(false),
             panic_on_start: AtomicBool::new(false),
+            panic_on_resolve: AtomicBool::new(false),
             active: AtomicBool::new(false),
             panic_on_servers: AtomicBool::new(false),
             stop_deactivates: AtomicBool::new(false),
@@ -94,6 +96,10 @@ impl AvGateRig for FakeRig {
         if let Some(gate) = gate {
             gate.notified().await;
         }
+        assert!(
+            !self.panic_on_resolve.load(Ordering::SeqCst),
+            "scripted resolve panic"
+        );
         self.resolve.lock().unwrap().clone()
     }
     async fn start_event(&self, event_id: i64) -> Result<(), StartEventError> {

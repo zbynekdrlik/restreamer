@@ -98,18 +98,96 @@ async fn a_failed_bind_leaves_the_unstarted_broadcast_alone() {
     assert_eq!(h.rig.calls(), vec!["resolve:E2E-Test"]);
 }
 
+// ---- the event start runs in the driver (#439) --------------------------------
+
+/// Created (201) now; the event start and its failure happen in the driver.
+async fn created_then_failed(h: &Harness, id: &str) -> AvGateSessionRow {
+    let outcome = h.create(id).await;
+    assert!(
+        matches!(&outcome, CreateOutcome::Created { session_id, .. } if session_id == id),
+        "{outcome:?}"
+    );
+    let row = h.wait_state(id, SessionState::Failed).await;
+    assert!(row.finished_at.is_some());
+    slot_freed(h).await;
+    row
+}
+
+/// The slot is released right after the `failed` row is written.
+async fn slot_freed(h: &Harness) {
+    let free = async {
+        while h.ctx.registry.holder().is_some() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), free)
+        .await
+        .expect("the slot must be free");
+}
+
+#[tokio::test]
+async fn the_create_answers_before_the_event_start_finishes() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let h = Harness::with(rig, timings()).await;
+    // The event start (S3 wipe + VPS create) is held: the create must not
+    // wait for it (camera-box's client gives up after 30 s).
+    let outcome = tokio::time::timeout(Duration::from_secs(5), h.create("s1"))
+        .await
+        .expect("the create waited for the event start");
+    assert_eq!(
+        outcome,
+        CreateOutcome::Created {
+            session_id: "s1".to_string(),
+            broadcast_id: "bc-1".to_string()
+        }
+    );
+    let row = h.row("s1").await;
+    assert_eq!(row.state, "starting");
+    assert_eq!(row.event_id, Some(EVENT), "recorded before the start");
+    assert_eq!(
+        h.ctx.registry.holder().map(|h| h.session_id).as_deref(),
+        Some("s1")
+    );
+    let at_start = async {
+        while !h.rig.called(&format!("start:{EVENT}")) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), at_start)
+        .await
+        .expect("the driver starts the event");
+    assert!(
+        !h.rig.called(&format!("delivery:{EVENT}")),
+        "no readiness poll before the event started"
+    );
+    gate.notify_one();
+    h.wait_state("s1", SessionState::Ready).await;
+}
+
 #[tokio::test]
 async fn a_refused_event_start_is_not_torn_down() {
     let rig = FakeRig::default();
     *rig.start.lock().unwrap() = Err(StartEventError::Refused("busy".to_string()));
-    let h = Harness::with(rig, timings()).await;
-    let row = start_fails(&h, "s1").await;
+    let mut h = Harness::with(rig, timings()).await;
+    let row = created_then_failed(&h, "s1").await;
     assert_eq!(reason(&row), "busy");
     assert_eq!(row.event_id, None);
+    assert!(!row.cleanup_pending, "{row:?}");
     assert_eq!(
         h.rig.calls(),
         vec!["resolve:E2E-Test".to_string(), format!("start:{EVENT}")],
         "nothing was started, so nothing may be stopped"
+    );
+    assert!(
+        h.yt_state.transitions().is_empty(),
+        "a never-live broadcast is not completed"
+    );
+    assert_eq!(
+        h.actions(),
+        vec![Action::AvGateSessionFailed],
+        "`started` means the event runs: a refused start never wrote it"
     );
 }
 
@@ -118,12 +196,100 @@ async fn a_failed_event_start_is_torn_down() {
     let rig = FakeRig::default();
     *rig.start.lock().unwrap() = Err(StartEventError::Failed("vps".to_string()));
     let mut h = Harness::with(rig, timings()).await;
-    let row = start_fails(&h, "s1").await;
+    let row = created_then_failed(&h, "s1").await;
     assert_eq!(reason(&row), "vps");
     assert_eq!(row.event_id, Some(EVENT));
+    assert!(row.event_stopped && row.event_done, "{row:?}");
+    assert!(!row.cleanup_pending, "{row:?}");
     assert!(h.rig.called(&format!("stop:{EVENT}")));
     assert!(h.rig.called(&format!("servers:{EVENT}")));
-    assert_eq!(h.actions(), vec![Action::AvGateSessionFailed]);
+    assert!(
+        !h.rig.called(&format!("delivery:{EVENT}")),
+        "a failed start is never polled for readiness"
+    );
+    assert!(
+        h.yt_state.transitions().is_empty(),
+        "a never-live broadcast is not completed"
+    );
+    assert_eq!(
+        h.actions(),
+        vec![Action::AvGateSessionFailed],
+        "`started` means the event runs: a failed start never wrote it"
+    );
+}
+
+#[tokio::test]
+async fn the_started_audit_row_follows_the_event_start() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut h = Harness::with(rig, timings()).await;
+    assert!(matches!(
+        h.create("s1").await,
+        CreateOutcome::Created { .. }
+    ));
+    assert!(h.actions().is_empty(), "nothing is started yet");
+    gate.notify_one();
+    h.wait_state("s1", SessionState::Ready).await;
+    let rows = h.audit_rows();
+    let (action, detail) = &rows[0];
+    assert_eq!(*action, Action::AvGateSessionStarted, "{rows:?}");
+    assert_eq!(detail["event_id"], EVENT);
+    assert_eq!(detail["broadcast_id"], "bc-1");
+    assert_eq!(detail["stream_id"], "st-e2e");
+    assert_eq!(detail["requester"], "camera-box");
+    assert!(detail["event_start_ms"].is_u64(), "{detail}");
+}
+
+#[tokio::test]
+async fn a_stop_during_the_event_start_fails_and_tears_down() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let h = Harness::with(rig, timings()).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), h.create("s1"))
+        .await
+        .expect("the create waited for the event start");
+    assert!(matches!(outcome, CreateOutcome::Created { .. }));
+    assert!(h.ctx.registry.request_stop("s1"));
+    gate.notify_one();
+    let row = h.wait_state("s1", SessionState::Failed).await;
+    assert_eq!(reason(&row), "stopped before the session was ready");
+    assert!(h.rig.called(&format!("stop:{EVENT}")));
+    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    assert!(
+        !h.rig.called(&format!("delivery:{EVENT}")),
+        "a stopped session is never polled for readiness"
+    );
+    assert!(row.event_done && !row.cleanup_pending, "{row:?}");
+    slot_freed(&h).await;
+}
+
+#[tokio::test]
+async fn a_hung_event_start_is_reaped_at_the_idle_deadline() {
+    let rig = FakeRig::default();
+    // Never notified: `start_stream` hangs.
+    *rig.start_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+    let mut t = timings();
+    t.idle_timeout = Duration::from_millis(100);
+    let mut h = Harness::with(rig, t).await;
+    assert!(matches!(
+        h.create("s1").await,
+        CreateOutcome::Created { .. }
+    ));
+    let row = h.wait_state("s1", SessionState::Failed).await;
+    assert_eq!(
+        reason(&row),
+        "idle timeout: the event start did not finish within 0 s"
+    );
+    assert_eq!(row.event_id, Some(EVENT), "a hung start may have run");
+    assert!(h.rig.called(&format!("stop:{EVENT}")));
+    assert!(row.event_done && !row.cleanup_pending, "{row:?}");
+    slot_freed(&h).await;
+    assert_eq!(
+        h.actions(),
+        vec![Action::AvGateSessionReaped, Action::AvGateSessionFailed]
+    );
 }
 
 // ---- the mutex and the quota guard -------------------------------------------
@@ -244,15 +410,40 @@ async fn a_start_that_panics_is_reaped() {
     .await
     .unwrap();
     assert!(
+        matches!(&outcome, CreateOutcome::Created { .. }),
+        "the event start runs in the driver: {outcome:?}"
+    );
+    let row = h.wait_state("s1", SessionState::Failed).await;
+    assert_eq!(reason(&row), "the session driver died");
+    assert_eq!(row.event_id, Some(EVENT), "recorded before the start");
+    assert!(h.rig.called(&format!("stop:{EVENT}")));
+    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    slot_freed(&h).await;
+}
+
+#[tokio::test]
+async fn a_create_that_panics_before_the_event_start_is_reaped() {
+    let rig = FakeRig::default();
+    rig.panic_on_resolve.store(true, Ordering::SeqCst);
+    let h = Harness::with(rig, timings()).await;
+    let outcome = spawn_create(
+        Arc::clone(&h.ctx),
+        h.yt(),
+        "s1".to_string(),
+        "camera-box".to_string(),
+        "t".to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
         matches!(&outcome, CreateOutcome::Internal(e) if e.contains("start died")),
         "{outcome:?}"
     );
     let row = h.row("s1").await;
     assert_eq!(row.state, "failed");
     assert_eq!(reason(&row), "the session driver died");
-    assert_eq!(row.event_id, Some(EVENT), "recorded before the start");
-    assert!(h.rig.called(&format!("stop:{EVENT}")));
-    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    assert_eq!(row.event_id, None);
+    assert_eq!(h.rig.calls(), vec!["resolve:E2E-Test"]);
     assert_eq!(h.ctx.registry.holder(), None);
 }
 

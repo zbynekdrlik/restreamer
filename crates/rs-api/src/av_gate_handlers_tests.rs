@@ -513,3 +513,46 @@ async fn a_client_that_disconnects_mid_create_does_not_abort_the_start() {
         .unwrap();
     wait_state(&a.state, &id, "ready").await;
 }
+
+#[tokio::test]
+async fn the_post_answers_201_while_the_event_start_is_still_running() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let a = api_with(rig, timings(), "enforce").await;
+    // The event start (S3 prefix wipe + VPS create) is held: the POST must
+    // answer without it (camera-box's client gives up after 30 s, #439).
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(&a.state, authed("POST", "/api/v1/av-gate/session", CREATE)),
+    )
+    .await
+    .expect("the POST waited for the event start");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["broadcast_id"], "bc-1");
+    let id = body["session_id"].as_str().unwrap().to_string();
+    let (status, row) = send(
+        &a.state,
+        authed("GET", &format!("/api/v1/av-gate/session/{id}"), ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["state"], "starting");
+    gate.notify_one();
+    wait_state(&a.state, &id, "ready").await;
+}
+
+#[tokio::test]
+async fn a_failed_event_start_reads_failed_on_poll() {
+    let rig = FakeRig::default();
+    *rig.start.lock().unwrap() = Err(crate::av_gate::StartEventError::Failed(
+        "vps create failed".to_string(),
+    ));
+    let a = api_with(rig, timings(), "enforce").await;
+    let (status, body) = send(&a.state, authed("POST", "/api/v1/av-gate/session", CREATE)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["session_id"].as_str().unwrap().to_string();
+    let row = wait_state(&a.state, &id, "failed").await;
+    assert_eq!(row["reason"], "vps create failed");
+    assert_eq!(row["cleanup_pending"], false);
+}

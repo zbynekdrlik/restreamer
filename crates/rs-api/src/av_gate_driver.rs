@@ -190,9 +190,13 @@ impl Session {
         self.persist().await;
     }
 
-    /// Stream lookup, broadcast insert + bind, event start. Returns the
-    /// event's drain time. Every resource is recorded on the row as soon as it
-    /// exists, so a teardown after a failure releases exactly what was taken.
+    /// Stream lookup, broadcast insert + bind, and the event recorded on the
+    /// row. Returns the event's drain time. Every resource is recorded on the
+    /// row as soon as it exists, so a teardown after a failure releases
+    /// exactly what was taken. The event itself is started by the driver
+    /// ([`Self::start_event`]): `start_stream` wipes the event's S3 prefix,
+    /// which takes as long as the leftover chunks need (27 s for 1161), and
+    /// the POST must not wait for that (#439).
     async fn start_leg(&mut self) -> Result<Duration, String> {
         let yt = Arc::clone(self.yt.as_ref().ok_or("no YouTube manage client")?);
         let title = self.ctx.stream_title.clone();
@@ -225,15 +229,58 @@ impl Session {
             self.row.event_id = None;
             return Err("could not record the event before starting it".to_string());
         }
-        match self.ctx.rig.start_event(event.id).await {
-            Ok(()) => Ok(event.drain),
+        Ok(event.drain)
+    }
+
+    /// The driver's first step: start the recorded event (the dashboard
+    /// `start_stream`: S3 prefix wipe + VPS create). A refusal means it never
+    /// became ours (another event is active), so the row forgets it and the
+    /// teardown will not stop someone else's event; any other failure leaves
+    /// it recorded, so the teardown stops it and waits for its servers.
+    /// The `started` audit row is written only once the event runs, with the
+    /// time the start took (`event_start_ms`).
+    async fn start_event(&mut self) -> Result<(), String> {
+        let event_id = self.row.event_id.ok_or("session has no event")?;
+        info!(session = %self.row.id, "av-gate: starting event {event_id}");
+        let begun = std::time::Instant::now();
+        let result = self.ctx.rig.start_event(event_id).await;
+        let elapsed_ms = begun.elapsed().as_millis() as u64;
+        match result {
+            Ok(()) => {
+                info!(session = %self.row.id, elapsed_ms, "av-gate: event {event_id} started");
+                self.audit(
+                    Severity::Info,
+                    Action::AvGateSessionStarted,
+                    json!({
+                        "requester": self.row.requester,
+                        "broadcast_id": self.row.broadcast_id,
+                        "stream_id": self.row.stream_id,
+                        "event_id": event_id,
+                        "event_start_ms": elapsed_ms,
+                    }),
+                );
+                Ok(())
+            }
             Err(StartEventError::Refused(r)) => {
+                warn!(session = %self.row.id, elapsed_ms, "av-gate: event {event_id} start refused: {r}");
                 self.row.event_id = None;
                 self.persist().await;
                 Err(r)
             }
-            Err(StartEventError::Failed(r)) => Err(r),
+            Err(StartEventError::Failed(r)) => {
+                warn!(session = %self.row.id, elapsed_ms, "av-gate: event {event_id} start failed: {r}");
+                Err(r)
+            }
         }
+    }
+
+    /// The idle reaper: no stop came (or the event start hung) before the
+    /// deadline.
+    async fn idle_fail(&mut self, what: &str) {
+        self.reaped("idle_timeout");
+        let secs = self.ctx.timings.idle_timeout.as_secs();
+        self.teardown_and_fail(format!("idle timeout: {what} within {secs} s"))
+            .await;
     }
 
     /// One readiness poll while `starting`. `Ok(true)` = ready. The life cycle
@@ -309,9 +356,12 @@ impl Session {
     }
 
     /// Wait in `starting` (polling readiness) and then in `ready`, until a
-    /// stop, the idle deadline or a failure.
-    async fn wait_for_stop(&mut self, stop_rx: &mut watch::Receiver<bool>) -> Wake {
-        let deadline = tokio::time::Instant::now() + self.ctx.timings.idle_timeout;
+    /// stop, the idle `deadline` or a failure.
+    async fn wait_for_stop(
+        &mut self,
+        stop_rx: &mut watch::Receiver<bool>,
+        deadline: tokio::time::Instant,
+    ) -> Wake {
         let (mut errors, mut live_failures) = (0, 0);
         loop {
             let ready = self.row.state == SessionState::Ready.as_str();
@@ -625,16 +675,26 @@ impl Session {
         self.await_vod().await;
     }
 
-    /// The driver: from `starting` to `done`/`failed`.
+    /// The driver: from `starting` (the event start first) to `done`/`failed`.
+    /// The idle deadline counts from here, so it also bounds a hung event
+    /// start. A stop that arrives during the start is acted on once the start
+    /// returned: cutting a working `start_stream` off mid-way would leave its
+    /// VPS create half done. Only the idle deadline cuts a start off, when it
+    /// has hung for the whole idle timeout.
     async fn drive(mut self, mut stop_rx: watch::Receiver<bool>, drain: Duration) {
-        match self.wait_for_stop(&mut stop_rx).await {
+        let deadline = tokio::time::Instant::now() + self.ctx.timings.idle_timeout;
+        let started = tokio::select! {
+            result = self.start_event() => Some(result),
+            _ = tokio::time::sleep_until(deadline) => None,
+        };
+        match started {
+            Some(Ok(())) => {}
+            Some(Err(reason)) => return self.teardown_and_fail(reason).await,
+            None => return self.idle_fail("the event start did not finish").await,
+        }
+        match self.wait_for_stop(&mut stop_rx, deadline).await {
             Wake::Stop => self.stop_flow(drain).await,
-            Wake::Idle => {
-                self.reaped("idle_timeout");
-                let secs = self.ctx.timings.idle_timeout.as_secs();
-                self.teardown_and_fail(format!("idle timeout: no stop within {secs} s"))
-                    .await;
-            }
+            Wake::Idle => self.idle_fail("no stop").await,
             Wake::Failed(reason) => self.teardown_and_fail(reason).await,
         }
     }
