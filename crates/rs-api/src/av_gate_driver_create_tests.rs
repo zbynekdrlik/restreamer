@@ -219,6 +219,26 @@ async fn a_failed_event_start_is_torn_down() {
 }
 
 #[tokio::test]
+async fn a_start_that_failed_before_the_activation_leaves_the_event_alone() {
+    // Review of #439: another run may take the inactive event before the
+    // teardown, so a failed start that never activated it must not stop it.
+    let rig = FakeRig::default();
+    *rig.start.lock().unwrap() = Err(StartEventError::Failed("db".to_string()));
+    rig.failed_start_activates.store(false, Ordering::SeqCst);
+    let mut h = Harness::with(rig, timings()).await;
+    let row = created_then_failed(&h, "s1").await;
+    assert_eq!(reason(&row), "db");
+    assert_eq!(row.event_id, None, "nothing of ours runs on the event");
+    assert!(!row.cleanup_pending, "{row:?}");
+    assert!(
+        !h.rig.called(&format!("stop:{EVENT}")),
+        "{:?}",
+        h.rig.calls()
+    );
+    assert_eq!(h.actions(), vec![Action::AvGateSessionFailed]);
+}
+
+#[tokio::test]
 async fn the_started_audit_row_follows_the_event_start() {
     let gate = Arc::new(tokio::sync::Notify::new());
     let rig = FakeRig::default();

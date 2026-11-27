@@ -41,6 +41,9 @@ pub(crate) struct FakeRig {
     pub resolve_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
     /// When set, `start_event` waits for a notification first.
     pub start_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+    /// A `Failed` start leaves the event active (the real `start_stream`
+    /// failed after its activation); cleared = it failed before it.
+    pub failed_start_activates: AtomicBool,
 }
 
 impl Default for FakeRig {
@@ -63,6 +66,7 @@ impl Default for FakeRig {
             stop_deactivates: AtomicBool::new(false),
             resolve_gate: StdMutex::new(None),
             start_gate: StdMutex::new(None),
+            failed_start_activates: AtomicBool::new(true),
         }
     }
 }
@@ -113,8 +117,14 @@ impl AvGateRig for FakeRig {
             "scripted start panic"
         );
         let result = self.start.lock().unwrap().clone();
-        // Like `start_stream`: anything but a refusal leaves the event active.
-        if !matches!(result, Err(StartEventError::Refused(_))) {
+        // Like `start_stream`: anything but a refusal leaves the event active,
+        // unless a scripted failure came before the activation.
+        let activates = match &result {
+            Ok(()) => true,
+            Err(StartEventError::Refused(_)) => false,
+            Err(StartEventError::Failed(_)) => self.failed_start_activates.load(Ordering::SeqCst),
+        };
+        if activates {
             self.active.store(true, Ordering::SeqCst);
         }
         result
