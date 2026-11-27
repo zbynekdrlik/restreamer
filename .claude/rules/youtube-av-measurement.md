@@ -40,8 +40,9 @@ measurement.
   stops the event and waits for its servers). Clients must poll GET until `ready`.
   The `av_gate_session_started` audit row is written only once the event start returned
   (detail carries `event_start_ms`, the wipe + VPS-create time). A stop during the
-  event start is acted on after it returned (a working `start_stream` is never cut off
-  mid-way); the idle deadline counts from the driver start, so it also reaps a hung
+  event start is acted on after it returned (a stop never cuts `start_stream` off
+  mid-way); a start that fails before its activation leaves the event alone (another run
+  may take it); the idle deadline counts from the driver start, so it also reaps a hung
   event start (`idle timeout: the event start did not finish within N s`).
 - `GET /api/v1/av-gate/session/{id}` -> `{session_id, state, requester, title,
   broadcast_id, vod_id, reason, quota_units, cleanup_pending, timestamps{created, ready,

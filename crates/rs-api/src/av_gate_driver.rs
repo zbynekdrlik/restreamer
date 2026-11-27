@@ -269,6 +269,15 @@ impl Session {
             }
             Err(StartEventError::Failed(r)) => {
                 warn!(session = %self.row.id, elapsed_ms, "av-gate: event {event_id} start failed: {r}");
+                // `start_stream` can fail before its activation (a DB read):
+                // then nothing of ours runs on the event, and another run may
+                // take it before the teardown, so the teardown must not stop
+                // it. Active (or unknown) = our half-done start: keep it.
+                if matches!(self.ctx.rig.event_active(event_id).await, Ok(false)) {
+                    info!(session = %self.row.id, "av-gate: event {event_id} never activated; leaving it");
+                    self.row.event_id = None;
+                    self.persist().await;
+                }
                 Err(r)
             }
         }
@@ -678,12 +687,15 @@ impl Session {
     /// The driver: from `starting` (the event start first) to `done`/`failed`.
     /// The idle deadline counts from here, so it also bounds a hung event
     /// start. A stop that arrives during the start is acted on once the start
-    /// returned: cutting a working `start_stream` off mid-way would leave its
-    /// VPS create half done. Only the idle deadline cuts a start off, when it
-    /// has hung for the whole idle timeout.
+    /// returned: a stop never cuts `start_stream` off mid-way, which would
+    /// leave its VPS create half done. Only the idle deadline cuts a start
+    /// off, when it ran for the whole idle timeout (the session's whole life
+    /// without a stop). `biased`: a start that finished in the same poll as
+    /// the deadline counts as started.
     async fn drive(mut self, mut stop_rx: watch::Receiver<bool>, drain: Duration) {
         let deadline = tokio::time::Instant::now() + self.ctx.timings.idle_timeout;
         let started = tokio::select! {
+            biased;
             result = self.start_event() => Some(result),
             _ = tokio::time::sleep_until(deadline) => None,
         };
