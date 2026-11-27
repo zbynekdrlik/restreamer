@@ -50,7 +50,10 @@ pub enum CreateOutcome {
     ProjectQuotaLow {
         remaining: u32,
     },
-    /// The start failed; the teardown already ran and the session is `failed`.
+    /// A step before the event start failed (stream lookup, insert, bind, the
+    /// event record); the teardown already ran and the session is `failed`.
+    /// An event-start failure happens later, in the driver, and shows as a
+    /// `failed` session on poll (#439).
     StartFailed {
         session_id: String,
         reason: String,
@@ -141,9 +144,11 @@ pub(crate) async fn reap_dead_driver(
         .await;
 }
 
-/// The admission checks and the start. Callers use [`spawn_create`]. The
-/// slot is claimed FIRST, so a concurrent teardown that is about to leave a
-/// pending cleanup has already written it when the check below reads.
+/// The admission checks and the start up to the event start (which the
+/// driver does, so `Created` never waits for the S3 wipe + VPS create, #439).
+/// Callers use [`spawn_create`]. The slot is claimed FIRST, so a concurrent
+/// teardown that is about to leave a pending cleanup has already written it
+/// when the check below reads.
 pub(crate) async fn create_session(
     ctx: Arc<SessionCtx>,
     yt: Arc<ManageClient>,

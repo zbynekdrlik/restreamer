@@ -190,9 +190,13 @@ impl Session {
         self.persist().await;
     }
 
-    /// Stream lookup, broadcast insert + bind, event start. Returns the
-    /// event's drain time. Every resource is recorded on the row as soon as it
-    /// exists, so a teardown after a failure releases exactly what was taken.
+    /// Stream lookup, broadcast insert + bind, and the event recorded on the
+    /// row. Returns the event's drain time. Every resource is recorded on the
+    /// row as soon as it exists, so a teardown after a failure releases
+    /// exactly what was taken. The event itself is started by the driver
+    /// ([`Self::start_event`]): `start_stream` wipes the event's S3 prefix,
+    /// which takes as long as the leftover chunks need (27 s for 1161), and
+    /// the POST must not wait for that (#439).
     async fn start_leg(&mut self) -> Result<Duration, String> {
         let yt = Arc::clone(self.yt.as_ref().ok_or("no YouTube manage client")?);
         let title = self.ctx.stream_title.clone();
@@ -225,8 +229,19 @@ impl Session {
             self.row.event_id = None;
             return Err("could not record the event before starting it".to_string());
         }
-        match self.ctx.rig.start_event(event.id).await {
-            Ok(()) => Ok(event.drain),
+        Ok(event.drain)
+    }
+
+    /// The driver's first step: start the recorded event (the dashboard
+    /// `start_stream`: S3 prefix wipe + VPS create). A refusal means it never
+    /// became ours (another event is active), so the row forgets it and the
+    /// teardown will not stop someone else's event; any other failure leaves
+    /// it recorded, so the teardown stops it and waits for its servers.
+    async fn start_event(&mut self) -> Result<(), String> {
+        let event_id = self.row.event_id.ok_or("session has no event")?;
+        info!(session = %self.row.id, "av-gate: starting event {event_id}");
+        match self.ctx.rig.start_event(event_id).await {
+            Ok(()) => Ok(()),
             Err(StartEventError::Refused(r)) => {
                 self.row.event_id = None;
                 self.persist().await;
@@ -625,8 +640,11 @@ impl Session {
         self.await_vod().await;
     }
 
-    /// The driver: from `starting` to `done`/`failed`.
+    /// The driver: from `starting` (the event start first) to `done`/`failed`.
     async fn drive(mut self, mut stop_rx: watch::Receiver<bool>, drain: Duration) {
+        if let Err(reason) = self.start_event().await {
+            return self.teardown_and_fail(reason).await;
+        }
         match self.wait_for_stop(&mut stop_rx).await {
             Wake::Stop => self.stop_flow(drain).await,
             Wake::Idle => {
