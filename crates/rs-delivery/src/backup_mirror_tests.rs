@@ -13,6 +13,8 @@ enum Event {
     Push(Vec<u8>),
     Close,
     Finish,
+    /// #437: `begin_new_mapping` before the next push.
+    NewMapping,
 }
 
 type Log = Arc<std::sync::Mutex<Vec<Event>>>;
@@ -31,6 +33,9 @@ struct Mock {
     skew: i64,
     events: Vec<rs_rtmp_push::AvInvariantEvent>,
     ack: Option<std::time::Instant>,
+    /// #437: each push first takes one permit (none = no gate), so a test
+    /// can hold the backup on a push and release it later.
+    gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Set when the mock (and so its "session") is dropped.
@@ -46,6 +51,9 @@ impl Drop for DropFlag {
 impl Pushable for Mock {
     async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
         self.log.lock().unwrap().push(Event::Push(data.to_vec()));
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.expect("gate open").forget();
+        }
         if self.hang {
             std::future::pending::<()>().await;
         }
@@ -79,6 +87,10 @@ impl Pushable for Mock {
     fn last_upstream_ack_at(&self) -> Option<std::time::Instant> {
         self.ack
     }
+
+    fn begin_new_mapping(&mut self) {
+        self.log.lock().unwrap().push(Event::NewMapping);
+    }
 }
 
 fn remote_closed() -> PushError {
@@ -91,7 +103,7 @@ fn pushes(log: &Log) -> Vec<Vec<u8>> {
         .iter()
         .filter_map(|e| match e {
             Event::Push(d) => Some(d.clone()),
-            Event::Close | Event::Finish => None,
+            Event::Close | Event::Finish | Event::NewMapping => None,
         })
         .collect()
 }
@@ -169,10 +181,13 @@ async fn a_hung_backup_never_slows_or_fails_the_primary() {
     .await
     .expect("the primary must not wait for a hung backup");
     assert_eq!(pushes(&primary_log).len(), 10);
+    // #437: a full queue drops its STALE chunks and keeps the new one. The
+    // hung backup never takes a chunk here, so chunks 0-3 fill the queue,
+    // chunk 4 drops them (4), 5-7 fill it again and chunk 8 drops 4-7 (8).
     assert_eq!(
         state.snapshot().dropped_chunks,
-        (10 - BACKUP_QUEUE_CHUNKS) as u64,
-        "a full backup queue drops whole NEW chunks and counts them"
+        8,
+        "a full backup queue drops its stale whole chunks and counts them"
     );
 
     // The hung backup push times out on its own and is reported as a
@@ -744,3 +759,6 @@ fn the_tee_reports_the_primary_s_wire_span() {
     let tee = TeePusher::new(Spanned(Some(span)), None);
     assert_eq!(Pushable::last_wire_span(&tee), Some(span));
 }
+
+#[path = "backup_mirror_gap_tests.rs"]
+mod gap_tests;

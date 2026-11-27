@@ -61,6 +61,8 @@ pub use status::StatusResponse;
 pub use status::get_status;
 
 mod control_rooms;
+mod fast_delay;
+pub use fast_delay::*;
 pub use control_rooms::*;
 mod oauth;
 pub use oauth::{link_endpoint_oauth, list_oauth_grants, oauth_suggest};
@@ -815,6 +817,12 @@ pub struct CachedDeliveryEndpoint {
     /// #295: fast endpoint's ratcheted read-delay target (seconds).
     #[serde(default)]
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: live-edge skips ahead of the VPS producer.
+    #[serde(default)]
+    pub skips_ahead: u64,
+    /// #437: YouTube backup ingest state, absent without a backup.
+    #[serde(default)]
+    pub backup_ingest: Option<crate::store::BackupIngest>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

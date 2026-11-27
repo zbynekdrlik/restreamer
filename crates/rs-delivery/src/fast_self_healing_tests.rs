@@ -200,6 +200,10 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
         observed > 1_000,
         "fast endpoint must JUMP forward toward live (skip backlog), got {observed}"
     );
+    // #437: the skip is an exact, visible state on /api/status.
+    let skips = stats.lock().await.skips_ahead;
+    assert!(skips.count >= 1, "the jump is counted: {skips:?}");
+    assert!(skips.last_at_unix_ms.is_some());
     // The core invariant, now asserted directly rather than inferred from the
     // ladder's coarseness: the read pointer trails the live edge by AT LEAST
     // the controller's floor delay (5s / 2s chunks = 2 chunks). A larger gap is
@@ -311,6 +315,56 @@ async fn trickle_starvation_grows_fast_read_delay() {
         HEAD_EDGE - observed
     );
 
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), producer).await;
+    drain.abort();
+}
+
+/// #437: the operator's live target (queued by `/api/endpoints/fast_delay`)
+/// is adopted by the running fast producer on its next fetch and then held:
+/// the producer's own persist of the controller target keeps it.
+#[tokio::test(start_paused = true)]
+async fn the_fast_producer_adopts_the_operators_target() {
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=50).map(|i| (i, vec![0u8; 1])).collect();
+    let fetcher = TimedMockFetcher::new(chunks, 50)
+        .with_chunk_duration(1000)
+        .with_latency(std::time::Duration::from_millis(5));
+    let (tx, mut rx) = mpsc::channel::<PrefetchedChunk>(PREFETCH_BUFFER_SIZE);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let buffer_state = Arc::new(BufferState::new());
+    buffer_state
+        .fast_delay_requested_secs
+        .store(40, Ordering::Relaxed);
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let producer = tokio::spawn(producer_task(
+        fetcher,
+        tx,
+        1,
+        0,
+        true,
+        stop_rx,
+        stats,
+        "fast-ep".to_string(),
+        buffer_state.clone(),
+        None,
+    ));
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        buffer_state
+            .fast_delay_requested_secs
+            .load(Ordering::Relaxed),
+        0,
+        "the request is consumed"
+    );
+    assert_eq!(
+        buffer_state.fast_delay_target_secs.load(Ordering::Relaxed),
+        40,
+        "the producer holds the operator's target, not the 5 s floor"
+    );
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), producer).await;
     drain.abort();

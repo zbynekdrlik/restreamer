@@ -109,15 +109,44 @@ impl EndpointHandle {
     /// producer fetch. Surfaced on the dashboard so a HELD ratcheted buffer
     /// renders healthy relative to its own target instead of tripping a stale
     /// absolute 8s ceiling (#295). 0 = unset -> `None`.
+    ///
+    /// #437: an operator target the producer has not adopted yet wins, so it
+    /// shows at once, even while the producer (or an outage) still holds the
+    /// old one.
     pub fn fast_delay_target_secs(&self) -> Option<u64> {
-        match self
-            .buffer_state
-            .fast_delay_target_secs
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0 => None,
+        use std::sync::atomic::Ordering::Relaxed;
+        let pending = self.buffer_state.fast_delay_requested_secs.load(Relaxed);
+        match pending {
+            0 => match self.buffer_state.fast_delay_target_secs.load(Relaxed) {
+                0 => None,
+                v => Some(v),
+            },
             v => Some(v),
         }
+    }
+
+    /// #437: the operator sets this fast endpoint's read-delay target live.
+    /// Clamped to `[FAST_DELAY_FLOOR_SECS, FAST_DELAY_CEILING_SECS]`, shown
+    /// at once on `/api/status` (a pending request wins there), and adopted
+    /// by the producer on its next fetch (a respawned one too). Returns `(from,
+    /// to)` for the audit row, or `None` for a non-fast endpoint (it has no
+    /// read-delay target).
+    pub fn request_fast_delay(&self, secs: u64) -> Option<(u64, u64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.cfg.is_fast {
+            return None;
+        }
+        let to = secs.clamp(
+            crate::fast_delay::FAST_DELAY_FLOOR_SECS,
+            crate::fast_delay::FAST_DELAY_CEILING_SECS,
+        );
+        let from = self
+            .fast_delay_target_secs()
+            .unwrap_or(crate::fast_delay::FAST_DELAY_FLOOR_SECS);
+        self.buffer_state
+            .fast_delay_requested_secs
+            .store(to, Relaxed);
+        Some((from, to))
     }
 
     pub fn start_chunk_id(&self) -> i64 {
@@ -205,6 +234,52 @@ mod tests {
         assert!(
             !h.producer_active(),
             "accessor must reflect the shared rescue-gate flag (#284)"
+        );
+    }
+
+    fn fast_stub() -> EndpointHandle {
+        let mut cfg = EndpointHandle::stub_for_test(1).cfg;
+        cfg.is_fast = true;
+        EndpointHandle::stub_with_config_for_test(cfg, 1)
+    }
+
+    /// #437: the operator's live target is clamped, published at once and
+    /// queued for the producer; a non-fast endpoint has none.
+    #[tokio::test]
+    async fn the_operator_target_is_clamped_published_and_queued() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = fast_stub();
+        assert_eq!(
+            h.request_fast_delay(30),
+            Some((5, 30)),
+            "unset reads as the floor"
+        );
+        assert_eq!(h.fast_delay_target_secs(), Some(30));
+        assert_eq!(h.buffer_state.fast_delay_requested_secs.load(Relaxed), 30);
+        assert_eq!(
+            h.request_fast_delay(1),
+            Some((30, 5)),
+            "clamped to the floor"
+        );
+        assert_eq!(
+            h.request_fast_delay(500),
+            Some((5, 120)),
+            "clamped to the ceiling"
+        );
+        assert_eq!(h.buffer_state.fast_delay_requested_secs.load(Relaxed), 120);
+        // The producer still publishes its old 9 s: the pending 120 wins.
+        h.buffer_state.fast_delay_target_secs.store(9, Relaxed);
+        assert_eq!(h.fast_delay_target_secs(), Some(120));
+        // Adopted (request consumed): the published target shows.
+        h.buffer_state.fast_delay_requested_secs.store(0, Relaxed);
+        assert_eq!(h.fast_delay_target_secs(), Some(9));
+
+        let normal = EndpointHandle::stub_for_test(1);
+        assert_eq!(normal.request_fast_delay(30), None);
+        assert_eq!(normal.fast_delay_target_secs(), None, "untouched");
+        assert_eq!(
+            normal.buffer_state.fast_delay_requested_secs.load(Relaxed),
+            0
         );
     }
 }

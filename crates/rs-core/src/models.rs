@@ -379,6 +379,23 @@ pub struct FacebookHealth {
 // paths keep resolving.
 pub use crate::endpoint_lifecycle::{EndpointLifecycle, LifecycleInput};
 
+/// #437: what the dashboard shows about an endpoint's YouTube backup ingest
+/// (mapped from the VPS `/api/status` `backup_ingest`). The dashboard alone
+/// decides "OK / zaostáva" from it (`leptos-ui` `store::BackupIngest::is_behind`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupIngestMetrics {
+    pub connected: bool,
+    #[serde(default)]
+    pub chunks_pushed: u64,
+    /// Whole chunks the backup dropped because it fell behind (#437: the
+    /// stale queued ones on a full queue).
+    #[serde(default)]
+    pub dropped_chunks: u64,
+    /// The S3 chunk id of the backup's last successful push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_chunk_id: Option<i64>,
+}
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -409,6 +426,15 @@ pub struct DeliveryEndpointMetrics {
     /// for a non-fast endpoint or a VPS binary predating the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_delay_target_secs: Option<u64>,
+    /// #437: how often the VPS producer skipped content ahead to the live
+    /// edge (0 in a clean steady state; a fast endpoint after an outage
+    /// counts one). 0 for an older VPS binary.
+    #[serde(default)]
+    pub skips_ahead: u64,
+    /// #437/#368: the YouTube backup ingest mirror's state, `None` without a
+    /// backup (or an older VPS binary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_ingest: Option<BackupIngestMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]

@@ -438,6 +438,28 @@ impl RtmpPusher {
         self.skew.reset_tracks();
     }
 
+    /// #437: start a NEW shared wire mapping before the next chunk, because
+    /// it does not continue the previous one (the consumer saw a chunk-id
+    /// gap: a live-edge skip ahead, a backup catch-up, an abandoned chunk).
+    ///
+    /// A skipped ~2 s chunk is a +2 s step in the source ts, far below
+    /// `MAX_TAG_TS_JUMP_MS`, so `track_input_ts` would map it straight onto
+    /// the wire and `pace_tag` would sleep it out: ~2 s with no data, which a
+    /// Low-latency YouTube player shows as a freeze (PP live 25.11.2026).
+    /// Like a re-anchor, the base moves to one past the highest output sent
+    /// and the next tag re-pins the shared origin, so the wire continues and
+    /// the content jump is a clean cut. A new mapping is a new transform for
+    /// both guards.
+    pub fn begin_new_mapping(&mut self) {
+        self.state.begin_new_mapping();
+        self.av_guard.begin_new_transform();
+        self.skew.reset_tracks();
+        tracing::info!(
+            shared_base = self.state.base_ms,
+            "rtmp_push: chunk-id gap -- new shared wire mapping, no pacing pause (#437)"
+        );
+    }
+
     /// De-duplicate codec sequence headers across an RTMP session: `true`
     /// when this one must be skipped (#103: re-sending made the receiver
     /// reset its decoder).

@@ -139,6 +139,12 @@ struct WsDeliveryEndpoint {
     /// #295: fast endpoint's ratcheted read-delay target (seconds).
     #[serde(default)]
     fast_delay_target_secs: Option<u64>,
+    /// #437: live-edge skips ahead of the VPS producer.
+    #[serde(default)]
+    skips_ahead: u64,
+    /// #437: YouTube backup ingest state, absent without a backup.
+    #[serde(default)]
+    backup_ingest: Option<crate::store::BackupIngest>,
     #[serde(default)]
     last_error: Option<String>,
     #[serde(default)]
@@ -205,6 +211,8 @@ async fn load_initial_state(store: DashboardStore) {
                     reconnect_count: 0,
                     av_skew_ms: ep.av_skew_ms,
                     fast_delay_target_secs: ep.fast_delay_target_secs,
+                    skips_ahead: ep.skips_ahead,
+                    backup_ingest: ep.backup_ingest,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
@@ -353,6 +361,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             reconnect_count: ep.reconnect_count,
                             av_skew_ms: ep.av_skew_ms,
                             fast_delay_target_secs: ep.fast_delay_target_secs,
+                            skips_ahead: ep.skips_ahead,
+                            backup_ingest: ep.backup_ingest.clone(),
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),
