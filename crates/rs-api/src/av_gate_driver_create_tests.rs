@@ -186,7 +186,8 @@ async fn a_refused_event_start_is_not_torn_down() {
     );
     assert_eq!(
         h.actions(),
-        vec![Action::AvGateSessionStarted, Action::AvGateSessionFailed]
+        vec![Action::AvGateSessionFailed],
+        "`started` means the event runs: a refused start never wrote it"
     );
 }
 
@@ -212,8 +213,32 @@ async fn a_failed_event_start_is_torn_down() {
     );
     assert_eq!(
         h.actions(),
-        vec![Action::AvGateSessionStarted, Action::AvGateSessionFailed]
+        vec![Action::AvGateSessionFailed],
+        "`started` means the event runs: a failed start never wrote it"
     );
+}
+
+#[tokio::test]
+async fn the_started_audit_row_follows_the_event_start() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let rig = FakeRig::default();
+    *rig.start_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut h = Harness::with(rig, timings()).await;
+    assert!(matches!(
+        h.create("s1").await,
+        CreateOutcome::Created { .. }
+    ));
+    assert!(h.actions().is_empty(), "nothing is started yet");
+    gate.notify_one();
+    h.wait_state("s1", SessionState::Ready).await;
+    let rows = h.audit_rows();
+    let (action, detail) = &rows[0];
+    assert_eq!(*action, Action::AvGateSessionStarted, "{rows:?}");
+    assert_eq!(detail["event_id"], EVENT);
+    assert_eq!(detail["broadcast_id"], "bc-1");
+    assert_eq!(detail["stream_id"], "st-e2e");
+    assert_eq!(detail["requester"], "camera-box");
+    assert!(detail["event_start_ms"].is_u64(), "{detail}");
 }
 
 #[tokio::test]
@@ -231,7 +256,40 @@ async fn a_stop_during_the_event_start_fails_and_tears_down() {
     let row = h.wait_state("s1", SessionState::Failed).await;
     assert_eq!(reason(&row), "stopped before the session was ready");
     assert!(h.rig.called(&format!("stop:{EVENT}")));
-    assert!(row.event_done, "{row:?}");
+    assert!(h.rig.called(&format!("servers:{EVENT}")));
+    assert!(
+        !h.rig.called(&format!("delivery:{EVENT}")),
+        "a stopped session is never polled for readiness"
+    );
+    assert!(row.event_done && !row.cleanup_pending, "{row:?}");
+    slot_freed(&h).await;
+}
+
+#[tokio::test]
+async fn a_hung_event_start_is_reaped_at_the_idle_deadline() {
+    let rig = FakeRig::default();
+    // Never notified: `start_stream` hangs.
+    *rig.start_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+    let mut t = timings();
+    t.idle_timeout = Duration::from_millis(100);
+    let mut h = Harness::with(rig, t).await;
+    assert!(matches!(
+        h.create("s1").await,
+        CreateOutcome::Created { .. }
+    ));
+    let row = h.wait_state("s1", SessionState::Failed).await;
+    assert_eq!(
+        reason(&row),
+        "idle timeout: the event start did not finish within 0 s"
+    );
+    assert_eq!(row.event_id, Some(EVENT), "a hung start may have run");
+    assert!(h.rig.called(&format!("stop:{EVENT}")));
+    assert!(row.event_done && !row.cleanup_pending, "{row:?}");
+    slot_freed(&h).await;
+    assert_eq!(
+        h.actions(),
+        vec![Action::AvGateSessionReaped, Action::AvGateSessionFailed]
+    );
 }
 
 // ---- the mutex and the quota guard -------------------------------------------
