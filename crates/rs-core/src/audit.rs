@@ -376,7 +376,9 @@ pub enum Action {
     NoRescueVideoConfigured,
     /// #357: a YouTube A/V-gate session was created: broadcast inserted and
     /// bound, test event activated, delivery started. Info, `Source::System`.
-    /// Detail: {session_id, requester, broadcast_id, stream_id, event_id}.
+    /// Written by the session driver once the event start returned (#439:
+    /// after the POST's 201). Detail: {session_id, requester, broadcast_id,
+    /// stream_id, event_id, event_start_ms}.
     /// Every `AvGateSession*` row carries `session_id`.
     AvGateSessionStarted,
     /// #357: delivery is delivering, the YouTube stream is active and the

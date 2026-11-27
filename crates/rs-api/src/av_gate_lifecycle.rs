@@ -179,17 +179,8 @@ pub(crate) async fn create_session(
     let mut s = Session::new(ctx, Some(yt), row);
     match s.start_leg().await {
         Ok(drain) => {
-            s.persist().await;
-            s.audit(
-                Severity::Info,
-                Action::AvGateSessionStarted,
-                json!({
-                    "requester": s.row.requester,
-                    "broadcast_id": s.row.broadcast_id,
-                    "stream_id": s.row.stream_id,
-                    "event_id": s.row.event_id,
-                }),
-            );
+            // The `started` audit row follows once the driver started the
+            // event (`Session::start_event`).
             let broadcast_id = s.row.broadcast_id.clone().unwrap_or_default();
             spawn_driver(s, stop_rx, drain);
             CreateOutcome::Created {
