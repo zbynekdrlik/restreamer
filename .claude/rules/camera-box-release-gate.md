@@ -31,7 +31,11 @@ YouTube leg blocks the release. Contract: camera-box issue 1404, `measure=true` 
   Rerun the job once; two of the same failure are real.
 - **"A camera fault never blocks" holds only once a verdict exists.** A camera-box failure before
   it (a box off `origin/main`, the version-integrity gate, no `recording-verdict.exe` for its
-  commit) leaves no verdict file, which is `unknown` and blocks the release.
+  commit) leaves no verdict file, which is `unknown` and blocks the release. One such failure is
+  camera-box's venue-network preflight (`NETCFG-RULES-FAIL`, e.g. a new VLAN on the SNV switches,
+  0.29.66): the baseline lives on camera-box `main`, so a rerun fails the same way until camera-box
+  re-captures it and releases. Ask camera-box, wait for "rig ready for measurement", then rerun
+  only the failed jobs of the main run (the tag follows on green).
 - **A red verdict** keeps the evidence, because the next delivery of E2E-Test wipes the S3 prefix:
   artifact `camera-box-red-chunks` (chunks + verdict, from the gate job) and
   `camera-box-red-delivery-log` (job `camera-box-red-evidence`, on the box).
